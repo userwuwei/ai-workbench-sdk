@@ -39,23 +39,14 @@ SDK 不导入宿主包，也不按 C、C++、Java、Python、HTML 或视频等�
 ## 五步接入
 
 ```gradle
-def jitpackToken = providers.gradleProperty("authToken").orNull
-
 repositories {
     maven {
         url "https://jitpack.io"
-        credentials {
-            username = jitpackToken
-            password = ""
-        }
     }
 }
 
 implementation "com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.0.0"
 ```
-
-私有仓库消费者需在用户级 `~/.gradle/gradle.properties` 中配置
-`authToken=<JITPACK_TOKEN>`，严禁把凭证提交到项目仓库。
 
 ```java
 AIWorkbench.install(application,
