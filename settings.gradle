@@ -1,0 +1,9 @@
+pluginManagement {
+    repositories { google(); mavenCentral(); gradlePluginPortal(); maven { url "https://jitpack.io" } }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories { google(); mavenCentral(); maven { url "https://jitpack.io" } }
+}
+rootProject.name = "ai-workbench-sdk"
+include ':workbench-api', ':workbench-core', ':workbench-model-openai', ':workbench-tools-file', ':workbench-android', ':workbench-starter', ':sample-host'

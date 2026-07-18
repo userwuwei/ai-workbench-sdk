@@ -1,0 +1,9 @@
+<resources>
+    <string name="aiw_back">返回</string>
+    <string name="aiw_title">AI 工作台</string>
+    <string name="aiw_clear">清空</string>
+    <string name="aiw_disclaimer">AI 生成内容仅供参考</string>
+    <string name="aiw_input_hint">描述你希望 AI 完成的任务</string>
+    <string name="aiw_send">发送</string>
+    <string name="aiw_stop">停止</string>
+</resources>

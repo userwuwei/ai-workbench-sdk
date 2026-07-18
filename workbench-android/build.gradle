@@ -1,0 +1,34 @@
+plugins { id 'com.android.library'; id 'maven-publish' }
+android {
+    namespace 'com.cscjapp.aiworkbench.android'
+    compileSdk rootProject.ext.aiwCompileSdk
+    defaultConfig { minSdk rootProject.ext.aiwMinSdk; consumerProguardFiles 'consumer-rules.pro' }
+    buildFeatures { viewBinding true; buildConfig false }
+    resourcePrefix 'aiw_'
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    publishing { singleVariant('release') { withSourcesJar() } }
+}
+dependencies {
+    api project(':workbench-api')
+    implementation project(':workbench-core')
+    implementation project(':workbench-model-openai')
+    implementation project(':workbench-tools-file')
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.recyclerview:recyclerview:1.2.1'
+    implementation 'androidx.cardview:cardview:1.0.0'
+    implementation 'androidx.lifecycle:lifecycle-viewmodel:2.5.1'
+    implementation 'androidx.lifecycle:lifecycle-livedata:2.5.1'
+    implementation 'com.google.android.material:material:1.8.0'
+    implementation 'com.google.android.flexbox:flexbox:3.0.0'
+    implementation 'com.github.CymChad:BaseRecyclerViewAdapterHelper:2.9.30'
+    implementation 'com.github.bumptech.glide:glide:4.11.0'
+    implementation 'com.github.kongzue.DialogX:DialogX:0.0.50.beta20'
+    implementation 'com.google.code.gson:gson:2.10.1'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}
+group = rootProject.ext.aiwGroup
+version = rootProject.ext.aiwVersion
+afterEvaluate { publishing { publications { release(MavenPublication) { from components.release } } } }

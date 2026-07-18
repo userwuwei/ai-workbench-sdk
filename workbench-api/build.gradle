@@ -1,0 +1,10 @@
+plugins { id 'java-library'; id 'maven-publish' }
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+    withSourcesJar()
+}
+dependencies { testImplementation 'junit:junit:4.13.2' }
+group = rootProject.ext.aiwGroup
+version = rootProject.ext.aiwVersion
+publishing { publications { release(MavenPublication) { from components.java } } }

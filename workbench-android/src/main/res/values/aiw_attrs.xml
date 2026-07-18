@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <declare-styleable name="AiwAnimatedNumberView">
+        <attr name="aiw_animatedNumber_digitWidth" format="dimension" />
+        <attr name="aiw_animatedNumber_digitHeight" format="dimension" />
+        <attr name="aiw_animatedNumber_digitSpacing" format="dimension" />
+        <attr name="aiw_animatedNumber_textSize" format="dimension" />
+        <attr name="aiw_animatedNumber_textColor" format="color" />
+        <attr name="aiw_animatedNumber_duration" format="integer" />
+        <attr name="aiw_animatedNumber_perDigitDelay" format="integer" />
+        <attr name="aiw_animatedNumber_minDigits" format="integer" />
+        <attr name="aiw_animatedNumber_fontAssetPath" format="string" />
+    </declare-styleable>
+    <declare-styleable name="AiwWorkbenchWaitingAuraView">
+        <attr name="aiw_waitingAura_cornerRadius" format="dimension" />
+        <attr name="aiw_waitingAura_borderWidth" format="dimension" />
+        <attr name="aiw_waitingAura_borderDuration" format="integer" />
+        <attr name="aiw_waitingAura_sweepDuration" format="integer" />
+        <attr name="aiw_waitingAura_primaryColor" format="color" />
+        <attr name="aiw_waitingAura_secondaryColor" format="color" />
+        <attr name="aiw_waitingAura_sweepColor" format="color" />
+        <attr name="aiw_waitingAura_glowAlpha" format="float" />
+        <attr name="aiw_waitingAura_sweepAlpha" format="float" />
+    </declare-styleable>
+</resources>

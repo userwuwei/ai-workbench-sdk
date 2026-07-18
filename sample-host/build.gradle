@@ -1,0 +1,8 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.cscjapp.aiworkbench.sample'
+    compileSdk rootProject.ext.aiwCompileSdk
+    defaultConfig { applicationId 'com.cscjapp.aiworkbench.sample'; minSdk rootProject.ext.aiwMinSdk; targetSdk 33; versionCode 1; versionName '1.0' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+}
+dependencies { implementation project(':workbench-starter'); implementation 'androidx.appcompat:appcompat:1.6.1' }

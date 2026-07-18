@@ -1,0 +1,421 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+        xmlns:app="http://schemas.android.com/apk/res-auto"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#0B1220">
+
+        <LinearLayout
+            android:id="@+id/aiw_topBar"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent">
+
+            <ImageView
+                android:id="@+id/aiw_ivBack"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:contentDescription="返回"
+                android:padding="8dp"
+                android:src="@drawable/aiw_ic_arrow_back"
+                app:tint="#B8C5DF" />
+
+
+            <TextView
+                android:id="@+id/aiw_tvProjectName"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="6dp"
+                android:layout_weight="1"
+                android:singleLine="true"
+                android:text="ClanIDE"
+                android:textColor="#F2F6FF"
+                android:textSize="17sp"
+                android:textStyle="bold" />
+
+            <LinearLayout
+                android:id="@+id/aiw_contextUsageChip"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginEnd="8dp"
+                android:background="@drawable/aiw_bg_context_usage_chip"
+                android:gravity="center"
+                android:minWidth="72dp"
+                android:orientation="vertical"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/aiw_tvContextUsagePercent"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:includeFontPadding="false"
+                    android:text="0%"
+                    android:textColor="#DCEBFF"
+                    android:textSize="11sp"
+                    android:textStyle="bold" />
+
+                <ProgressBar
+                    android:id="@+id/aiw_pbContextUsage"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="54dp"
+                    android:layout_height="4dp"
+                    android:layout_marginTop="4dp"
+                    android:max="100"
+                    android:progress="0"
+                    android:progressDrawable="@drawable/aiw_progress_context_usage" />
+            </LinearLayout>
+
+            <ImageView
+                android:id="@+id/aiw_ivReport"
+                android:padding="10dp"
+                android:src="@drawable/aiw_ic_report"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+
+            <TextView
+                android:id="@+id/aiw_tvClearHistory"
+                android:padding="10dp"
+                android:layout_marginEnd="10dp"
+                android:textSize="16sp"
+                android:textColor="#F2F6FF"
+                android:text="清空历史"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+
+            <ImageView
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:visibility="gone"
+                app:tint="#B8C5DF" />
+        </LinearLayout>
+
+        <androidx.cardview.widget.CardView
+            app:layout_constraintTop_toBottomOf="@id/aiw_topBar"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            app:cardBackgroundColor="#151F2E"
+            app:cardCornerRadius="8dp"
+            android:id="@+id/aiw_card"
+            app:strokeColor="#2A3953"
+            app:strokeWidth="1dp"
+            android:layout_marginStart="20dp"
+            android:layout_marginTop="6dp"
+            android:layout_marginEnd="20dp"
+            android:layout_marginBottom="6dp"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+            <TextView
+                android:id="@+id/aiw_tvDisclaimer"
+                android:layout_gravity="center"
+                android:textColor="#E6C45C"
+                android:text="AI 生成内容仅供参考"
+                android:textSize="13sp"
+                android:paddingStart="12dp"
+                android:paddingTop="7dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="7dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+        </androidx.cardview.widget.CardView>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/aiw_rvPlan"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:clipToPadding="false"
+            android:nestedScrollingEnabled="false"
+            android:paddingStart="12dp"
+            android:paddingTop="8dp"
+            android:paddingEnd="12dp"
+            android:visibility="gone"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/aiw_card" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/aiw_rvWorkbench"
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:clipToPadding="false"
+            android:paddingStart="12dp"
+            android:paddingTop="2dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="10dp"
+            android:layout_marginTop="4dp"
+            app:layout_constraintBottom_toTopOf="@id/aiw_toolRunningContainer"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/aiw_rvPlan" />
+
+        <LinearLayout
+            android:id="@+id/aiw_toolRunningContainer"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingTop="2dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="10dp"
+            android:visibility="gone"
+            app:layout_constraintBottom_toTopOf="@id/aiw_bottomInput"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="#111A28"
+                app:cardCornerRadius="10dp"
+                app:cardElevation="0dp"
+                app:strokeColor="#2A3750"
+                app:strokeWidth="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingStart="12dp"
+                    android:paddingTop="10dp"
+                    android:paddingEnd="12dp"
+                    android:paddingBottom="10dp">
+
+                    <com.cscjapp.aiworkbench.android.widget.DashedCircleLoadingView
+                        android:id="@+id/aiw_toolRunningLoadingView"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_marginStart="10dp" />
+
+                    <TextView
+                        android:id="@+id/aiw_tvToolRunningInfo"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginLeft="10dp"
+                        android:ellipsize="end"
+                        android:singleLine="true"
+                        android:textColor="#DCEBFF"
+                        android:textSize="13sp" />
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/aiw_tvWorkbenchNewUpdates"
+            android:layout_width="wrap_content"
+            android:layout_height="34dp"
+            android:layout_marginEnd="18dp"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/aiw_bg_quick_chip"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:text="有新进展"
+            android:textColor="#DCEBFF"
+            android:textSize="13sp"
+            android:textStyle="bold"
+            android:visibility="gone"
+            app:layout_constraintBottom_toTopOf="@id/aiw_toolRunningContainer"
+            app:layout_constraintEnd_toEndOf="parent" />
+
+<!--        <ImageView-->
+<!--            -->
+<!--            android:onClick="@{()->activity.showModelSelectDialog()}"-->
+<!--            android:id="@+id/aiw_img_model"-->
+<!--            android:padding="10dp"-->
+<!--            android:src="@drawable/aiw_ic_model"-->
+<!--            android:background="@drawable/aiw_bg_shape_black"-->
+<!--            android:layout_margin="20dp"-->
+<!--            app:layout_constraintBottom_toTopOf="@id/aiw_bottomInput"-->
+<!--            app:layout_constraintRight_toRightOf="parent"-->
+<!--            android:layout_width="45dp"-->
+<!--            android:layout_height="45dp"/>-->
+
+        <ImageView
+            android:layout_marginEnd="20dp"
+            android:layout_margin="20dp"
+            app:layout_constraintBottom_toTopOf="@id/aiw_bottomInput"
+            app:layout_constraintRight_toRightOf="parent"
+            android:padding="10dp"
+            android:id="@+id/aiw_img_context"
+            android:background="@drawable/aiw_bg_shape_black"
+            android:src="@drawable/aiw_ic_file_edit"
+            android:contentDescription="选择上下文文件"
+            android:layout_width="45dp"
+            android:layout_height="45dp"
+            android:visibility="gone"/>
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/aiw_rv_context_files"
+            app:layout_constraintBottom_toTopOf="@id/aiw_bottomInput"
+            app:layout_constraintLeft_toLeftOf="parent"
+            app:layout_constraintRight_toRightOf="parent"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"/>
+
+        <LinearLayout
+            android:id="@+id/aiw_bottomInput"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:background="#0B1220"
+            android:orientation="vertical"
+            android:paddingStart="12dp"
+            android:paddingTop="4dp"
+            android:paddingEnd="12dp"
+            android:paddingBottom="8dp"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="@drawable/aiw_bg_input_panel"
+                android:orientation="vertical"
+                android:paddingStart="14dp"
+                android:paddingTop="10dp"
+                android:paddingEnd="10dp"
+                android:paddingBottom="8dp">
+
+                <LinearLayout
+                    android:id="@+id/aiw_layout_bottom"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <EditText
+                        android:id="@+id/aiw_etDemand"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@android:color/transparent"
+                        android:hint="发消息让 AI 帮你做任何事..."
+                        android:imeOptions="actionSend"
+                        android:inputType="textMultiLine|textCapSentences"
+                        android:maxLines="4"
+                        android:minHeight="36dp"
+                        android:textColor="#E9F1FF"
+                        android:textColorHint="#7284A6"
+                        android:textSize="15sp" />
+
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal">
+
+                    <HorizontalScrollView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:overScrollMode="never"
+                        android:scrollbars="none">
+
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/aiw_btnDeepThinking"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:background="@drawable/aiw_selector_deepthinking_bg"
+                                android:gravity="center"
+                                android:paddingStart="12dp"
+                                android:paddingEnd="12dp"
+                                android:text="R1·深度思考"
+                                android:textColor="@color/aiw_selector_deepthinking_text"
+                                android:textSize="13sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/aiw_btnContextQuick"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:layout_marginStart="8dp"
+                                android:background="@drawable/aiw_bg_quick_chip"
+                                android:gravity="center"
+                                android:paddingStart="12dp"
+                                android:paddingEnd="12dp"
+                                android:text="＋ 上下文"
+                                android:textColor="#DCEBFF"
+                                android:textSize="13sp"
+                                android:textStyle="bold" />
+
+<!--                            android:onClick="@{()->activity.quickExplainCode()}"-->
+                            <TextView
+                                android:id="@+id/aiw_btnExplainCode"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:layout_marginStart="8dp"
+                                android:background="@drawable/aiw_bg_quick_chip"
+                                android:gravity="center"
+                                android:paddingStart="12dp"
+                                android:paddingEnd="12dp"
+                                android:text="默认模型"
+                                android:textColor="#DCEBFF"
+                                android:textSize="13sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/aiw_btnAnnotateCode"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:layout_marginStart="8dp"
+                                android:background="@drawable/aiw_bg_quick_chip"
+                                android:gravity="center"
+                                android:visibility="gone"
+                                android:paddingStart="12dp"
+                                android:paddingEnd="12dp"
+                                android:text="代码加上注释"
+                                android:textColor="#DCEBFF"
+                                android:textSize="13sp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:id="@+id/aiw_btnModifyCode"
+                                android:layout_width="wrap_content"
+                                android:layout_height="30dp"
+                                android:layout_marginStart="8dp"
+                                android:background="@drawable/aiw_bg_quick_chip"
+                                android:gravity="center"
+                                android:paddingStart="12dp"
+                                android:paddingEnd="12dp"
+                                android:visibility="gone"
+                                android:text="改代码"
+                                android:textColor="#DCEBFF"
+                                android:textSize="13sp"
+                                android:textStyle="bold" />
+                        </LinearLayout>
+                    </HorizontalScrollView>
+
+                    <ImageView
+                        android:id="@+id/aiw_btnSend"
+                        android:layout_width="34dp"
+                        android:layout_height="34dp"
+                        android:layout_marginStart="10dp"
+                        android:background="@drawable/aiw_bg_send"
+                        android:gravity="center"
+                        android:padding="8dp"
+                        android:src="@drawable/aiw_ic_send"
+                        android:contentDescription="发送需求"
+                        android:textColor="#07111F"
+                        android:textSize="22sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+            </LinearLayout>
+        </LinearLayout>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>

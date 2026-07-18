@@ -1,0 +1,197 @@
+package com.cscjapp.aiworkbench.model.openai;
+
+import static org.junit.Assert.*;
+import com.cscjapp.aiworkbench.api.*;
+import com.cscjapp.aiworkbench.core.*;
+import java.util.*;
+import java.util.concurrent.*;
+import okhttp3.mockwebserver.MockResponse;
+import okhttp3.mockwebserver.MockWebServer;
+import okhttp3.mockwebserver.RecordedRequest;
+import org.junit.*;
+
+public class OpenAIModelGatewayTest {
+  private MockWebServer server;
+
+  @Before
+  public void setup() throws Exception {
+    server = new MockWebServer();
+    server.start();
+  }
+
+  @After
+  public void tearDown() throws Exception {
+    server.shutdown();
+  }
+
+  @Test
+  public void assemblesFragmentedNativeToolCall() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"create_\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n"
+                    + "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"file\",\"arguments\":\"\\\"a.html\\\"}\"}}]}}],\"finish_reason\":\"tool_calls\"}\n\n"
+                    + "data: [DONE]\n\n"));
+    CountDownLatch latch = new CountDownLatch(1);
+    List<ModelResponse> responses = new ArrayList<>();
+    List<ModelStreamDelta> deltas = new ArrayList<>();
+    new OpenAIModelGateway()
+        .stream(
+            request(),
+            new ModelStreamObserver() {
+              public void onDelta(String c, String r) {}
+
+              public void onStreamDelta(ModelStreamDelta delta) {
+                deltas.add(delta);
+              }
+
+              public void onComplete(ModelResponse r) {
+                responses.add(r);
+                latch.countDown();
+              }
+
+              public void onError(Throwable e) {
+                e.printStackTrace();
+                latch.countDown();
+              }
+            });
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertEquals(1, responses.size());
+    assertEquals(2, deltas.size());
+    assertEquals("create_", deltas.get(0).toolCalls().get(0).name());
+    assertEquals("file", deltas.get(1).toolCalls().get(0).name());
+    assertEquals("{\"path\":", deltas.get(0).toolCalls().get(0).arguments());
+    assertEquals("create_file", responses.get(0).toolCalls().get(0).name());
+    assertEquals("a.html", responses.get(0).toolCalls().get(0).arguments().getString("path", ""));
+  }
+
+  @Test
+  public void legacyOnDeltaObserverReceivesContentExactlyOnce() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+                    + "data: {\"choices\":[{\"delta\":{\"content\":\"two\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    + "data: [DONE]\n\n"));
+    CountDownLatch latch = new CountDownLatch(1);
+    List<String> chunks = new ArrayList<>();
+
+    new OpenAIModelGateway()
+        .stream(
+            request(),
+            new ModelStreamObserver() {
+              public void onDelta(String content, String reasoning) {
+                chunks.add(content);
+              }
+
+              public void onComplete(ModelResponse response) {
+                latch.countDown();
+              }
+
+              public void onError(Throwable error) {
+                latch.countDown();
+              }
+            });
+
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertEquals(Arrays.asList("one", "two"), chunks);
+  }
+
+  @Test
+  public void appliesDynamicHostHeadersWithoutLeakingTransportTypes() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    + "data: [DONE]\n\n"));
+    CountDownLatch latch = new CountDownLatch(1);
+    ModelEndpoint endpoint =
+        new ModelEndpoint(
+            server.url("/v1").toString(),
+            "secret",
+            "test",
+            0.2,
+            false,
+            false,
+            ignored -> Collections.singletonMap("X-Host-Sign", "signed"));
+    ModelRequest request =
+        new ModelRequest(
+            endpoint,
+            Arrays.asList(AgentMessage.system("s"), AgentMessage.user("u")),
+            Collections.emptyList(),
+            false);
+    new OpenAIModelGateway()
+        .stream(
+            request,
+            new ModelStreamObserver() {
+              public void onDelta(String c, String r) {}
+
+              public void onComplete(ModelResponse r) {
+                latch.countDown();
+              }
+
+              public void onError(Throwable e) {
+                latch.countDown();
+              }
+            });
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    RecordedRequest recorded = server.takeRequest(3, TimeUnit.SECONDS);
+    assertNotNull(recorded);
+    assertEquals("signed", recorded.getHeader("X-Host-Sign"));
+    assertEquals("Bearer secret", recorded.getHeader("Authorization"));
+  }
+
+  @Test
+  public void supportsOpenAiCompatibleNonStreamingJsonFallback() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "application/json")
+            .setBody(
+                "{\"choices\":[{\"message\":{\"content\":\"done\",\"tool_calls\":[{\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"create_file\",\"arguments\":{\"path\":\"src/index.html\"}}}]},\"finish_reason\":\"tool_calls\"}]}"));
+    CountDownLatch latch = new CountDownLatch(1);
+    List<ModelResponse> responses = new ArrayList<>();
+    List<ModelStreamDelta> deltas = new ArrayList<>();
+    new OpenAIModelGateway()
+        .stream(
+            request(),
+            new ModelStreamObserver() {
+              public void onDelta(String c, String r) {}
+
+              public void onStreamDelta(ModelStreamDelta delta) {
+                deltas.add(delta);
+              }
+
+              public void onComplete(ModelResponse r) {
+                responses.add(r);
+                latch.countDown();
+              }
+
+              public void onError(Throwable e) {
+                latch.countDown();
+              }
+            });
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertEquals(1, responses.size());
+    assertEquals(1, deltas.size());
+    assertEquals("done", deltas.get(0).content());
+    assertEquals("create_file", deltas.get(0).toolCalls().get(0).name());
+    assertEquals("done", responses.get(0).content());
+    assertEquals(
+        "src/index.html", responses.get(0).toolCalls().get(0).arguments().getString("path", ""));
+  }
+
+  private ModelRequest request() {
+    ModelEndpoint endpoint =
+        new ModelEndpoint(server.url("/v1").toString(), "secret", "test", 0.2, true, false);
+    ToolSpec spec =
+        new ToolSpec("create_file", "create", Collections.singletonMap("type", "object"));
+    return new ModelRequest(
+        endpoint,
+        Arrays.asList(AgentMessage.system("s"), AgentMessage.user("u")),
+        Collections.singletonList(spec),
+        false);
+  }
+}

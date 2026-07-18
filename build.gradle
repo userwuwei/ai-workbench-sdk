@@ -1,0 +1,19 @@
+plugins {
+    id 'com.android.library' version '8.0.2' apply false
+    id 'com.android.application' version '8.0.2' apply false
+}
+
+def isJitPackBuild = System.getenv('JITPACK') == 'true'
+def configuredVersion = isJitPackBuild
+        ? System.getenv('VERSION')
+        : findProperty('AIW_VERSION') ?: '1.0.0-SNAPSHOT'
+if (configuredVersion == null || configuredVersion.trim().isEmpty()) {
+    throw new GradleException('AI Workbench SDK version is missing')
+}
+
+ext {
+    aiwGroup = 'com.github.userwuwei.ai-workbench-sdk'
+    aiwVersion = configuredVersion
+    aiwCompileSdk = 33
+    aiwMinSdk = 24
+}

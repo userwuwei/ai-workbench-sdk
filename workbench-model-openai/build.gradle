@@ -1,0 +1,17 @@
+plugins { id 'java-library'; id 'maven-publish' }
+java {
+    sourceCompatibility = JavaVersion.VERSION_1_8
+    targetCompatibility = JavaVersion.VERSION_1_8
+    withSourcesJar()
+}
+dependencies {
+    api project(':workbench-api')
+    implementation project(':workbench-core')
+    implementation 'com.google.code.gson:gson:2.10.1'
+    implementation 'com.squareup.okhttp3:okhttp:3.12.13'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'com.squareup.okhttp3:mockwebserver:3.12.13'
+}
+group = rootProject.ext.aiwGroup
+version = rootProject.ext.aiwVersion
+publishing { publications { release(MavenPublication) { from components.java } } }

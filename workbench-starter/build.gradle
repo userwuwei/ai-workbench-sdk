@@ -1,0 +1,18 @@
+plugins { id 'com.android.library'; id 'maven-publish' }
+android {
+    namespace 'com.cscjapp.aiworkbench.starter'
+    compileSdk rootProject.ext.aiwCompileSdk
+    defaultConfig { minSdk rootProject.ext.aiwMinSdk; consumerProguardFiles 'consumer-rules.pro' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    publishing { singleVariant('release') { withSourcesJar() } }
+}
+dependencies {
+    api project(':workbench-api')
+    api project(':workbench-core')
+    api project(':workbench-model-openai')
+    api project(':workbench-tools-file')
+    api project(':workbench-android')
+}
+group = rootProject.ext.aiwGroup
+version = rootProject.ext.aiwVersion
+afterEvaluate { publishing { publications { release(MavenPublication) { from components.release } } } }

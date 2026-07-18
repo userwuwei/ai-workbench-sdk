@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="utf-8"?>
+<com.cscjapp.aiworkbench.android.widget.WorkbenchWaitingAuraLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_marginBottom="10dp"
+    android:clipChildren="false"
+    android:clipToPadding="false">
+
+    <androidx.cardview.widget.CardView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        app:cardBackgroundColor="#151F2E"
+        app:cardCornerRadius="10dp"
+        app:strokeColor="#2A3953"
+        app:strokeWidth="1dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="12dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageView
+                    android:id="@+id/aiw_ivSummaryStatusIcon"
+                    android:layout_width="18dp"
+                    android:layout_height="18dp"
+                    android:layout_marginEnd="8dp"
+                    android:contentDescription="@null"
+                    android:scaleType="fitCenter"
+                    android:visibility="gone" />
+
+                <TextView
+                    android:id="@+id/aiw_tvSummaryTitle"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="总结"
+                    android:textColor="#F0F6FF"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/aiw_tvSummaryMeta"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="6dp"
+                    android:text="已接收"
+                    android:textColor="#8FB7FF"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+
+                <com.cscjapp.aiworkbench.android.widget.AnimatedNumberView
+                    android:id="@+id/aiw_anvSummaryCounter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:visibility="gone"
+                    app:aiw_animatedNumber_digitHeight="18dp"
+                    app:aiw_animatedNumber_digitSpacing="1px"
+                    app:aiw_animatedNumber_digitWidth="8dp"
+                    app:aiw_animatedNumber_duration="220"
+                    app:aiw_animatedNumber_minDigits="1"
+                    app:aiw_animatedNumber_fontAssetPath="fonts/Consolas.ttf"
+                    app:aiw_animatedNumber_perDigitDelay="35"
+                    app:aiw_animatedNumber_textColor="#86EFAC"
+                    app:aiw_animatedNumber_textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/aiw_tvSummaryToggle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="8dp"
+                    android:text="展开"
+                    android:textColor="#8FB7FF"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/aiw_tvSummaryContent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:textColor="#D6E2F7"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/aiw_tvSummaryContentToggle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="展开正文"
+                android:textColor="#8FB7FF"
+                android:textSize="12sp"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/aiw_tvSummaryAction"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="#243653"
+                android:paddingStart="14dp"
+                android:paddingTop="7dp"
+                android:paddingEnd="14dp"
+                android:paddingBottom="7dp"
+                android:text="继续生成"
+                android:textColor="#DCEBFF"
+                android:textSize="13sp"
+                android:visibility="gone" />
+
+            <LinearLayout
+                android:id="@+id/aiw_llSearchReplaceDiff"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:orientation="vertical"
+                android:visibility="gone">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingBottom="6dp">
+
+                    <TextView
+                        android:id="@+id/aiw_tvSearchReplaceDiffTitle"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:textColor="#E5EEF9"
+                        android:textSize="13sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/aiw_tvSearchReplaceDiffMeta"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:textColor="#8FB7FF"
+                        android:textSize="12sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/aiw_llSearchReplaceDiffLines"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/aiw_tvSearchReplaceDiffToggle"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:text="展开变更"
+                    android:textColor="#8FB7FF"
+                    android:textSize="12sp"
+                    android:visibility="gone" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/aiw_tvSummaryDetail"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="#0F1624"
+                android:fadeScrollbars="false"
+                android:lineSpacingExtra="2dp"
+                android:maxHeight="240dp"
+                android:padding="10dp"
+                android:scrollbars="vertical"
+                android:textColor="#BFD0EE"
+                android:textSize="12sp"
+                android:visibility="gone" />
+        </LinearLayout>
+    </androidx.cardview.widget.CardView>
+
+    <com.cscjapp.aiworkbench.android.widget.WorkbenchWaitingAuraView
+        android:id="@+id/aiw_vSummaryWaitingAura"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="false"
+        android:focusable="false"
+        android:importantForAccessibility="no"
+        android:elevation="6dp"
+        android:visibility="gone"
+        app:aiw_waitingAura_borderDuration="2200"
+        app:aiw_waitingAura_borderWidth="1dp"
+        app:aiw_waitingAura_cornerRadius="10dp"
+        app:aiw_waitingAura_glowAlpha="0.46"
+        app:aiw_waitingAura_primaryColor="#74EBD5"
+        app:aiw_waitingAura_secondaryColor="#8FB7FF"
+        app:aiw_waitingAura_sweepAlpha="0.08"
+        app:aiw_waitingAura_sweepColor="#86EFAC"
+        app:aiw_waitingAura_sweepDuration="3200" />
+</com.cscjapp.aiworkbench.android.widget.WorkbenchWaitingAuraLayout>
