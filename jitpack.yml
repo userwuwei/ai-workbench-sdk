@@ -2,4 +2,4 @@ jdk:
   - openjdk17
 
 install:
-  - ./gradlew clean test :workbench-code-agent:test lint :workbench-android:assembleRelease :workbench-starter:assembleRelease :sample-host:assembleDebug publishToMavenLocal --stacktrace
+  - ./gradlew test lint :workbench-android:assembleRelease :workbench-starter:assembleRelease :sample-host:assembleDebug publishToMavenLocal --stacktrace

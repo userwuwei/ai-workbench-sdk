@@ -1,11 +1,12 @@
 # Changelog
 
-## 1.1.0
+## 1.1.1
 
 - 新增可选纯 Java `workbench-code-agent` 模块。
 - 新增语言 Profile、验证合同、工具角色与 Agent 运行生命周期。
 - 通用化计划、读取后编辑、真实验证、质量门禁和终态工具。
 - Playground 增加普通工作台与 Code Agent 双模式。
+- `1.1.0` 源码门禁通过，但 JitPack 在制品收集后发生平台超时；按不可移动 Tag 规则改发本补丁版本。
 
 ## 1.0.0-SNAPSHOT
 

@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.0'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.1'
 }
 ```
 
@@ -103,11 +103,11 @@ Code Agent 通用层提供：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.0
+  publishToMavenLocal -PAIW_VERSION=1.1.1
 
-git tag 1.1.0
+git tag 1.1.1
 git push origin main
-git push origin 1.1.0
+git push origin 1.1.1
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
