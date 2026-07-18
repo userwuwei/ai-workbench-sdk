@@ -26,7 +26,12 @@ public final class ToolPolicyDecision {
   }
 
   public static ToolPolicyDecision error(String code, String message) {
-    return new ToolPolicyDecision(Kind.ERROR, null, ToolResult.error(code, message, false));
+    return error(code, message, false);
+  }
+
+  public static ToolPolicyDecision error(String code, String message, boolean retryable) {
+    return new ToolPolicyDecision(
+        Kind.ERROR, null, ToolResult.error(code, message, retryable));
   }
 
   public Kind kind() {

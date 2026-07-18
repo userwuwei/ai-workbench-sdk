@@ -34,7 +34,12 @@ public final class ToolResult {
   }
 
   public static ToolResult error(String code, String message, boolean retryable) {
-    return new ToolResult(Status.ERROR, null, code, message, retryable);
+    return error(code, message, retryable, null);
+  }
+
+  public static ToolResult error(
+      String code, String message, boolean retryable, Map<String, ?> data) {
+    return new ToolResult(Status.ERROR, data, code, message, retryable);
   }
 
   public static ToolResult cancelled(String message) {

@@ -110,6 +110,7 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
     getWindow().setNavigationBarColor(Color.parseColor("#0B1220"));
     binding = AiwActivityWorkbenchBinding.inflate(getLayoutInflater());
     setContentView(binding.getRoot());
+    binding.aiwIvBack.setOnClickListener(ignored -> finish());
     request = readRequest(getIntent());
     try {
       sdkConfig = AIWorkbench.config();
@@ -123,7 +124,12 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
       viewModel =
           new ViewModelProvider(this, WorkbenchViewModelFactory.INSTANCE)
               .get(WorkbenchViewModel.class);
-      viewModel.initialize(definition, request, endpoint, store);
+      viewModel.initialize(
+          definition,
+          request,
+          endpoint,
+          store,
+          AIWorkbench.runtimeOptions().modelGatewayFactory().create(request, endpoint));
     } catch (Throwable error) {
       showInitializationError(error);
       return;
@@ -191,7 +197,6 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
   }
 
   private void bindInteractions() {
-    binding.aiwIvBack.setOnClickListener(ignored -> finish());
     binding.aiwTvClearHistory.setOnClickListener(ignored -> confirmClear());
     binding.aiwIvReport.setOnClickListener(ignored -> performHostAction("report"));
     binding.aiwBtnExplainCode.setOnClickListener(ignored -> performHostAction("select_model"));

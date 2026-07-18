@@ -2,77 +2,51 @@ package com.cscjapp.aiworkbench.sample;
 
 import android.app.Application;
 import com.cscjapp.aiworkbench.android.AIWorkbench;
-import com.cscjapp.aiworkbench.api.*;
-import java.util.*;
+import com.cscjapp.aiworkbench.android.WorkbenchRuntimeOptions;
+import com.cscjapp.aiworkbench.api.AccessPolicy;
+import com.cscjapp.aiworkbench.api.ThemeConfig;
+import com.cscjapp.aiworkbench.api.WorkbenchSdkConfig;
 
 public final class SampleApp extends Application {
   @Override
   public void onCreate() {
     super.onCreate();
+    PlaygroundRuntime runtime = PlaygroundRuntime.get(this);
     AIWorkbench.install(
         this,
         WorkbenchSdkConfig.builder()
-            .registerFactory("sample", r -> new Definition())
-            .modelConfigProvider(
-                r -> new ModelEndpoint("http://127.0.0.1:3000/v1", "", "test", 0.2, true, false))
+            .registerFactory(
+                PlaygroundRuntime.DEFINITION_ID,
+                request -> new PlaygroundDefinition(runtime, request, false))
+            .registerFactory(
+                PlaygroundRuntime.CODE_DEFINITION_ID,
+                request -> new PlaygroundDefinition(runtime, request, true))
+            .modelConfigProvider(runtime::endpoint)
+            .accessPolicy(
+                (action, request, callback) -> authorize(runtime, action, request, callback))
+            .themeConfig(
+                new ThemeConfig(
+                    "AI Workbench Playground",
+                    "离线模式不会访问网络；真实模式使用当前 Playground 配置",
+                    0xff38bdf8))
+            .build(),
+        WorkbenchRuntimeOptions.builder()
+            .modelGatewayFactory(new PlaygroundGatewayFactory(runtime))
             .build());
+    runtime.log("install", "AIWorkbench.install 完成");
   }
 
-  private static final class Definition implements WorkbenchDefinition {
-    public String id() {
-      return "sample";
+  private static void authorize(
+      PlaygroundRuntime runtime,
+      String action,
+      com.cscjapp.aiworkbench.api.WorkbenchLaunchRequest request,
+      AccessPolicy.Callback callback) {
+    if (PlaygroundRuntime.MODE_REAL.equals(runtime.mode(request))
+        && ("open_workbench".equals(action) || "submit_demand".equals(action))
+        && !runtime.hasRealConfiguration()) {
+      callback.deny("请先配置真实模型的 Base URL 与 Model", "select_model");
+      return;
     }
-
-    public String displayName() {
-      return "通用工作台示例";
-    }
-
-    public List<PromptContributor> promptContributors() {
-      return Collections.singletonList(
-          c ->
-              Collections.singletonList(
-                  new PromptSection("sample", PromptPhase.APP_RULES, 0, 1000, "使用 echo 工具处理请求。")));
-    }
-
-    public List<ContextProvider> contextProviders() {
-      return Collections.emptyList();
-    }
-
-    public List<AgentTool> tools() {
-      return Collections.singletonList(new EchoTool());
-    }
-
-    public List<ToolPolicy> toolPolicies() {
-      return Collections.emptyList();
-    }
-
-    public List<TaskValidator> validators() {
-      return Collections.emptyList();
-    }
-
-    public WorkbenchHost host() {
-      return new WorkbenchHost() {
-        public void openArtifact(String a) {}
-
-        public void refreshArtifacts() {}
-
-        public void handleAction(String a, ToolArguments v) {}
-
-        public void onEvent(WorkbenchEvent e) {}
-      };
-    }
-  }
-
-  private static final class EchoTool implements AgentTool {
-    public ToolSpec spec() {
-      Map<String, Object> s = new LinkedHashMap<>();
-      s.put("type", "object");
-      return new ToolSpec("echo", "回显输入", s);
-    }
-
-    public Cancellable execute(ToolContext c, ToolArguments a, ToolCallback cb) {
-      cb.onComplete(ToolResult.success(a.asMap()));
-      return Cancellable.NONE;
-    }
+    callback.allow();
   }
 }

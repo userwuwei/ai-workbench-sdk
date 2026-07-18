@@ -2,7 +2,11 @@ plugins { id 'com.android.library'; id 'maven-publish' }
 android {
     namespace 'com.cscjapp.aiworkbench.android'
     compileSdk rootProject.ext.aiwCompileSdk
-    defaultConfig { minSdk rootProject.ext.aiwMinSdk; consumerProguardFiles 'consumer-rules.pro' }
+    defaultConfig {
+        minSdk rootProject.ext.aiwMinSdk
+        consumerProguardFiles 'consumer-rules.pro'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
     buildFeatures { viewBinding true; buildConfig false }
     resourcePrefix 'aiw_'
     compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }

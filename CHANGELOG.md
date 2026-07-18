@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- 新增可选纯 Java `workbench-code-agent` 模块。
+- 新增语言 Profile、验证合同、工具角色与 Agent 运行生命周期。
+- 通用化计划、读取后编辑、真实验证、质量门禁和终态工具。
+- Playground 增加普通工作台与 Code Agent 双模式。
+
 ## 1.0.0-SNAPSHOT
 
 - 提供语言与产品无关的 Agent Core、Android 工作台和单依赖 starter。

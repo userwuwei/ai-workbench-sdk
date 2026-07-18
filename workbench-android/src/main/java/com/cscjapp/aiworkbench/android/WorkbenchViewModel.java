@@ -18,7 +18,7 @@ import com.cscjapp.aiworkbench.core.AgentMessage;
 import com.cscjapp.aiworkbench.core.AgentObserver;
 import com.cscjapp.aiworkbench.core.AgentToolCall;
 import com.cscjapp.aiworkbench.core.ModelStreamDelta;
-import com.cscjapp.aiworkbench.model.openai.OpenAIModelGateway;
+import com.cscjapp.aiworkbench.core.ModelGateway;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -165,8 +165,10 @@ final class WorkbenchViewModel extends ViewModel {
       WorkbenchDefinition definition,
       WorkbenchLaunchRequest request,
       ModelEndpoint endpoint,
-      SessionStore store) {
+      SessionStore store,
+      ModelGateway gateway) {
     if (engine != null) return;
+    if (gateway == null) throw new IllegalArgumentException("model gateway required");
     this.definition = definition;
     this.request = request;
     this.endpoint = endpoint;
@@ -180,7 +182,7 @@ final class WorkbenchViewModel extends ViewModel {
     engine =
         new AgentEngine(
             definition,
-            new OpenAIModelGateway(),
+            gateway,
             endpoint,
             decisions,
             executor,

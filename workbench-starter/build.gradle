@@ -11,6 +11,7 @@ dependencies {
     api project(':workbench-core')
     api project(':workbench-model-openai')
     api project(':workbench-tools-file')
+    api project(':workbench-code-agent')
     api project(':workbench-android')
 }
 group = rootProject.ext.aiwGroup

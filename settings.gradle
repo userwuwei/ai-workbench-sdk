@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral(); maven { url "https://jitpack.io" } }
 }
 rootProject.name = "ai-workbench-sdk"
-include ':workbench-api', ':workbench-core', ':workbench-model-openai', ':workbench-tools-file', ':workbench-android', ':workbench-starter', ':sample-host'
+include ':workbench-api', ':workbench-core', ':workbench-model-openai', ':workbench-tools-file', ':workbench-code-agent', ':workbench-android', ':workbench-starter', ':sample-host'

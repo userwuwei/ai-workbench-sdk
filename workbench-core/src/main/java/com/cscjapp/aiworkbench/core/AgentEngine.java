@@ -21,7 +21,9 @@ public final class AgentEngine implements Cancellable {
   private final int maxRounds;
   private final AtomicBoolean cancelled = new AtomicBoolean();
   private final AtomicLong runGeneration = new AtomicLong();
+  private final Set<Long> finishedRuns = ConcurrentHashMap.newKeySet();
   private volatile Cancellable active = Cancellable.NONE;
+  private volatile AgentRunContext activeRunContext;
 
   public AgentEngine(
       WorkbenchDefinition d,
@@ -68,15 +70,24 @@ public final class AgentEngine implements Cancellable {
   }
 
   public Cancellable submit(String demand, AgentObserver o) {
+    AgentRunContext previousRun = activeRunContext;
+    if (previousRun != null) finishRun(previousRun.runId(), "superseded");
     long runId = runGeneration.incrementAndGet();
     cancelled.set(false);
+    AgentRunContext runContext = new AgentRunContext(runId, sessionId, workspaceId, demand);
+    activeRunContext = runContext;
+    dispatcher.onRunStarted(runContext);
     executor.execute(
         () -> {
           if (!isActive(runId)) return;
           try {
+            Map<String, Object> promptRuntime = new LinkedHashMap<>();
+            promptRuntime.put("native_tools", endpoint != null && endpoint.nativeTools());
+            promptRuntime.put("deep_thinking", deepThinking);
+            promptRuntime.put("model_id", endpoint == null ? "" : endpoint.modelId());
             String system =
                 prompts.compose(
-                    definition, new PromptContext(workspaceId, demand, Collections.emptyMap()));
+                    definition, new PromptContext(workspaceId, demand, promptRuntime));
             synchronized (this) {
               evidence.clear();
               if (messages.isEmpty()) messages.add(AgentMessage.system(system));
@@ -87,7 +98,10 @@ public final class AgentEngine implements Cancellable {
             }
             round(demand, o, 0, runId);
           } catch (Throwable t) {
-            if (isActive(runId)) o.onError(t);
+            if (isActive(runId)) {
+              finishRun(runId, "error");
+              o.onError(t);
+            }
           }
         });
     return this;
@@ -96,6 +110,7 @@ public final class AgentEngine implements Cancellable {
   private void round(String demand, AgentObserver o, int n, long runId) {
     if (!isActive(runId)) return;
     if (n >= maxRounds) {
+      finishRun(runId, "max_rounds");
       o.onError(new IllegalStateException("Agent 超过最大工具轮次 " + maxRounds));
       return;
     }
@@ -120,7 +135,10 @@ public final class AgentEngine implements Cancellable {
               }
 
               public void onError(Throwable e) {
-                if (isActive(runId)) o.onError(e);
+                if (isActive(runId)) {
+                  finishRun(runId, "error");
+                  o.onError(e);
+                }
               }
 
               public void onComplete(ModelResponse response) {
@@ -167,6 +185,9 @@ public final class AgentEngine implements Cancellable {
     o.onToolStarted(call.id(), call.name(), call.arguments());
     active =
         dispatcher.dispatch(
+            activeRunContext != null && activeRunContext.runId() == runId
+                ? activeRunContext
+                : new AgentRunContext(runId, sessionId, workspaceId, demand),
             call.id(),
             call.name(),
             call.arguments(),
@@ -184,6 +205,7 @@ public final class AgentEngine implements Cancellable {
                 }
                 o.onToolCompleted(call.id(), call.name(), result);
                 if (result.status() == ToolResult.Status.CANCELLED) {
+                  finishRun(runId, "cancelled");
                   o.onState("cancelled");
                   return;
                 }
@@ -229,6 +251,7 @@ public final class AgentEngine implements Cancellable {
               o.onValidation(result);
               if (result.passed()) {
                 hostEvent(terminalEvent, content);
+                finishRun(runId, terminalEvent);
                 o.onState("completed");
                 o.onFinal(content);
               } else {
@@ -265,8 +288,19 @@ public final class AgentEngine implements Cancellable {
   }
 
   public void cancel() {
+    AgentRunContext context = activeRunContext;
     cancelled.set(true);
     runGeneration.incrementAndGet();
     active.cancel();
+    if (context != null) finishRun(context.runId(), "cancelled");
+  }
+
+  private void finishRun(long runId, String state) {
+    if (!finishedRuns.add(runId)) return;
+    AgentRunContext context = activeRunContext;
+    if (context == null || context.runId() != runId) {
+      context = new AgentRunContext(runId, sessionId, workspaceId, "");
+    }
+    dispatcher.onRunFinished(context, state == null ? "" : state);
   }
 }

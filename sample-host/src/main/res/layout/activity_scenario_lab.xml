@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <Button
+            android:id="@+id/buttonBack"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="返回" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="UI / 性能场景实验室"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="所有场景均使用离线网关，可重复运行。"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/buttonStream"
+            style="@style/PlaygroundScenarioButton"
+            android:text="Reasoning + 流式文本 + Native Tool" />
+
+        <Button
+            android:id="@+id/buttonCreate"
+            style="@style/PlaygroundScenarioButton"
+            android:text="创建文件并自动打开产物" />
+
+        <Button
+            android:id="@+id/buttonLegacy"
+            style="@style/PlaygroundScenarioButton"
+            android:text="Legacy JSON 工具协议" />
+
+        <Button
+            android:id="@+id/buttonConflict"
+            style="@style/PlaygroundScenarioButton"
+            android:text="文件冲突 DialogX：覆盖 / 新建" />
+
+        <Button
+            android:id="@+id/buttonLongText"
+            style="@style/PlaygroundScenarioButton"
+            android:text="20,000 字流式正文" />
+
+        <Button
+            android:id="@+id/buttonLongArguments"
+            style="@style/PlaygroundScenarioButton"
+            android:text="100,000 字工具参数 + 数字动画" />
+
+        <Button
+            android:id="@+id/buttonError"
+            style="@style/PlaygroundScenarioButton"
+            android:text="模型错误场景" />
+
+        <Button
+            android:id="@+id/buttonTimeout"
+            style="@style/PlaygroundScenarioButton"
+            android:text="慢响应与取消场景" />
+
+        <Button
+            android:id="@+id/buttonHistory"
+            style="@style/PlaygroundScenarioButton"
+            android:text="重新打开并恢复历史" />
+    </LinearLayout>
+</ScrollView>

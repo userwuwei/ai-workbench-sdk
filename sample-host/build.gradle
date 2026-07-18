@@ -1,8 +1,43 @@
 plugins { id 'com.android.application' }
+
+static String quotedBuildConfigValue(Object value) {
+    String text = value == null ? '' : String.valueOf(value)
+    return '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
+}
+
+def playgroundApiKey = providers.gradleProperty('AIW_PLAYGROUND_API_KEY').orElse('').get()
+def playgroundBaseUrl = providers.gradleProperty('AIW_PLAYGROUND_BASE_URL')
+        .orElse('https://api.openai.com/v1').get()
+def playgroundModel = providers.gradleProperty('AIW_PLAYGROUND_MODEL')
+        .orElse('gpt-4.1-mini').get()
+
 android {
     namespace 'com.cscjapp.aiworkbench.sample'
     compileSdk rootProject.ext.aiwCompileSdk
-    defaultConfig { applicationId 'com.cscjapp.aiworkbench.sample'; minSdk rootProject.ext.aiwMinSdk; targetSdk 33; versionCode 1; versionName '1.0' }
-    compileOptions { sourceCompatibility JavaVersion.VERSION_1_8; targetCompatibility JavaVersion.VERSION_1_8 }
+    defaultConfig {
+        applicationId 'com.cscjapp.aiworkbench.sample'
+        minSdk rootProject.ext.aiwMinSdk
+        targetSdk 33
+        versionCode 1
+        versionName '1.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+        buildConfigField 'String', 'PLAYGROUND_API_KEY', quotedBuildConfigValue(playgroundApiKey)
+        buildConfigField 'String', 'PLAYGROUND_BASE_URL', quotedBuildConfigValue(playgroundBaseUrl)
+        buildConfigField 'String', 'PLAYGROUND_MODEL', quotedBuildConfigValue(playgroundModel)
+    }
+    buildFeatures { buildConfig true; viewBinding true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
 }
-dependencies { implementation project(':workbench-starter'); implementation 'androidx.appcompat:appcompat:1.6.1' }
+
+dependencies {
+    implementation project(':workbench-starter')
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.8.0'
+    implementation 'com.github.kongzue.DialogX:DialogX:0.0.50.beta20'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+}
