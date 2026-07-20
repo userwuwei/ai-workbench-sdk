@@ -17,9 +17,11 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Logger;
 
 /** Requires current-run read evidence before an existing file is edited. */
 public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle {
+  private static final Logger LOGGER = Logger.getLogger(ReadBeforeEditPolicy.class.getName());
   private final WorkspaceAccess workspace;
   private final Map<String, CodeToolRole> roles;
   private final Set<String> readPaths = new LinkedHashSet<>();
@@ -48,7 +50,6 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
         || role(invocation) != CodeToolRole.READ) {
       return;
     }
-    collectPaths(invocation.arguments(), readPaths);
     collectResultPaths(result.data(), readPaths);
   }
 
@@ -80,10 +81,22 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
         if (readPaths.contains(canonical)) {
           callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
         } else {
+          LOGGER.info(
+              "ReadBeforeEdit blocked tool="
+                  + invocation.tool().spec().name()
+                  + " path="
+                  + canonical
+                  + " reason=no_returned_read_evidence"
+                  + " runId="
+                  + activeRunId
+                  + " evidenceCount="
+                  + readPaths.size());
           callback.resolve(
               ToolPolicyDecision.error(
                   "read_evidence_required",
-                  "修改已有文件前必须在当前任务中先读取同一路径：" + canonical,
+                  "当前任务尚未获得该文件的实际读取内容，暂时无法修改："
+                      + canonical
+                      + "。若该文件在批量读取中被截断，请先单独读取该文件。",
                   true));
         }
       }
@@ -105,36 +118,43 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
     return role == null ? CodeToolRole.OTHER : role;
   }
 
-  private void collectPaths(ToolArguments arguments, Set<String> output) {
-    add(arguments.getString("path", ""), output);
-    Object targets = arguments.get("targets");
-    if (!(targets instanceof List)) return;
-    for (Object value : (List<?>) targets) {
-      if (!(value instanceof Map)) continue;
-      Map<?, ?> target = (Map<?, ?>) value;
-      Object path = target.get("path");
-      if (path != null && !String.valueOf(path).trim().isEmpty()) {
-        add(String.valueOf(path), output);
-      }
-    }
-  }
-
   private void collectResultPaths(Map<String, Object> data, Set<String> output) {
     if (data == null) return;
     for (String key : new String[] {"path", "resolved_path"}) {
       Object value = data.get(key);
       if (value != null) add(String.valueOf(value), output);
     }
-    Object paths = data.get("paths");
-    if (paths instanceof List) {
-      for (Object value : (List<?>) paths) if (value != null) add(String.valueOf(value), output);
+    for (String key : new String[] {"read_paths", "paths"}) {
+      Object paths = data.get(key);
+      if (paths instanceof List) {
+        for (Object value : (List<?>) paths) {
+          if (value != null) add(String.valueOf(value), output);
+        }
+      }
     }
+    Object items = data.get("items");
+    if (items instanceof List) {
+      for (Object value : (List<?>) items) {
+        if (!(value instanceof Map)) continue;
+        Object result = ((Map<?, ?>) value).get("result");
+        if (!(result instanceof Map)) continue;
+        addResultPath((Map<?, ?>) result, "resolved_path", output);
+        addResultPath((Map<?, ?>) result, "path", output);
+      }
+    }
+  }
+
+  private void addResultPath(Map<?, ?> result, String key, Set<String> output) {
+    Object value = result.get(key);
+    if (value != null) add(String.valueOf(value), output);
   }
 
   private void add(String path, Set<String> output) {
     if (path == null || path.trim().isEmpty()) return;
     try {
-      output.add(workspace.resolveSafely(path).getCanonicalPath());
+      File resolved = workspace.resolveSafely(path);
+      if (!resolved.exists() || !resolved.isFile()) return;
+      output.add(resolved.getCanonicalPath());
     } catch (Exception ignored) {
       // Invalid paths remain real tool errors and never become read evidence.
     }

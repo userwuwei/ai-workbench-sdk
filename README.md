@@ -78,6 +78,8 @@ Code Agent 通用层提供：
 - Native Tools 与 Legacy 协议一致的终态约束。
 - 强制区分文件创建与编辑：新路径使用 `create_file`，已有文件修改使用 `search_replace`。
 
+READ 工具应在成功结果的 `data.read_paths[]` 中返回本次真正交付内容的文件路径。Code Agent 也兼容单文件结果的 `path/resolved_path` 和批量结果的 `items[].result.path/resolved_path`；不得把仅请求但因截断或失败未返回的目标放入 `read_paths`。
+
 语言 Profile 只保留语言规则、编译/运行工具、验证合同和语言专属验证器。
 
 ## 模型交互日志
@@ -131,11 +133,11 @@ Logcat 使用可直接阅读的中文分段输出：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.4
+  publishToMavenLocal -PAIW_VERSION=1.1.5
 
-git tag 1.1.4
+git tag 1.1.5
 git push origin main
-git push origin 1.1.4
+git push origin 1.1.5
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。

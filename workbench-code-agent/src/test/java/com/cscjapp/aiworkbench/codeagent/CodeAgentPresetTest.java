@@ -173,6 +173,103 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void batchReadEvidenceAuthorizesOnlyFilesActuallyReturned() throws Exception {
+    for (String name : Arrays.asList("index.html", "style.css", "game.js")) {
+      Files.write(
+          new File(root, name).toPath(),
+          name.getBytes(StandardCharsets.UTF_8));
+    }
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_file_batch", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ReadBeforeEditPolicy policy = new ReadBeforeEditPolicy(workspace, roles);
+    AgentTool batch = tool("read_file_batch");
+    AgentTool read = tool("read_file");
+    AgentTool edit = tool("search_replace");
+    AgentRunContext run = new AgentRunContext(7L, "s", "workspace", "task");
+    policy.onRunStarted(run);
+
+    ToolArguments batchArguments =
+        new ToolArguments(
+            map(
+                "path",
+                root.getAbsolutePath(),
+                "targets",
+                Arrays.asList(
+                    map("path", "index.html"),
+                    map("path", "style.css"),
+                    map("path", "game.js"))));
+    policy.onToolCompleted(
+        run,
+        new ToolInvocation("batch", batch, batchArguments),
+        ToolResult.success(
+            map(
+                "path",
+                root.getAbsolutePath(),
+                "items",
+                Arrays.asList(
+                    map("result", map("path", "index.html")),
+                    map("result", map("resolved_path", "style.css"))),
+                "truncated",
+                true)));
+
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(policy, editInvocation("index.html", edit)).kind());
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(policy, editInvocation("style.css", edit)).kind());
+    ToolPolicyDecision missing = decision(policy, editInvocation("game.js", edit));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, missing.kind());
+    assertEquals("read_evidence_required", missing.result().errorCode());
+    assertTrue(missing.result().message().contains("批量读取中被截断"));
+
+    policy.onToolCompleted(
+        run,
+        new ToolInvocation(
+            "read-game",
+            read,
+            new ToolArguments(Collections.singletonMap("path", "game.js"))),
+        ToolResult.success(Collections.singletonMap("path", "game.js")));
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(policy, editInvocation("game.js", edit)).kind());
+  }
+
+  @Test
+  public void explicitReadPathsAuthorizeGenericReadResults() throws Exception {
+    File style = new File(root, "style.css");
+    Files.write(style.toPath(), "body{}".getBytes(StandardCharsets.UTF_8));
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("custom_batch_read", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ReadBeforeEditPolicy policy = new ReadBeforeEditPolicy(workspace, roles);
+    AgentRunContext run = new AgentRunContext(8L, "s", "workspace", "task");
+    policy.onRunStarted(run);
+    policy.onToolCompleted(
+        run,
+        new ToolInvocation(
+            "custom",
+            tool("custom_batch_read"),
+            new ToolArguments(Collections.singletonMap("path", root.getAbsolutePath()))),
+        ToolResult.success(
+            Collections.singletonMap(
+                "read_paths", Collections.singletonList(style.getAbsolutePath()))));
+
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(policy, editInvocation("style.css", tool("search_replace"))).kind());
+  }
+
+  private static ToolInvocation editInvocation(String path, AgentTool edit) {
+    return new ToolInvocation(
+        "edit-" + path,
+        edit,
+        new ToolArguments(Collections.singletonMap("path", path)));
+  }
+
+  @Test
   public void validationContractRequiresTerminalEvidenceVerificationAndQuality() {
     CodeValidationContract contract =
         CodeValidationContract.builder()
