@@ -14,6 +14,7 @@ import com.cscjapp.aiworkbench.core.ModelStreamObserver;
 import com.cscjapp.aiworkbench.core.ToolCallStreamDelta;
 import com.cscjapp.aiworkbench.core.WorkbenchLogger;
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MediaType;
@@ -43,7 +45,10 @@ public final class OpenAIModelGateway implements ModelGateway {
   private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
   private final OkHttpClient client;
   private final Gson gson = new Gson();
+  private final Gson prettyGson = new GsonBuilder().setPrettyPrinting().create();
   private final WorkbenchLogger logger;
+  private final AtomicInteger requestSequence = new AtomicInteger();
+  private int previousMessageCount;
 
   public OpenAIModelGateway() {
     this(WorkbenchLogger.none());
@@ -62,17 +67,18 @@ public final class OpenAIModelGateway implements ModelGateway {
   @Override
   public Cancellable stream(ModelRequest modelRequest, ModelStreamObserver observer) {
     long startedAt = System.currentTimeMillis();
+    int requestIndex = requestSequence.incrementAndGet();
     ModelEndpoint endpoint = modelRequest.endpoint();
     if (endpoint == null || blank(endpoint.baseUrl()) || blank(endpoint.modelId())) {
       IllegalArgumentException error = new IllegalArgumentException("模型地址和模型名称不能为空");
-      logError(error, startedAt);
+      logError(error, startedAt, requestIndex, endpoint == null ? "" : endpoint.modelId());
       observer.onError(error);
       return Cancellable.NONE;
     }
     JsonObject body = buildRequest(modelRequest);
     String requestJson = gson.toJson(body);
     String url = chatUrl(endpoint.baseUrl());
-    log("model_request", "url=" + url + "\nbody=" + requestJson);
+    logRequest(modelRequest, url, requestIndex);
     Request.Builder request =
         new Request.Builder()
             .url(url)
@@ -97,7 +103,7 @@ public final class OpenAIModelGateway implements ModelGateway {
           @Override
           public void onFailure(Call ignored, IOException error) {
             if (terminal.compareAndSet(false, true)) {
-              logError(error, startedAt);
+              logError(error, startedAt, requestIndex, endpoint.modelId());
               observer.onError(error);
             }
           }
@@ -111,13 +117,25 @@ public final class OpenAIModelGateway implements ModelGateway {
               }
               String contentType = response.header("Content-Type", "");
               if (contentType.toLowerCase().contains("text/event-stream")) {
-                parseSse(response, observer, terminal, startedAt);
+                parseSse(
+                    response,
+                    observer,
+                    terminal,
+                    startedAt,
+                    requestIndex,
+                    endpoint.modelId());
               } else {
-                parseJsonResponse(response.body().string(), observer, terminal, startedAt);
+                parseJsonResponse(
+                    response.body().string(),
+                    observer,
+                    terminal,
+                    startedAt,
+                    requestIndex,
+                    endpoint.modelId());
               }
             } catch (Throwable error) {
               if (terminal.compareAndSet(false, true)) {
-                logError(error, startedAt);
+                logError(error, startedAt, requestIndex, endpoint.modelId());
                 observer.onError(error);
               }
             }
@@ -183,7 +201,9 @@ public final class OpenAIModelGateway implements ModelGateway {
       Response response,
       ModelStreamObserver observer,
       AtomicBoolean terminal,
-      long startedAt)
+      long startedAt,
+      int requestIndex,
+      String model)
       throws IOException {
     StringBuilder content = new StringBuilder();
     StringBuilder reasoning = new StringBuilder();
@@ -243,13 +263,25 @@ public final class OpenAIModelGateway implements ModelGateway {
     }
     if (terminal.compareAndSet(false, true)) {
       List<AgentToolCall> calls = buildCalls(callBuilders);
-      logResponse(content.toString(), reasoning.toString(), finishReason, calls, startedAt);
+      logResponse(
+          content.toString(),
+          reasoning.toString(),
+          finishReason,
+          calls,
+          startedAt,
+          requestIndex,
+          model);
       observer.onComplete(new ModelResponse(content.toString(), finishReason, calls));
     }
   }
 
   private void parseJsonResponse(
-      String raw, ModelStreamObserver observer, AtomicBoolean terminal, long startedAt) {
+      String raw,
+      ModelStreamObserver observer,
+      AtomicBoolean terminal,
+      long startedAt,
+      int requestIndex,
+      String model) {
     JsonObject root = JsonParser.parseString(raw).getAsJsonObject();
     JsonArray choices = root.getAsJsonArray("choices");
     if (choices == null || choices.size() == 0) {
@@ -289,7 +321,8 @@ public final class OpenAIModelGateway implements ModelGateway {
     if (terminal.compareAndSet(false, true)) {
       String finishReason = string(choice, "finish_reason", "stop");
       List<AgentToolCall> toolCalls = buildCalls(builders);
-      logResponse(content, reasoning, finishReason, toolCalls, startedAt);
+      logResponse(
+          content, reasoning, finishReason, toolCalls, startedAt, requestIndex, model);
       observer.onComplete(new ModelResponse(content, finishReason, toolCalls));
     }
   }
@@ -299,40 +332,131 @@ public final class OpenAIModelGateway implements ModelGateway {
       String reasoning,
       String finishReason,
       List<AgentToolCall> toolCalls,
-      long startedAt) {
-    JsonArray calls = new JsonArray();
-    for (AgentToolCall toolCall : toolCalls) {
-      JsonObject item = new JsonObject();
-      item.addProperty("id", toolCall.id());
-      item.addProperty("name", toolCall.name());
-      item.add("arguments", gson.toJsonTree(toolCall.arguments().asMap()));
-      calls.add(item);
-    }
+      long startedAt,
+      int requestIndex,
+      String model) {
     log(
         "model_response",
-        "elapsed_ms="
-            + (System.currentTimeMillis() - startedAt)
-            + "\nfinish_reason="
+        "[模型响应][request="
+            + requestIndex
+            + "][model="
+            + model
+            + "][finish_reason="
             + finishReason
-            + "\ncontent="
-            + content
-            + "\nreasoning="
-            + reasoning
-            + "\ntool_calls="
-            + gson.toJson(calls));
+            + "][elapsed_ms="
+            + (System.currentTimeMillis() - startedAt)
+            + "][content_chars="
+            + content.length()
+            + "][reasoning_chars="
+            + reasoning.length()
+            + "][tool_calls="
+            + toolCalls.size()
+            + "]");
+    log(
+        "model_response",
+        "[本轮模型返回][request=" + requestIndex + "][content]" + content);
+    if (!reasoning.isEmpty()) {
+      log(
+          "model_response",
+          "[本轮模型返回][request=" + requestIndex + "][reasoning]" + reasoning);
+    }
+    for (AgentToolCall toolCall : toolCalls) {
+      log(
+          "model_response",
+          "[本轮模型返回][request="
+              + requestIndex
+              + "][tools][toolName="
+              + toolCall.name()
+              + "]"
+              + readableJson(toolCall.arguments().asMap()));
+    }
   }
 
-  private void logError(Throwable error, long startedAt) {
+  private void logError(
+      Throwable error, long startedAt, int requestIndex, String model) {
     String type = error == null ? "Unknown" : error.getClass().getSimpleName();
     String message = error == null || error.getMessage() == null ? "" : error.getMessage();
     log(
         "model_error",
-        "elapsed_ms="
+        "[模型请求失败][request="
+            + requestIndex
+            + "][model="
+            + model
+            + "][elapsed_ms="
             + (System.currentTimeMillis() - startedAt)
-            + "\ntype="
+            + "][type="
             + type
-            + "\nmessage="
+            + "] message="
             + message);
+  }
+
+  private synchronized void logRequest(
+      ModelRequest request, String url, int requestIndex) {
+    List<AgentMessage> messages = request.messages();
+    int start = 0;
+    if (requestIndex > 1 && messages.size() >= previousMessageCount) {
+      start = previousMessageCount;
+    }
+    if (start >= messages.size() && !messages.isEmpty()) {
+      start = messages.size() - 1;
+    }
+    previousMessageCount = messages.size();
+
+    StringBuilder output = new StringBuilder();
+    output
+        .append("[模型请求][request=")
+        .append(requestIndex)
+        .append("][stage=")
+        .append(requestIndex == 1 ? "initial" : "continue")
+        .append("][model=")
+        .append(request.endpoint().modelId())
+        .append("]\nurl=")
+        .append(url)
+        .append("\nmessages=")
+        .append(messages.size())
+        .append(", new_messages=")
+        .append(Math.max(0, messages.size() - start))
+        .append(", tools=")
+        .append(request.tools().size())
+        .append(", deep_thinking=")
+        .append(request.deepThinking());
+    if (!request.tools().isEmpty()) {
+      output.append("\ntool_names=");
+      for (int index = 0; index < request.tools().size(); index++) {
+        if (index > 0) output.append(',');
+        output.append(request.tools().get(index).name());
+      }
+    }
+    for (int index = start; index < messages.size(); index++) {
+      AgentMessage message = messages.get(index);
+      output
+          .append("\n\n[message=")
+          .append(index)
+          .append("][role=")
+          .append(message.role().name().toLowerCase())
+          .append(']');
+      if (!blank(message.name())) output.append("[name=").append(message.name()).append(']');
+      if (!blank(message.toolCallId())) {
+        output.append("[tool_call_id=").append(message.toolCallId()).append(']');
+      }
+      if (!message.content().isEmpty()) output.append('\n').append(message.content());
+      for (AgentToolCall toolCall : message.toolCalls()) {
+        output
+            .append("\n[tool_call][toolName=")
+            .append(toolCall.name())
+            .append("]")
+            .append(readableJson(toolCall.arguments().asMap()));
+      }
+    }
+    log("model_request", output.toString());
+  }
+
+  private String readableJson(Object value) {
+    return prettyGson
+        .toJson(value)
+        .replace("\\r\\n", "\n")
+        .replace("\\n", "\n")
+        .replace("\\t", "\t");
   }
 
   private void log(String event, String message) {

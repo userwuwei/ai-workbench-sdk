@@ -211,14 +211,76 @@ public class OpenAIModelGatewayTest {
             });
 
     assertTrue(latch.await(3, TimeUnit.SECONDS));
-    assertEquals(2, events.size());
+    assertEquals(4, events.size());
     assertTrue(events.get(0).startsWith("model_request"));
-    assertTrue(events.get(0).contains("\"content\":\"u\""));
+    assertTrue(events.get(0).contains("[模型请求][request=1][stage=initial][model=test]"));
+    assertTrue(events.get(0).contains("[message=1][role=user]\nu"));
+    assertFalse(events.get(0).contains("body="));
     assertFalse(events.get(0).contains("Bearer secret"));
     assertTrue(events.get(1).startsWith("model_response"));
-    assertTrue(events.get(1).contains("content=done"));
-    assertTrue(events.get(1).contains("reasoning=think"));
-    assertTrue(events.get(1).contains("finish_reason=stop"));
+    assertTrue(events.get(1).contains("[模型响应][request=1][model=test][finish_reason=stop]"));
+    assertTrue(events.get(2).contains("[本轮模型返回][request=1][content]done"));
+    assertTrue(events.get(3).contains("[本轮模型返回][request=1][reasoning]think"));
+  }
+
+  @Test
+  public void continuationLogOnlyIncludesNewMessages() throws Exception {
+    server.enqueue(jsonResponse("first"));
+    server.enqueue(jsonResponse("second"));
+    List<String> events = new ArrayList<>();
+    WorkbenchLogger logger = (event, message) -> events.add(event + "\n" + message);
+    OpenAIModelGateway gateway = new OpenAIModelGateway(logger);
+
+    await(gateway, request());
+    ModelRequest continuation =
+        new ModelRequest(
+            request().endpoint(),
+            Arrays.asList(
+                AgentMessage.system("s"),
+                AgentMessage.user("u"),
+                AgentMessage.assistant("first", Collections.emptyList()),
+                AgentMessage.tool("call-1", "read_file", "{\"status\":\"success\"}")),
+            request().tools(),
+            false);
+    await(gateway, continuation);
+
+    String secondRequest = events.get(3);
+    assertTrue(secondRequest.contains("[模型请求][request=2][stage=continue][model=test]"));
+    assertTrue(secondRequest.contains("new_messages=2"));
+    assertFalse(secondRequest.contains("[message=0]"));
+    assertFalse(secondRequest.contains("[message=1]"));
+    assertTrue(secondRequest.contains("[message=2][role=assistant]\nfirst"));
+    assertTrue(secondRequest.contains("[message=3][role=tool]"));
+  }
+
+  private static MockResponse jsonResponse(String content) {
+    return new MockResponse()
+        .setHeader("Content-Type", "application/json")
+        .setBody(
+            "{\"choices\":[{\"message\":{\"content\":\""
+                + content
+                + "\"},\"finish_reason\":\"stop\"}]}");
+  }
+
+  private static void await(OpenAIModelGateway gateway, ModelRequest request) throws Exception {
+    CountDownLatch latch = new CountDownLatch(1);
+    List<Throwable> errors = new ArrayList<>();
+    gateway.stream(
+        request,
+        new ModelStreamObserver() {
+          public void onDelta(String content, String reasoning) {}
+
+          public void onComplete(ModelResponse response) {
+            latch.countDown();
+          }
+
+          public void onError(Throwable error) {
+            errors.add(error);
+            latch.countDown();
+          }
+        });
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertTrue(errors.toString(), errors.isEmpty());
   }
 
   private ModelRequest request() {

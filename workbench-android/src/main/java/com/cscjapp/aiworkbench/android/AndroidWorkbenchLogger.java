@@ -3,7 +3,7 @@ package com.cscjapp.aiworkbench.android;
 import android.util.Log;
 import com.cscjapp.aiworkbench.core.WorkbenchLogger;
 
-/** Writes complete model diagnostics to Logcat without truncating long payloads. */
+/** Writes readable model diagnostics to Logcat without truncating long payloads. */
 public final class AndroidWorkbenchLogger implements WorkbenchLogger {
   private static final int CHUNK_SIZE = 3000;
   private final String tag;
@@ -16,18 +16,29 @@ public final class AndroidWorkbenchLogger implements WorkbenchLogger {
   public void log(String event, String message) {
     String name = event == null || event.trim().isEmpty() ? "diagnostic" : event.trim();
     String value = message == null ? "" : message;
-    int total = Math.max(1, (value.length() + CHUNK_SIZE - 1) / CHUNK_SIZE);
     if (value.isEmpty()) {
-      Log.d(tag, "[" + name + "]");
+      print(name, "");
       return;
     }
-    for (int part = 0; part < total; part++) {
-      int start = part * CHUNK_SIZE;
+    int start = 0;
+    while (start < value.length()) {
       int end = Math.min(value.length(), start + CHUNK_SIZE);
-      String prefix = total == 1
-          ? "[" + name + "] "
-          : "[" + name + "][" + (part + 1) + "/" + total + "] ";
-      Log.d(tag, prefix + value.substring(start, end));
+      if (end < value.length()) {
+        int lineBreak = value.lastIndexOf('\n', end);
+        if (lineBreak > start) end = lineBreak + 1;
+      }
+      print(name, value.substring(start, end));
+      start = end;
+    }
+  }
+
+  private void print(String event, String value) {
+    if ("model_error".equals(event)) {
+      Log.e(tag, value);
+    } else if ("model_request".equals(event)) {
+      Log.i(tag, value);
+    } else {
+      Log.d(tag, value);
     }
   }
 }

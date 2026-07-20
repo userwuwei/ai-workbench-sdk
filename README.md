@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.2'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.3'
 }
 ```
 
@@ -92,7 +92,19 @@ AIWorkbench.install(
         .build());
 ```
 
-Logcat 会输出 `model_request / model_response / model_error`。请求日志不包含 Authorization 或 API Key；长内容按段输出，模型流式增量只在本轮完成后汇总打印。
+Logcat 使用可直接阅读的中文分段输出：
+
+```text
+[模型请求][request=1][stage=initial][model=...]
+[message=1][role=user]
+用户输入
+
+[模型响应][request=1][finish_reason=...][elapsed_ms=...]
+[本轮模型返回][request=1][content]...
+[本轮模型返回][request=1][tools][toolName=create_file]...
+```
+
+首轮打印完整消息，工具续轮只打印本轮新增消息，避免重复输出整段历史和工具 Schema。请求日志不包含 Authorization 或 API Key；长内容仅按 Logcat 安全长度无标记分段，模型流式增量在本轮完成后汇总打印。
 
 ## Playground
 
@@ -118,11 +130,11 @@ Logcat 会输出 `model_request / model_response / model_error`。请求日志�
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.2
+  publishToMavenLocal -PAIW_VERSION=1.1.3
 
-git tag 1.1.2
+git tag 1.1.3
 git push origin main
-git push origin 1.1.2
+git push origin 1.1.3
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
