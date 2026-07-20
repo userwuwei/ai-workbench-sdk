@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.1'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.2'
 }
 ```
 
@@ -79,6 +79,21 @@ Code Agent 通用层提供：
 
 语言 Profile 只保留语言规则、编译/运行工具、验证合同和语言专属验证器。
 
+## 模型交互日志
+
+SDK 默认不输出模型内容。需要调试模型交互时由宿主显式开启：
+
+```java
+AIWorkbench.install(
+    application,
+    sdkConfig,
+    WorkbenchRuntimeOptions.builder()
+        .logger(new AndroidWorkbenchLogger("AIWorkbench"))
+        .build());
+```
+
+Logcat 会输出 `model_request / model_response / model_error`。请求日志不包含 Authorization 或 API Key；长内容按段输出，模型流式增量只在本轮完成后汇总打印。
+
 ## Playground
 
 运行 `sample-host` 可独立验证 SDK：
@@ -103,11 +118,11 @@ Code Agent 通用层提供：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.1
+  publishToMavenLocal -PAIW_VERSION=1.1.2
 
-git tag 1.1.1
+git tag 1.1.2
 git push origin main
-git push origin 1.1.1
+git push origin 1.1.2
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。

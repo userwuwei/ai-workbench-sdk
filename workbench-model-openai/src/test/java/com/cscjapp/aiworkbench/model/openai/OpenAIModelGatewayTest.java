@@ -183,6 +183,44 @@ public class OpenAIModelGatewayTest {
         "src/index.html", responses.get(0).toolCalls().get(0).arguments().getString("path", ""));
   }
 
+  @Test
+  public void logsRequestAndFinalResponseWithoutAuthorization() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\",\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    + "data: [DONE]\n\n"));
+    CountDownLatch latch = new CountDownLatch(1);
+    List<String> events = new ArrayList<>();
+    WorkbenchLogger logger = (event, message) -> events.add(event + "\n" + message);
+
+    new OpenAIModelGateway(logger)
+        .stream(
+            request(),
+            new ModelStreamObserver() {
+              public void onDelta(String content, String reasoning) {}
+
+              public void onComplete(ModelResponse response) {
+                latch.countDown();
+              }
+
+              public void onError(Throwable error) {
+                latch.countDown();
+              }
+            });
+
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertEquals(2, events.size());
+    assertTrue(events.get(0).startsWith("model_request"));
+    assertTrue(events.get(0).contains("\"content\":\"u\""));
+    assertFalse(events.get(0).contains("Bearer secret"));
+    assertTrue(events.get(1).startsWith("model_response"));
+    assertTrue(events.get(1).contains("content=done"));
+    assertTrue(events.get(1).contains("reasoning=think"));
+    assertTrue(events.get(1).contains("finish_reason=stop"));
+  }
+
   private ModelRequest request() {
     ModelEndpoint endpoint =
         new ModelEndpoint(server.url("/v1").toString(), "secret", "test", 0.2, true, false);

@@ -1,17 +1,20 @@
 package com.cscjapp.aiworkbench.android;
 
 import com.cscjapp.aiworkbench.core.ModelGatewayFactory;
+import com.cscjapp.aiworkbench.core.WorkbenchLogger;
 import com.cscjapp.aiworkbench.model.openai.OpenAIModelGateway;
 
 /** Optional process-wide runtime hooks. App behavior remains configured by WorkbenchSdkConfig. */
 public final class WorkbenchRuntimeOptions {
   private final ModelGatewayFactory modelGatewayFactory;
+  private final WorkbenchLogger logger;
 
   private WorkbenchRuntimeOptions(Builder builder) {
-    modelGatewayFactory = builder.modelGatewayFactory;
-    if (modelGatewayFactory == null) {
-      throw new IllegalStateException("modelGatewayFactory required");
-    }
+    logger = builder.logger == null ? WorkbenchLogger.none() : builder.logger;
+    modelGatewayFactory =
+        builder.modelGatewayFactory == null
+            ? (request, endpoint) -> new OpenAIModelGateway(logger)
+            : builder.modelGatewayFactory;
   }
 
   public static Builder builder() {
@@ -19,19 +22,28 @@ public final class WorkbenchRuntimeOptions {
   }
 
   public static WorkbenchRuntimeOptions defaults() {
-    return builder().modelGatewayFactory((request, endpoint) -> new OpenAIModelGateway()).build();
+    return builder().build();
   }
 
   public ModelGatewayFactory modelGatewayFactory() {
     return modelGatewayFactory;
   }
 
+  public WorkbenchLogger logger() {
+    return logger;
+  }
+
   public static final class Builder {
-    private ModelGatewayFactory modelGatewayFactory =
-        (request, endpoint) -> new OpenAIModelGateway();
+    private ModelGatewayFactory modelGatewayFactory;
+    private WorkbenchLogger logger = WorkbenchLogger.none();
 
     public Builder modelGatewayFactory(ModelGatewayFactory value) {
       modelGatewayFactory = value;
+      return this;
+    }
+
+    public Builder logger(WorkbenchLogger value) {
+      logger = value;
       return this;
     }
 

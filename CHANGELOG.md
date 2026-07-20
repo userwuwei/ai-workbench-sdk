@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2
+
+- 增加轻量 `WorkbenchLogger` 与 Logcat 实现。
+- 可按宿主配置打印完整模型请求、最终 content/reasoning/tool calls、耗时和错误。
+- 不打印 Authorization/API Key，长内容按 Logcat 安全长度分段输出。
+
 ## 1.1.1
 
 - 新增可选纯 Java `workbench-code-agent` 模块。

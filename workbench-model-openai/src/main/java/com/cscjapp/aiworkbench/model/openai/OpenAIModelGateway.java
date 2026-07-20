@@ -12,6 +12,7 @@ import com.cscjapp.aiworkbench.core.ModelResponse;
 import com.cscjapp.aiworkbench.core.ModelStreamDelta;
 import com.cscjapp.aiworkbench.core.ModelStreamObserver;
 import com.cscjapp.aiworkbench.core.ToolCallStreamDelta;
+import com.cscjapp.aiworkbench.core.WorkbenchLogger;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -42,32 +43,40 @@ public final class OpenAIModelGateway implements ModelGateway {
   private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
   private final OkHttpClient client;
   private final Gson gson = new Gson();
+  private final WorkbenchLogger logger;
 
   public OpenAIModelGateway() {
-    this(
+    this(WorkbenchLogger.none());
+  }
+
+  public OpenAIModelGateway(WorkbenchLogger logger) {
+    this.client =
         new OkHttpClient.Builder()
             .connectTimeout(60, TimeUnit.SECONDS)
             .readTimeout(600, TimeUnit.SECONDS)
             .writeTimeout(600, TimeUnit.SECONDS)
-            .build());
-  }
-
-  OpenAIModelGateway(OkHttpClient client) {
-    this.client = client;
+            .build();
+    this.logger = logger == null ? WorkbenchLogger.none() : logger;
   }
 
   @Override
   public Cancellable stream(ModelRequest modelRequest, ModelStreamObserver observer) {
+    long startedAt = System.currentTimeMillis();
     ModelEndpoint endpoint = modelRequest.endpoint();
     if (endpoint == null || blank(endpoint.baseUrl()) || blank(endpoint.modelId())) {
-      observer.onError(new IllegalArgumentException("模型地址和模型名称不能为空"));
+      IllegalArgumentException error = new IllegalArgumentException("模型地址和模型名称不能为空");
+      logError(error, startedAt);
+      observer.onError(error);
       return Cancellable.NONE;
     }
     JsonObject body = buildRequest(modelRequest);
+    String requestJson = gson.toJson(body);
+    String url = chatUrl(endpoint.baseUrl());
+    log("model_request", "url=" + url + "\nbody=" + requestJson);
     Request.Builder request =
         new Request.Builder()
-            .url(chatUrl(endpoint.baseUrl()))
-            .post(RequestBody.create(JSON, gson.toJson(body)))
+            .url(url)
+            .post(RequestBody.create(JSON, requestJson))
             .header("Accept", "text/event-stream")
             .header("Content-Type", "application/json");
     if (!blank(endpoint.apiKey())) {
@@ -87,7 +96,10 @@ public final class OpenAIModelGateway implements ModelGateway {
         new Callback() {
           @Override
           public void onFailure(Call ignored, IOException error) {
-            if (terminal.compareAndSet(false, true)) observer.onError(error);
+            if (terminal.compareAndSet(false, true)) {
+              logError(error, startedAt);
+              observer.onError(error);
+            }
           }
 
           @Override
@@ -99,12 +111,15 @@ public final class OpenAIModelGateway implements ModelGateway {
               }
               String contentType = response.header("Content-Type", "");
               if (contentType.toLowerCase().contains("text/event-stream")) {
-                parseSse(response, observer, terminal);
+                parseSse(response, observer, terminal, startedAt);
               } else {
-                parseJsonResponse(response.body().string(), observer, terminal);
+                parseJsonResponse(response.body().string(), observer, terminal, startedAt);
               }
             } catch (Throwable error) {
-              if (terminal.compareAndSet(false, true)) observer.onError(error);
+              if (terminal.compareAndSet(false, true)) {
+                logError(error, startedAt);
+                observer.onError(error);
+              }
             }
           }
         });
@@ -164,7 +179,11 @@ public final class OpenAIModelGateway implements ModelGateway {
     return out;
   }
 
-  private void parseSse(Response response, ModelStreamObserver observer, AtomicBoolean terminal)
+  private void parseSse(
+      Response response,
+      ModelStreamObserver observer,
+      AtomicBoolean terminal,
+      long startedAt)
       throws IOException {
     StringBuilder content = new StringBuilder();
     StringBuilder reasoning = new StringBuilder();
@@ -223,12 +242,14 @@ public final class OpenAIModelGateway implements ModelGateway {
       if (!streamDelta.isEmpty()) observer.onStreamDelta(streamDelta);
     }
     if (terminal.compareAndSet(false, true)) {
-      observer.onComplete(
-          new ModelResponse(content.toString(), finishReason, buildCalls(callBuilders)));
+      List<AgentToolCall> calls = buildCalls(callBuilders);
+      logResponse(content.toString(), reasoning.toString(), finishReason, calls, startedAt);
+      observer.onComplete(new ModelResponse(content.toString(), finishReason, calls));
     }
   }
 
-  private void parseJsonResponse(String raw, ModelStreamObserver observer, AtomicBoolean terminal) {
+  private void parseJsonResponse(
+      String raw, ModelStreamObserver observer, AtomicBoolean terminal, long startedAt) {
     JsonObject root = JsonParser.parseString(raw).getAsJsonObject();
     JsonArray choices = root.getAsJsonArray("choices");
     if (choices == null || choices.size() == 0) {
@@ -266,9 +287,59 @@ public final class OpenAIModelGateway implements ModelGateway {
     ModelStreamDelta streamDelta = new ModelStreamDelta(content, reasoning, streamCalls);
     if (!streamDelta.isEmpty()) observer.onStreamDelta(streamDelta);
     if (terminal.compareAndSet(false, true)) {
-      observer.onComplete(
-          new ModelResponse(
-              content, string(choice, "finish_reason", "stop"), buildCalls(builders)));
+      String finishReason = string(choice, "finish_reason", "stop");
+      List<AgentToolCall> toolCalls = buildCalls(builders);
+      logResponse(content, reasoning, finishReason, toolCalls, startedAt);
+      observer.onComplete(new ModelResponse(content, finishReason, toolCalls));
+    }
+  }
+
+  private void logResponse(
+      String content,
+      String reasoning,
+      String finishReason,
+      List<AgentToolCall> toolCalls,
+      long startedAt) {
+    JsonArray calls = new JsonArray();
+    for (AgentToolCall toolCall : toolCalls) {
+      JsonObject item = new JsonObject();
+      item.addProperty("id", toolCall.id());
+      item.addProperty("name", toolCall.name());
+      item.add("arguments", gson.toJsonTree(toolCall.arguments().asMap()));
+      calls.add(item);
+    }
+    log(
+        "model_response",
+        "elapsed_ms="
+            + (System.currentTimeMillis() - startedAt)
+            + "\nfinish_reason="
+            + finishReason
+            + "\ncontent="
+            + content
+            + "\nreasoning="
+            + reasoning
+            + "\ntool_calls="
+            + gson.toJson(calls));
+  }
+
+  private void logError(Throwable error, long startedAt) {
+    String type = error == null ? "Unknown" : error.getClass().getSimpleName();
+    String message = error == null || error.getMessage() == null ? "" : error.getMessage();
+    log(
+        "model_error",
+        "elapsed_ms="
+            + (System.currentTimeMillis() - startedAt)
+            + "\ntype="
+            + type
+            + "\nmessage="
+            + message);
+  }
+
+  private void log(String event, String message) {
+    try {
+      logger.log(event, message);
+    } catch (RuntimeException ignored) {
+      // Diagnostics must never break a model request.
     }
   }
 

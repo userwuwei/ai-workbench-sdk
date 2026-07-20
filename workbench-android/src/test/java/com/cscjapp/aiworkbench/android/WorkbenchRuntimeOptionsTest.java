@@ -1,5 +1,6 @@
 package com.cscjapp.aiworkbench.android;
 
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -7,6 +8,7 @@ import com.cscjapp.aiworkbench.api.Cancellable;
 import com.cscjapp.aiworkbench.api.ModelEndpoint;
 import com.cscjapp.aiworkbench.api.WorkbenchLaunchRequest;
 import com.cscjapp.aiworkbench.core.ModelGateway;
+import com.cscjapp.aiworkbench.core.WorkbenchLogger;
 import com.cscjapp.aiworkbench.model.openai.OpenAIModelGateway;
 import org.junit.Test;
 
@@ -18,6 +20,7 @@ public final class WorkbenchRuntimeOptionsTest {
             .modelGatewayFactory()
             .create(request(), endpoint());
     assertTrue(gateway instanceof OpenAIModelGateway);
+    assertNotNull(WorkbenchRuntimeOptions.defaults().logger());
   }
 
   @Test
@@ -28,6 +31,18 @@ public final class WorkbenchRuntimeOptionsTest {
             .modelGatewayFactory((request, endpoint) -> marker)
             .build();
     assertSame(marker, options.modelGatewayFactory().create(request(), endpoint()));
+  }
+
+  @Test
+  public void keepsInjectedLogger() {
+    WorkbenchLogger logger = (event, message) -> {};
+    WorkbenchRuntimeOptions options =
+        WorkbenchRuntimeOptions.builder().logger(logger).build();
+
+    assertSame(logger, options.logger());
+    assertTrue(
+        options.modelGatewayFactory().create(request(), endpoint())
+            instanceof OpenAIModelGateway);
   }
 
   private static WorkbenchLaunchRequest request() {
