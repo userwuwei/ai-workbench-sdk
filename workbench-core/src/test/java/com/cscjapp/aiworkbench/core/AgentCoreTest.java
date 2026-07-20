@@ -116,6 +116,64 @@ public class AgentCoreTest {
   }
 
   @Test
+  public void completedTaskHistoryDropsRawFileArgumentsButKeepsOutcomeSummary() {
+    String largeContent = String.join("", Collections.nCopies(2000, "generated-source-"));
+    Map<String, Object> createArguments = new LinkedHashMap<>();
+    createArguments.put("path", "src/main.txt");
+    createArguments.put("content", largeContent);
+    createArguments.put("overwrite", true);
+    Map<String, Object> finalizeArguments = new LinkedHashMap<>();
+    finalizeArguments.put("status", "completed");
+    finalizeArguments.put("summary", "完成布局优化");
+    finalizeArguments.put("changed_files", Collections.singletonList("src/main.txt"));
+    finalizeArguments.put("verification", Collections.singletonList("compile_test passed"));
+    List<AgentMessage> source =
+        Arrays.asList(
+            AgentMessage.system("system"),
+            AgentMessage.user("调整布局并增强质感"),
+            AgentMessage.assistant(
+                "",
+                Collections.singletonList(
+                    new AgentToolCall("create", "create_file", new ToolArguments(createArguments)))),
+            AgentMessage.tool("create", "create_file", "{\"status\":\"success\"}"),
+            AgentMessage.assistant(
+                "",
+                Collections.singletonList(
+                    new AgentToolCall("final", "finalize_task", new ToolArguments(finalizeArguments)))),
+            AgentMessage.tool("final", "finalize_task", "{\"status\":\"success\"}"));
+
+    List<AgentMessage> compacted = AgentHistory.compactCompletedTasks(source);
+
+    assertEquals(2, compacted.size());
+    assertEquals(AgentMessage.Role.SYSTEM, compacted.get(0).role());
+    String summary = compacted.get(1).content();
+    assertTrue(summary.startsWith(AgentHistory.COMPLETED_TASK_HISTORY_PREFIX));
+    assertTrue(summary.contains("调整布局并增强质感"));
+    assertTrue(summary.contains("src/main.txt"));
+    assertTrue(summary.contains("compile_test passed"));
+    assertFalse(summary.contains(largeContent));
+    assertFalse(summary.contains("overwrite"));
+    assertFalse(summary.contains("create_file"));
+  }
+
+  @Test
+  public void unfinishedCurrentTaskKeepsRawToolProtocol() {
+    AgentMessage call =
+        AgentMessage.assistant(
+            "",
+            Collections.singletonList(
+                new AgentToolCall(
+                    "read", "read_file", new ToolArguments(Collections.singletonMap("path", "main.txt")))));
+    List<AgentMessage> source =
+        Arrays.asList(
+            AgentMessage.system("system"),
+            AgentMessage.user("task"),
+            call,
+            AgentMessage.tool("read", "read_file", "content"));
+    assertEquals(source, AgentHistory.compactCompletedTasks(source));
+  }
+
+  @Test
   public void nativeModeRequiresRegisteredTerminalToolInsteadOfAcceptingPlainText() {
     AtomicInteger rounds = new AtomicInteger();
     ModelGateway gateway =

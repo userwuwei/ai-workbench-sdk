@@ -89,6 +89,9 @@ public final class AgentEngine implements Cancellable {
                 prompts.compose(
                     definition, new PromptContext(workspaceId, demand, promptRuntime));
             synchronized (this) {
+              List<AgentMessage> compacted = AgentHistory.compactCompletedTasks(messages);
+              messages.clear();
+              messages.addAll(compacted);
               evidence.clear();
               if (messages.isEmpty()) messages.add(AgentMessage.system(system));
               else if (messages.get(0).role() == AgentMessage.Role.SYSTEM)

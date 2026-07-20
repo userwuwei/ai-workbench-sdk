@@ -11,12 +11,11 @@ public final class CreateFileTool extends AbstractFileTool {
   public ToolSpec spec() {
     return new ToolSpec(
         "create_file",
-        "创建文件；已存在目标由宿主用户决定覆盖或新建",
+        "创建尚不存在的新文件；仅运行时明确授权的预创建入口允许例外，其他已有文件必须使用 search_replace",
         ToolSchemas.object(
             new String[][] {
               {"path", "string", "目标路径"},
-              {"content", "string", "完整内容"},
-              {"overwrite", "boolean", "兼容字段，最终以用户选择为准"}
+              {"content", "string", "新文件的完整内容"}
             },
             "path",
             "content"));

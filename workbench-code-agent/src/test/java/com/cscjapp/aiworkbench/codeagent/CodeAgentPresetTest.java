@@ -94,6 +94,12 @@ public final class CodeAgentPresetTest {
     assertFalse(common.contains("WebView"));
     assertFalse(common.contains("src/index"));
     assertTrue(common.contains("finalize_task"));
+    assertTrue(common.contains("create_file 只用于当前项目尚不存在的新路径"));
+    assertTrue(common.contains("都必须使用 search_replace"));
+    assertTrue(common.contains("planned_files 只表示任务涉及的文件"));
+    assertTrue(common.contains("search_replace.replacements[]"));
+    assertFalse(common.contains("create_file 用于写入模型已经生成的完整内容"));
+    assertFalse(common.contains("目标冲突由本地用户决定覆盖或新建"));
     assertTrue(composed.contains("language-specific-rules"));
   }
 

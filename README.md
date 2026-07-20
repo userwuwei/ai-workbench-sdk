@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.3'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.4'
 }
 ```
 
@@ -76,6 +76,7 @@ Code Agent 通用层提供：
 - `create_file` 文件冲突用户选择覆盖或自动新建。
 - 按 `completion_type` 检查真实验证证据和质量阻塞项。
 - Native Tools 与 Legacy 协议一致的终态约束。
+- 强制区分文件创建与编辑：新路径使用 `create_file`，已有文件修改使用 `search_replace`。
 
 语言 Profile 只保留语言规则、编译/运行工具、验证合同和语言专属验证器。
 
@@ -130,11 +131,11 @@ Logcat 使用可直接阅读的中文分段输出：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.3
+  publishToMavenLocal -PAIW_VERSION=1.1.4
 
-git tag 1.1.3
+git tag 1.1.4
 git push origin main
-git push origin 1.1.3
+git push origin 1.1.4
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
