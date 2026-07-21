@@ -136,6 +136,23 @@ public final class CodeAgentPresetTest {
                 .get("properties");
     assertTrue(planProperties.containsKey("task_type"));
     assertTrue(planProperties.containsKey("implementation_shape"));
+    Map<?, ?> planSchema =
+        find(preset.tools(), CodeAgentToolNames.PLAN_TASK).spec().inputSchema();
+    List<?> required = (List<?>) planSchema.get("required");
+    assertTrue(required.contains("writing_mode"));
+    assertTrue(required.contains("planned_files"));
+    assertTrue(required.contains("verification_plan"));
+    assertTrue(required.contains("steps"));
+    Map<?, ?> stepsSchema = (Map<?, ?>) planProperties.get("steps");
+    Map<?, ?> stepItems = (Map<?, ?>) stepsSchema.get("items");
+    Map<?, ?> stepProperties = (Map<?, ?>) stepItems.get("properties");
+    assertTrue(stepProperties.containsKey("id"));
+    assertTrue(stepProperties.containsKey("title"));
+    assertTrue(stepProperties.containsKey("phase"));
+    assertTrue(stepProperties.containsKey("required_tools"));
+    assertTrue(stepProperties.containsKey("acceptance"));
+    assertTrue(((List<?>) stepItems.get("required")).containsAll(
+        Arrays.asList("id", "title", "phase", "required_tools", "acceptance")));
   }
 
   @Test
@@ -329,6 +346,134 @@ public final class CodeAgentPresetTest {
   public void nativeAndLegacyCannotBypassFinalizeTool() {
     assertEquals(2, terminalRounds(true));
     assertEquals(2, terminalRounds(false));
+  }
+
+  @Test
+  public void nativeAndLegacyPlanCallsProduceSameNormalizedResult() {
+    assertEquals(normalizedPlanFromEngine(true), normalizedPlanFromEngine(false));
+  }
+
+  private Map<String, Object> normalizedPlanFromEngine(boolean nativeTools) {
+    CodeAgentPreset preset =
+        CodeAgentPreset.builder(profile(""))
+            .workspace(workspace)
+            .languageTools(FileToolSet.standard(workspace))
+            .build();
+    AtomicInteger rounds = new AtomicInteger();
+    Map<String, Object> legacyStep = map("step", "1", "action", "完成核心实现");
+    Map<String, Object> planArgs =
+        map(
+            "goal",
+            "完成任务",
+            "quality_mode",
+            "standard",
+            "writing_mode",
+            "targeted_edit",
+            "planned_files",
+            Collections.singletonList("main.txt"),
+            "verification_plan",
+            Collections.singletonList("syntax_check"),
+            "steps",
+            Collections.singletonList(legacyStep));
+    ModelGateway gateway =
+        (request, observer) -> {
+          if (rounds.incrementAndGet() == 1) {
+            if (nativeTools) {
+              observer.onComplete(
+                  new ModelResponse(
+                      "",
+                      "tool_calls",
+                      Collections.singletonList(
+                          new AgentToolCall(
+                              "plan",
+                              CodeAgentToolNames.PLAN_TASK,
+                              new ToolArguments(planArgs)))));
+            } else {
+              observer.onComplete(
+                  new ModelResponse(
+                      "{\"next_action\":{\"tool\":\"plan_task\",\"args\":"
+                          + new com.google.gson.Gson().toJson(planArgs)
+                          + "}}",
+                      "stop",
+                      Collections.emptyList()));
+            }
+          } else {
+            Map<String, Object> finish =
+                map(
+                    "status",
+                    "completed",
+                    "completion_type",
+                    "explain",
+                    "summary",
+                    "done");
+            if (nativeTools) {
+              observer.onComplete(
+                  new ModelResponse(
+                      "",
+                      "tool_calls",
+                      Collections.singletonList(
+                          new AgentToolCall(
+                              "final",
+                              CodeAgentToolNames.FINALIZE_TASK,
+                              new ToolArguments(finish)))));
+            } else {
+              observer.onComplete(
+                  new ModelResponse(
+                      "{\"next_action\":{\"tool\":\"finalize_task\",\"args\":"
+                          + new com.google.gson.Gson().toJson(finish)
+                          + "}}",
+                      "stop",
+                      Collections.emptyList()));
+            }
+          }
+          return Cancellable.NONE;
+        };
+    AgentEngine engine =
+        new AgentEngine(
+            definition(preset),
+            gateway,
+            new ModelEndpoint("http://localhost", "", "model", 0.2, nativeTools, false),
+            (request, callback) -> Cancellable.NONE,
+            Runnable::run,
+            "session",
+            "workspace",
+            false,
+            5);
+    AtomicReference<Map<String, Object>> planResult = new AtomicReference<>();
+    engine.submit(
+        "task",
+        new AgentObserver() {
+          @Override
+          public void onState(String state) {}
+
+          @Override
+          public void onDelta(String content, String reasoning) {}
+
+          @Override
+          public void onToolStarted(String id, String name, ToolArguments arguments) {}
+
+          @Override
+          public void onToolProgress(
+              String id, String stage, long current, long total, String message) {}
+
+          @Override
+          public void onToolCompleted(String id, String name, ToolResult result) {
+            if (CodeAgentToolNames.PLAN_TASK.equals(name)) planResult.set(result.data());
+          }
+
+          @Override
+          public void onValidation(ValidationResult result) {}
+
+          @Override
+          public void onFinal(String content) {}
+
+          @Override
+          public void onError(Throwable error) {
+            throw new AssertionError(error);
+          }
+        });
+    assertNotNull(planResult.get());
+    return planResult.get();
   }
 
   private int terminalRounds(boolean nativeTools) {

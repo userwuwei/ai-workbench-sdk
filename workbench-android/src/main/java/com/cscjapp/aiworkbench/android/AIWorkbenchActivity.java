@@ -129,7 +129,8 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
           request,
           endpoint,
           store,
-          AIWorkbench.runtimeOptions().modelGatewayFactory().create(request, endpoint));
+          AIWorkbench.runtimeOptions().modelGatewayFactory().create(request, endpoint),
+          AIWorkbench.runtimeOptions().logger());
     } catch (Throwable error) {
       showInitializationError(error);
       return;

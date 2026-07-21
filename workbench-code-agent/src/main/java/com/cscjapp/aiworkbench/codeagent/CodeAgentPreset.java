@@ -108,7 +108,8 @@ public final class CodeAgentPreset {
       String content =
           "你运行在通用 Code Agent 中。"
               + protocol
-              + "\n复杂任务先调用 plan_task，提交短计划、质量目标和验证策略。"
+              + "\n复杂任务先调用 plan_task，提交目标、写入模式、涉及文件、验证策略和 3 到 5 个核心步骤；explain 等简单任务无需强制规划。"
+              + "\nplan_task.steps[] 必须提供 id、完整动作 title、discover/implement/verify/quality/finalize phase、required_tools 和 acceptance；数字序号不能代替 title。"
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
               + "\n修改已有文件前先读取真实内容；同一文件多个修改点合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。"
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
