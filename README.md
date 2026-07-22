@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.1.4'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.2.0'
 }
 ```
 
@@ -33,6 +33,7 @@ CodeValidationContract verification = CodeValidationContract.builder()
     .defaultRequiredEvidence("compile_test")
     .exemptCompletionTypes("explain")
     .requireQualityReview("ui_product")
+    .requireManagedPlan("code_generation", "feature_integration", "ui_product", "refactor")
     .build();
 
 CodeLanguageProfile profile = CodeLanguageProfile.builder("my-language")
@@ -43,6 +44,7 @@ CodeLanguageProfile profile = CodeLanguageProfile.builder("my-language")
 
 CodeAgentPreset preset = CodeAgentPreset.builder(profile)
     .workspace(workspace)
+    .planningMode(CodePlanningMode.ADAPTIVE)
     .languageTools(languageTools)
     .languagePolicies(languagePolicies)
     .languageValidators(languageValidators)
@@ -77,6 +79,9 @@ Code Agent 通用层提供：
 - 按 `completion_type` 检查真实验证证据和质量阻塞项。
 - Native Tools 与 Legacy 协议一致的终态约束。
 - 强制区分文件创建与编辑：新路径使用 `create_file`，已有文件修改使用 `search_replace`。
+- 自适应精简受管计划：简单任务直接执行，复杂任务通过短 `plan_task` 按真实工具证据推进。
+- `ADAPTIVE / FORCE / SKIP` 三种规划模式；宿主也可通过 `code_agent_planning_mode` 启动参数选择。
+- 新写入会使旧验证和质量证据失效；只有 Validator 通过后计划才会完成。
 
 READ 工具应在成功结果的 `data.read_paths[]` 中返回本次真正交付内容的文件路径。Code Agent 也兼容单文件结果的 `path/resolved_path` 和批量结果的 `items[].result.path/resolved_path`；不得把仅请求但因截断或失败未返回的目标放入 `read_paths`。
 
@@ -133,11 +138,11 @@ Logcat 使用可直接阅读的中文分段输出：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.7
+  publishToMavenLocal -PAIW_VERSION=1.2.0
 
-git tag 1.1.7
+git tag 1.2.0
 git push origin main
-git push origin 1.1.7
+git push origin 1.2.0
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
