@@ -56,7 +56,7 @@ final class CodeMetaToolSchemas {
             "module_integration",
             "explain",
             "batch_edit"));
-    properties.put("goal", string("需要完成的任务目标。"));
+    properties.put("goal", limitedString("需要完成的任务目标。", 160));
     properties.put("task_summary", string("对用户需求和约束的简短理解。"));
     properties.put(
         "quality_mode",
@@ -71,17 +71,51 @@ final class CodeMetaToolSchemas {
         "writing_mode",
         enumeration(
             "计划采用的写入形态。",
+            "targeted_edit",
             "single_file",
             "multi_file_modular",
-            "staged_generation",
-            "targeted_edit"));
-    properties.put("planned_files", arrayOfString("预计创建或修改的文件。"));
-    properties.put("verification_plan", arrayOfString("完成前要执行的真实验证。"));
+            "staged_generation"));
+    properties.put("planned_files", plannedFilesSchema());
+    properties.put("verification_plan", limitedStringArray("完成前要执行的真实验证。", 6, 160));
     properties.put("implementation_shape", object("文件拆分和实现形态。"));
-    properties.put("steps", arrayOfObject("短执行步骤。"));
+    properties.put("steps", planStepsSchema());
+    properties.put("replan_reason", limitedString("真实证据变化后的短重规划原因。", 200));
     properties.put("self_review_required", bool("完成前是否要求结构化自查。"));
     properties.put("risks", arrayOfString("已识别的实现风险。"));
-    return objectSchema(properties, Arrays.asList("goal", "quality_mode"));
+    return objectSchema(
+        properties,
+        Arrays.asList(
+            "goal", "quality_mode", "writing_mode", "planned_files", "verification_plan", "steps"));
+  }
+
+  private static Map<String, Object> plannedFilesSchema() {
+    Map<String, Object> properties = new LinkedHashMap<>();
+    properties.put("path", limitedString("工作区内的预计文件路径。", 300));
+    properties.put("action", enumeration("计划动作，不代表覆盖授权。", "create", "edit"));
+    properties.put("purpose", limitedString("文件职责。", 120));
+    Map<String, Object> schema = new LinkedHashMap<>();
+    schema.put("type", "array");
+    schema.put("description", "预计创建或修改的文件；已有文件仍必须使用编辑工具。");
+    schema.put("items", objectSchema(properties, Collections.singletonList("path")));
+    schema.put("maxItems", 8);
+    return schema;
+  }
+
+  private static Map<String, Object> planStepsSchema() {
+    Map<String, Object> properties = new LinkedHashMap<>();
+    properties.put("id", limitedString("稳定步骤 ID。", 80));
+    properties.put("title", limitedString("短步骤标题。", 100));
+    properties.put("phase", enumeration("步骤阶段。", "discover", "implement", "verify", "quality"));
+    properties.put("required_tools", limitedStringArray("完成步骤需要的真实工具。", 4, 64));
+    properties.put("acceptance", limitedStringArray("步骤验收条件。", 2, 120));
+    Map<String, Object> schema = new LinkedHashMap<>();
+    schema.put("type", "array");
+    schema.put("description", "复杂任务的 3 至 5 个核心步骤。");
+    schema.put("items", objectSchema(
+        properties, Arrays.asList("id", "title", "phase", "required_tools", "acceptance")));
+    schema.put("minItems", 3);
+    schema.put("maxItems", 5);
+    return schema;
   }
 
   private static Map<String, Object> qualitySchema() {
@@ -167,6 +201,12 @@ final class CodeMetaToolSchemas {
     return schema;
   }
 
+  private static Map<String, Object> limitedString(String description, int maxLength) {
+    Map<String, Object> schema = string(description);
+    schema.put("maxLength", maxLength);
+    return schema;
+  }
+
   private static Map<String, Object> bool(String description) {
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", "boolean");
@@ -186,6 +226,16 @@ final class CodeMetaToolSchemas {
     schema.put("type", "array");
     schema.put("description", description);
     schema.put("items", Collections.singletonMap("type", "string"));
+    return schema;
+  }
+
+  private static Map<String, Object> limitedStringArray(
+      String description, int maxItems, int maxLength) {
+    Map<String, Object> schema = new LinkedHashMap<>();
+    schema.put("type", "array");
+    schema.put("description", description);
+    schema.put("items", limitedString("", maxLength));
+    schema.put("maxItems", maxItems);
     return schema;
   }
 

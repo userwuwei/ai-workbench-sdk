@@ -12,9 +12,11 @@ import java.util.Map;
 
 final class CodeMetaTool implements AgentTool {
   private final ToolSpec spec;
+  private final ManagedCodePlanCoordinator planCoordinator;
 
-  CodeMetaTool(ToolSpec spec) {
+  CodeMetaTool(ToolSpec spec, ManagedCodePlanCoordinator planCoordinator) {
     this.spec = spec;
+    this.planCoordinator = planCoordinator;
   }
 
   @Override
@@ -30,7 +32,9 @@ final class CodeMetaTool implements AgentTool {
   @Override
   public Cancellable execute(
       ToolContext context, ToolArguments arguments, ToolCallback callback) {
-    Map<String, Object> data = new LinkedHashMap<>(arguments.asMap());
+    Map<String, Object> data = CodeAgentToolNames.PLAN_TASK.equals(spec.name())
+        ? planCoordinator.acceptPlan(arguments.asMap())
+        : new LinkedHashMap<>(arguments.asMap());
     data.put("operation", spec.name());
     callback.onComplete(ToolResult.success(data));
     return Cancellable.NONE;

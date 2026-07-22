@@ -111,6 +111,7 @@ final class WorkbenchViewModel extends ViewModel {
   private final List<AgentMessage> restoredMessages = new ArrayList<>();
   private final Map<String, ToolArguments> toolArguments = new LinkedHashMap<>();
   private final Map<String, WorkbenchUiItem> browserItems = new LinkedHashMap<>();
+  private final List<String> planStepIds = new ArrayList<>();
   private final List<String> planStepLabels = new ArrayList<>();
   private final List<String> planStepStates = new ArrayList<>();
   private final List<String> planMetadata = new ArrayList<>();
@@ -131,6 +132,7 @@ final class WorkbenchViewModel extends ViewModel {
   private WorkbenchUiItem currentReason;
   private WorkbenchUiItem currentSummary;
   private WorkbenchUiItem currentPlan;
+  private boolean managedPlanActive;
   private ToolRunningState currentToolRunningState = ToolRunningState.hidden();
 
   LiveData<List<WorkbenchUiItem>> items() {
@@ -220,6 +222,7 @@ final class WorkbenchViewModel extends ViewModel {
       return;
     }
     state.add(WorkbenchUiItem.userDemand(userName, demand.trim()));
+    clearActivePlan();
     postItems(false);
     running.setValue(true);
     toolArguments.clear();
@@ -280,6 +283,7 @@ final class WorkbenchViewModel extends ViewModel {
     restoredMessages.clear();
     toolArguments.clear();
     browserItems.clear();
+    planStepIds.clear();
     planStepLabels.clear();
     planStepStates.clear();
     planMetadata.clear();
@@ -288,6 +292,7 @@ final class WorkbenchViewModel extends ViewModel {
     currentReason = null;
     currentSummary = null;
     currentPlan = null;
+    managedPlanActive = false;
     items.setValue(new ArrayList<>());
     planItems.setValue(new ArrayList<>());
     currentToolRunningState = ToolRunningState.hidden();
@@ -297,6 +302,17 @@ final class WorkbenchViewModel extends ViewModel {
     if (store != null && definition != null && request != null) {
       store.clear(definition.id(), request.workspaceId());
     }
+  }
+
+  private void clearActivePlan() {
+    planState.clear();
+    planStepIds.clear();
+    planStepLabels.clear();
+    planStepStates.clear();
+    planMetadata.clear();
+    currentPlan = null;
+    managedPlanActive = false;
+    planItems.postValue(new ArrayList<>());
   }
 
   synchronized void persistUiState() {
@@ -688,7 +704,12 @@ final class WorkbenchViewModel extends ViewModel {
       renderToolResult("plan_task", args, result);
       return;
     }
-    Map<String, Object> source = args == null ? Collections.emptyMap() : args.asMap();
+    Object normalized = result.data().get("normalized_plan");
+    managedPlanActive = normalized instanceof Map;
+    Map<?, ?> source = normalized instanceof Map
+        ? (Map<?, ?>) normalized
+        : args == null ? Collections.emptyMap() : args.asMap();
+    planStepIds.clear();
     planStepLabels.clear();
     planStepStates.clear();
     planMetadata.clear();
@@ -697,15 +718,19 @@ final class WorkbenchViewModel extends ViewModel {
     String qualityMode = value(source.get("quality_mode"));
     boolean interfaceProduct = "interface_product".equals(qualityMode);
     planMetadata.add(interfaceProduct ? "质量模式：界面产品化" : "质量模式：标准代码质量");
-    String quality = summarizeMapValues(source.get("quality_bar"), 2, 96);
+    String quality = declaredSummary(source.get("quality_bar"), 2, 96);
     if (!quality.isEmpty()) planMetadata.add("质量标准：" + quality);
+    String files = summarizePlannedFiles(source.get("planned_files"), 8, 180);
+    if (!files.isEmpty()) planMetadata.add("涉及文件：" + files);
+    String verification = declaredSummary(source.get("verification_plan"), 6, 180);
+    if (!verification.isEmpty()) planMetadata.add("验证策略：" + verification);
     planMetadata.add("质检状态：未审查");
     if (interfaceProduct) {
-      planMetadata.add(source.get("interface_design_spec") instanceof Map
+      planMetadata.add(!value(source.get("interface_design_spec")).isEmpty()
           ? "设计规格：已定义" : "设计规格：未定义");
-      planMetadata.add("打磨状态：未开始");
+      planMetadata.add("打磨状态：未声明");
     }
-    appendPlanSteps(source.get("steps"));
+    appendPlanSteps(source.get("steps"), normalized instanceof Map ? 5 : Integer.MAX_VALUE);
     if (planStepLabels.isEmpty()) {
       if (interfaceProduct) {
         addPlanStep("确定写入形态", "done");
@@ -725,6 +750,7 @@ final class WorkbenchViewModel extends ViewModel {
       }
     }
     rebuildPlanItem();
+    applyPlanState(result.data().get("plan_state"));
     if (currentReason != null) {
       currentReason.title = "任务计划已建立";
       replaceReasonContent(goal.isEmpty() ? "已建立任务执行计划" : goal);
@@ -733,19 +759,28 @@ final class WorkbenchViewModel extends ViewModel {
     }
   }
 
-  private void appendPlanSteps(Object raw) {
+  private void appendPlanSteps(Object raw, int maxSteps) {
     if (!(raw instanceof List)) return;
     for (Object value : (List<?>) raw) {
+      if (planStepLabels.size() >= maxSteps) break;
+      String id = "legacy-" + (planStepLabels.size() + 1);
       String label;
       String status = "pending";
       if (value instanceof Map) {
         Map<?, ?> map = (Map<?, ?>) value;
-        label = first(map, "title", "step", "name", "description");
+        id = first(map, "id");
+        if (id.isEmpty()) id = "legacy-" + (planStepLabels.size() + 1);
+        label = first(map, "title", "action", "description", "name");
+        if (label.isEmpty()) {
+          String legacyStep = first(map, "step");
+          if (!legacyStep.matches("[0-9]+[.)、]?")) label = legacyStep;
+        }
         status = first(map, "status", "state");
       } else {
         label = value(value);
       }
       if (label.isEmpty()) continue;
+      planStepIds.add(id);
       planStepLabels.add(label);
       planStepStates.add(normalizePlanStatus(status));
     }
@@ -753,6 +788,7 @@ final class WorkbenchViewModel extends ViewModel {
   }
 
   private void addPlanStep(String label, String status) {
+    planStepIds.add("fallback-" + (planStepIds.size() + 1));
     planStepLabels.add(label);
     planStepStates.add(status);
   }
@@ -803,13 +839,25 @@ final class WorkbenchViewModel extends ViewModel {
   private void advancePlanForTool(String toolName, ToolArguments args, ToolResult result) {
     if (planStepStates.isEmpty() || toolName == null) return;
     if ("finalize_task".equals(toolName)) {
-      advancePlan(true);
       return;
     }
     if ("quality_review".equals(toolName)) {
+      if (result != null && applyPlanState(result.data().get("plan_state"))) {
+        applyQualityMetadata(args);
+        rebuildPlanItem();
+        return;
+      }
+      if (managedPlanActive) {
+        applyQualityMetadata(args);
+        rebuildPlanItem();
+        return;
+      }
       applyQualityReview(args);
       return;
     }
+    if (result != null && Boolean.FALSE.equals(result.data().get("passed"))) return;
+    if (result != null && applyPlanState(result.data().get("plan_state"))) return;
+    if (managedPlanActive) return;
 
     int target = findPlanTargetForTool(toolName);
     if (target < 0) return;
@@ -860,6 +908,27 @@ final class WorkbenchViewModel extends ViewModel {
         && !bool(review.get("minimal_version_risk"), false)
         && isEmptyCollection(review.get("blocking_gaps"))
         && isEmptyCollection(review.get("claimed_but_unsupported"));
+    applyQualityMetadata(args);
+    if (!passed) {
+      String gaps = summarizeList(review.get("blocking_gaps"), 3, 120);
+      replacePlanMetadata("待补强：", gaps.isEmpty() ? null : "待补强：" + gaps);
+      rebuildPlanItem();
+      return;
+    }
+
+    replacePlanMetadata("待补强：", null);
+    int reviewStep = markMatchingStep("结构化质量自查", "done");
+    markMatchingStep("修复质检阻塞缺口", "skipped");
+    startNextPending(reviewStep + 1);
+    rebuildPlanItem();
+  }
+
+  private void applyQualityMetadata(ToolArguments args) {
+    Map<String, Object> review = args == null ? Collections.emptyMap() : args.asMap();
+    boolean passed = bool(review.get("passed"), false)
+        && !bool(review.get("minimal_version_risk"), false)
+        && isEmptyCollection(review.get("blocking_gaps"))
+        && isEmptyCollection(review.get("claimed_but_unsupported"));
     replacePlanMetadata("质检状态：", passed ? "质检状态：已通过" : "质检状态：有待补强");
 
     String polish = value(review.get("experience_polish_status"));
@@ -871,16 +940,21 @@ final class WorkbenchViewModel extends ViewModel {
       markMatchingStep("补强用户可见体验", "skipped");
     }
 
-    int reviewStep = markMatchingStep("结构化质量自查", "done");
-    if (passed) {
-      replacePlanMetadata("待补强：", null);
-      markMatchingStep("修复质检阻塞缺口", "skipped");
-    } else {
-      String gaps = summarizeList(review.get("blocking_gaps"), 3, 120);
-      replacePlanMetadata("待补强：", gaps.isEmpty() ? null : "待补强：" + gaps);
+  }
+
+  private boolean applyPlanState(Object raw) {
+    if (!(raw instanceof Map) || planStepIds.size() != planStepStates.size()) return false;
+    Map<?, ?> state = (Map<?, ?>) raw;
+    List<String> done = stringValues(state.get("done_steps"));
+    Map<?, ?> current = map(state.get("current_step"));
+    String currentId = value(current.get("id"));
+    if (done.isEmpty() && currentId.isEmpty() && !state.containsKey("current_step")) return false;
+    for (int i = 0; i < planStepIds.size(); i++) {
+      String id = planStepIds.get(i);
+      planStepStates.set(i, done.contains(id) ? "done" : id.equals(currentId) ? "running" : "pending");
     }
-    startNextPending(reviewStep + 1);
     rebuildPlanItem();
+    return true;
   }
 
   private void replacePlanMetadata(String prefix, String replacement) {
@@ -920,6 +994,10 @@ final class WorkbenchViewModel extends ViewModel {
 
   private void completePlan() {
     advancePlan(true);
+    if (currentPlan != null) {
+      currentPlan.detailExpanded = false;
+      planItems.postValue(new ArrayList<>(planState));
+    }
   }
 
   private void renderBrowserResult(
@@ -1360,6 +1438,31 @@ final class WorkbenchViewModel extends ViewModel {
     return joinLimited(values, "；", maxChars);
   }
 
+  private static String declaredSummary(Object raw, int limit, int maxChars) {
+    if (raw instanceof Map) return summarizeMapValues(raw, limit, maxChars);
+    if (raw instanceof List) return summarizeList(raw, limit, maxChars);
+    String text = value(raw);
+    return text.length() <= maxChars ? text : text.substring(0, Math.max(0, maxChars - 1)) + "…";
+  }
+
+  private static String summarizePlannedFiles(Object raw, int limit, int maxChars) {
+    if (!(raw instanceof List)) return declaredSummary(raw, limit, maxChars);
+    List<String> files = new ArrayList<>();
+    for (Object item : (List<?>) raw) {
+      if (item instanceof Map) {
+        Map<?, ?> file = (Map<?, ?>) item;
+        String path = first(file, "path", "file", "name");
+        String action = first(file, "action");
+        if (!path.isEmpty()) files.add(path + (action.isEmpty() ? "" : "（" + action + "）"));
+      } else {
+        String path = value(item);
+        if (!path.isEmpty()) files.add(path);
+      }
+      if (files.size() >= limit) break;
+    }
+    return joinLimited(files, "；", maxChars);
+  }
+
   private static String summarizeValue(Object raw) {
     if (raw instanceof List) {
       for (Object item : (List<?>) raw) {
@@ -1411,6 +1514,16 @@ final class WorkbenchViewModel extends ViewModel {
     if (raw instanceof List) return ((List<?>) raw).isEmpty();
     if (raw instanceof Map) return ((Map<?, ?>) raw).isEmpty();
     return value(raw).isEmpty();
+  }
+
+  private static List<String> stringValues(Object raw) {
+    if (!(raw instanceof List)) return Collections.emptyList();
+    List<String> out = new ArrayList<>();
+    for (Object item : (List<?>) raw) {
+      String text = value(item);
+      if (!text.isEmpty()) out.add(text);
+    }
+    return out;
   }
 
   private static String first(Map<?, ?> map, String... keys) {

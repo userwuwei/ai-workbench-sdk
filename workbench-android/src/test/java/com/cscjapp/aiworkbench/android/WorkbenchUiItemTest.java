@@ -95,7 +95,9 @@ public final class WorkbenchUiItemTest {
 
   @Test
   public void allSevenReferenceCardTypesRemainStable() {
-    assertEquals(1, WorkbenchUiItem.plan("p", Arrays.asList("s")).getItemType());
+    WorkbenchUiItem plan = WorkbenchUiItem.plan("p", Arrays.asList("s"));
+    assertEquals(1, plan.getItemType());
+    assertTrue(plan.detailExpanded);
     assertEquals(2, WorkbenchUiItem.thought("t", "c", "code").getItemType());
     assertEquals(3, WorkbenchUiItem.summary("t", "c").getItemType());
     assertEquals(4, WorkbenchUiItem.reason("t", "c").getItemType());

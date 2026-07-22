@@ -182,6 +182,8 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         LinearLayout stepsContainer = helper.getView(R.id.aiw_llPlanSteps);
 
         String goal = "";
+        String files = "";
+        String verification = "";
         String quality = "";
         String qualityFocus = "";
         String qualityMode = "";
@@ -197,6 +199,10 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
                 String trimLine = line.trim();
                 if (trimLine.startsWith("目标：")) {
                     goal = trimLine;
+                } else if (trimLine.startsWith("涉及文件：")) {
+                    files = trimLine;
+                } else if (trimLine.startsWith("验证策略：")) {
+                    verification = trimLine;
                 } else if (trimLine.startsWith("质量标准：")) {
                     quality = trimLine.replace("质量标准：", "");
                 } else if (trimLine.startsWith("质检重点：")) {
@@ -217,7 +223,8 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
 
         tvProgress.setText(formatPlanCurrentStep(item.title));
         bindPlanProgress(tvPlanCount, pbPlanProgress, planSteps);
-        bindPlanGoal(tvPlanGoal, item.detailExpanded ? goal : "");
+        String planOverview = mergePlanOverview(goal, files, verification);
+        bindPlanGoal(tvPlanGoal, item.detailExpanded ? planOverview : "");
         String compactQuality = mergePlanQuality(mergePlanQuality(mergePlanQuality(qualityMode, qualityStatus), designStatus), polishStatus);
         bindPlanQuality(qualityContainer, item.detailExpanded
                 ? mergePlanQuality(compactQuality, mergePlanQuality(qualityFocus, quality))
@@ -262,6 +269,20 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
             }
             notifyPresentationStateChanged(item);
         } : null);
+    }
+
+    private String mergePlanOverview(String goal, String files, String verification) {
+        StringBuilder out = new StringBuilder();
+        for (String value : new String[]{goal, files, verification}) {
+            if (TextUtils.isEmpty(value)) {
+                continue;
+            }
+            if (out.length() > 0) {
+                out.append('\n');
+            }
+            out.append(value);
+        }
+        return out.toString();
     }
 
     private String formatPlanCurrentStep(String title) {

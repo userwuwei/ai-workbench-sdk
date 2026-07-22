@@ -22,6 +22,7 @@ import java.util.Map;
 
 /** Opt-in language-neutral Code Agent components composed by an app WorkbenchDefinition. */
 public final class CodeAgentPreset {
+  public static final String EXTRA_PLANNING_MODE = "code_agent_planning_mode";
   private final List<PromptContributor> promptContributors;
   private final List<AgentTool> tools;
   private final List<ToolPolicy> toolPolicies;
@@ -31,9 +32,11 @@ public final class CodeAgentPreset {
     if (builder.workspace == null) throw new IllegalStateException("workspace required");
     Map<String, CodeToolRole> roles = defaultRoles();
     roles.putAll(builder.roles);
+    ManagedCodePlanCoordinator planCoordinator =
+        new ManagedCodePlanCoordinator(builder.planningMode, builder.profile.verificationContract(), roles);
 
     List<PromptContributor> prompts = new ArrayList<>();
-    prompts.add(commonPrompt());
+    prompts.add(commonPrompt(builder.planningMode));
     if (!builder.profile.languageRules().isEmpty()) {
       prompts.add(
           context ->
@@ -50,20 +53,21 @@ public final class CodeAgentPreset {
     List<AgentTool> combinedTools = new ArrayList<>();
     for (ToolSpec spec :
         CodeMetaToolSchemas.create(builder.profile.metaToolExtensions())) {
-      combinedTools.add(new CodeMetaTool(spec));
+      combinedTools.add(new CodeMetaTool(spec, planCoordinator));
     }
     combinedTools.addAll(builder.languageTools);
     Map<String, AgentTool> unique = new LinkedHashMap<>();
     for (AgentTool tool : combinedTools) {
       if (tool == null || tool.spec() == null) throw new IllegalArgumentException("invalid tool");
       String name = tool.spec().name();
-      if (unique.put(name, new EvidenceTool(tool)) != null) {
+      if (unique.put(name, new EvidenceTool(tool, planCoordinator)) != null) {
         throw new IllegalStateException("duplicate tool: " + name);
       }
     }
     tools = Collections.unmodifiableList(new ArrayList<>(unique.values()));
 
     List<ToolPolicy> policies = new ArrayList<>();
+    policies.add(planCoordinator);
     policies.add(new ReadBeforeEditPolicy(builder.workspace, roles));
     if (unique.containsKey("create_file")) {
       policies.add(new ExistingFileConflictPolicy(builder.workspace));
@@ -73,7 +77,7 @@ public final class CodeAgentPreset {
 
     List<TaskValidator> validation = new ArrayList<>();
     validation.add(
-        new CodeCompletionValidator(builder.profile.verificationContract()));
+        new CodeCompletionValidator(builder.profile.verificationContract(), planCoordinator));
     validation.addAll(builder.languageValidators);
     validators = Collections.unmodifiableList(validation);
   }
@@ -98,7 +102,7 @@ public final class CodeAgentPreset {
     return validators;
   }
 
-  private static PromptContributor commonPrompt() {
+  private static PromptContributor commonPrompt(CodePlanningMode planningMode) {
     return context -> {
       boolean nativeTools = !Boolean.FALSE.equals(context.runtime().get("native_tools"));
       String protocol =
@@ -108,7 +112,7 @@ public final class CodeAgentPreset {
       String content =
           "你运行在通用 Code Agent 中。"
               + protocol
-              + "\n复杂任务先调用 plan_task，提交短计划、质量目标和验证策略。"
+              + planningInstruction(planningMode)
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
               + "\n修改已有文件前先读取真实内容；同一文件多个修改点合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。"
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
@@ -120,6 +124,17 @@ public final class CodeAgentPreset {
           new PromptSection(
               "code_agent_protocol", PromptPhase.BASE, 0, 5000, content));
     };
+  }
+
+  private static String planningInstruction(CodePlanningMode mode) {
+    if (mode == CodePlanningMode.SKIP) {
+      return "\n当前任务按简单流程执行，不要求 plan_task；直接使用必要的读取、修改和验证工具。";
+    }
+    String complex =
+        "完整代码生成、多文件修改、功能集成、重构、界面、游戏、动画、可视化或复杂交互属于复杂任务，必须先调用 plan_task；解释、注释、确定性替换和单点修复可直接执行。";
+    return mode == CodePlanningMode.FORCE
+        ? "\n当前任务要求首次写入前调用 plan_task。" + complex
+        : "\n采用自适应规划：" + complex;
   }
 
   private static Map<String, CodeToolRole> defaultRoles() {
@@ -146,6 +161,7 @@ public final class CodeAgentPreset {
     private final List<ToolPolicy> languagePolicies = new ArrayList<>();
     private final List<TaskValidator> languageValidators = new ArrayList<>();
     private final Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    private CodePlanningMode planningMode = CodePlanningMode.ADAPTIVE;
 
     private Builder(CodeLanguageProfile profile) {
       if (profile == null) throw new IllegalArgumentException("profile required");
@@ -183,6 +199,15 @@ public final class CodeAgentPreset {
       return this;
     }
 
+    public Builder planningMode(CodePlanningMode value) {
+      planningMode = value == null ? CodePlanningMode.ADAPTIVE : value;
+      return this;
+    }
+
+    public Builder planningMode(String value) {
+      return planningMode(CodePlanningMode.from(value));
+    }
+
     public CodeAgentPreset build() {
       return new CodeAgentPreset(this);
     }
@@ -190,9 +215,11 @@ public final class CodeAgentPreset {
 
   private static final class EvidenceTool implements AgentTool {
     private final AgentTool delegate;
+    private final ManagedCodePlanCoordinator planCoordinator;
 
-    EvidenceTool(AgentTool delegate) {
+    EvidenceTool(AgentTool delegate, ManagedCodePlanCoordinator planCoordinator) {
       this.delegate = delegate;
+      this.planCoordinator = planCoordinator;
     }
 
     @Override
@@ -208,6 +235,7 @@ public final class CodeAgentPreset {
     @Override
     public Cancellable execute(
         ToolContext context, ToolArguments arguments, ToolCallback callback) {
+      long runGeneration = planCoordinator.generation();
       return delegate.execute(
           context,
           arguments,
@@ -220,26 +248,21 @@ public final class CodeAgentPreset {
 
             @Override
             public void onComplete(ToolResult result) {
+              ToolResult normalized = result;
               if (result != null) {
                 Map<String, Object> data = new LinkedHashMap<>(result.data());
                 if (!data.containsKey("operation")) data.put("operation", spec().name());
                 if (result.isSuccess()) {
-                  callback.onComplete(ToolResult.success(data));
-                  return;
-                }
-                if (result.status() == ToolResult.Status.ERROR) {
+                  normalized = ToolResult.success(data);
+                } else if (result.status() == ToolResult.Status.ERROR) {
                   data.put("passed", false);
                   data.put("tool_status", "error");
-                  callback.onComplete(
-                      ToolResult.error(
-                          result.errorCode(),
-                          result.message(),
-                          result.retryable(),
-                          data));
-                  return;
+                  normalized = ToolResult.error(
+                      result.errorCode(), result.message(), result.retryable(), data);
                 }
               }
-              callback.onComplete(result);
+              callback.onComplete(planCoordinator.recordAndDecorate(
+                  runGeneration, spec().name(), normalized));
             }
           });
     }

@@ -15,6 +15,7 @@ public final class CodeValidationContract {
   private final List<String> defaultEvidence;
   private final Set<String> evidenceExemptTypes;
   private final Set<String> qualityReviewTypes;
+  private final Set<String> managedPlanTypes;
   private final boolean finalizeEvidenceRequired;
 
   private CodeValidationContract(Builder builder) {
@@ -28,6 +29,8 @@ public final class CodeValidationContract {
         Collections.unmodifiableSet(new LinkedHashSet<>(builder.evidenceExemptTypes));
     qualityReviewTypes =
         Collections.unmodifiableSet(new LinkedHashSet<>(builder.qualityReviewTypes));
+    managedPlanTypes =
+        Collections.unmodifiableSet(new LinkedHashSet<>(builder.managedPlanTypes));
     finalizeEvidenceRequired = builder.finalizeEvidenceRequired;
   }
 
@@ -44,6 +47,10 @@ public final class CodeValidationContract {
 
   public boolean requiresQualityReview(String completionType) {
     return qualityReviewTypes.contains(safe(completionType));
+  }
+
+  public boolean requiresManagedPlan(String completionType) {
+    return managedPlanTypes.contains(safe(completionType));
   }
 
   public boolean finalizeEvidenceRequired() {
@@ -70,6 +77,7 @@ public final class CodeValidationContract {
     private final List<String> defaultEvidence = new ArrayList<>();
     private final Set<String> evidenceExemptTypes = new LinkedHashSet<>();
     private final Set<String> qualityReviewTypes = new LinkedHashSet<>();
+    private final Set<String> managedPlanTypes = new LinkedHashSet<>();
     private boolean finalizeEvidenceRequired = true;
 
     public Builder defaultRequiredEvidence(String... operations) {
@@ -104,6 +112,16 @@ public final class CodeValidationContract {
         for (String type : completionTypes) {
           String value = safe(type);
           if (!value.isEmpty()) qualityReviewTypes.add(value);
+        }
+      }
+      return this;
+    }
+
+    public Builder requireManagedPlan(String... completionTypes) {
+      if (completionTypes != null) {
+        for (String type : completionTypes) {
+          String value = safe(type);
+          if (!value.isEmpty()) managedPlanTypes.add(value);
         }
       }
       return this;

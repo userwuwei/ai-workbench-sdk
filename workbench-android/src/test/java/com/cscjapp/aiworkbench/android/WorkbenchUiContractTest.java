@@ -107,6 +107,28 @@ public final class WorkbenchUiContractTest {
   }
 
   @Test
+  public void managedPlanUiUsesNormalizedEvidenceWithoutSessionUpgrade() throws Exception {
+    String viewModel =
+        read("src/main/java/com/cscjapp/aiworkbench/android/WorkbenchViewModel.java");
+    String render = methodBody(viewModel, "private void renderPlan");
+    String advance = methodBody(viewModel, "private void advancePlanForTool");
+    String submit = methodBody(viewModel, "synchronized void submit");
+    String complete = methodBody(viewModel, "private void completePlan");
+
+    assertTrue(render.contains("normalized_plan"));
+    assertTrue(render.contains("applyPlanState"));
+    assertTrue(render.contains("涉及文件："));
+    assertTrue(render.contains("验证策略："));
+    assertTrue(viewModel.contains("first(map, \"title\", \"action\", \"description\", \"name\")"));
+    assertTrue(advance.contains("applyPlanState"));
+    assertTrue(!advance.contains("advancePlan(true)"));
+    assertTrue(submit.contains("clearActivePlan()"));
+    assertTrue(complete.contains("detailExpanded = false"));
+    assertTrue(viewModel.contains("new SessionSnapshot(3,"));
+    assertTrue(!viewModel.contains("new SessionSnapshot(4,"));
+  }
+
+  @Test
   public void auraOptimizationPreservesVisualContractAndAllocatesOutsideDraw() throws Exception {
     String aura =
         read(

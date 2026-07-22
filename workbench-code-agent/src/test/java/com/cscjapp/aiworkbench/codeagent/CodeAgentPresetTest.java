@@ -104,6 +104,94 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void planningModesExposeStableLanguageNeutralInstructions() {
+    String adaptive = commonPrompt(CodePlanningMode.ADAPTIVE);
+    String force = commonPrompt(CodePlanningMode.FORCE);
+    String skip = commonPrompt(CodePlanningMode.SKIP);
+
+    assertTrue(adaptive.contains("采用自适应规划"));
+    assertTrue(adaptive.contains("多文件修改"));
+    assertTrue(force.contains("首次写入前调用 plan_task"));
+    assertTrue(skip.contains("不要求 plan_task"));
+    for (String prompt : Arrays.asList(adaptive, force, skip)) {
+      assertFalse(prompt.contains("HTML"));
+      assertFalse(prompt.contains("Python"));
+      assertFalse(prompt.contains("WebView"));
+    }
+    assertEquals(CodePlanningMode.ADAPTIVE, CodePlanningMode.from(null));
+    assertEquals(CodePlanningMode.ADAPTIVE, CodePlanningMode.from("unknown"));
+    assertEquals(CodePlanningMode.FORCE, CodePlanningMode.from("force"));
+    assertEquals(CodePlanningMode.SKIP, CodePlanningMode.from("SKIP"));
+  }
+
+  @Test
+  public void planSchemaIsShortAndStructurallyExplicit() {
+    CodeAgentPreset preset =
+        CodeAgentPreset.builder(profile(""))
+            .workspace(workspace)
+            .build();
+    Map<String, Object> schema =
+        find(preset.tools(), CodeAgentToolNames.PLAN_TASK).spec().inputSchema();
+    Map<?, ?> properties = (Map<?, ?>) schema.get("properties");
+    Map<?, ?> steps = (Map<?, ?>) properties.get("steps");
+    Map<?, ?> stepItem = (Map<?, ?>) steps.get("items");
+    Map<?, ?> stepProperties = (Map<?, ?>) stepItem.get("properties");
+    Map<?, ?> files = (Map<?, ?>) properties.get("planned_files");
+
+    assertEquals(3, steps.get("minItems"));
+    assertEquals(5, steps.get("maxItems"));
+    assertEquals(8, files.get("maxItems"));
+    assertTrue(stepProperties.containsKey("id"));
+    assertTrue(stepProperties.containsKey("title"));
+    assertTrue(stepProperties.containsKey("phase"));
+    assertTrue(stepProperties.containsKey("required_tools"));
+    assertTrue(stepProperties.containsKey("acceptance"));
+    assertTrue(((List<?>) schema.get("required")).containsAll(
+        Arrays.asList(
+            "goal", "quality_mode", "writing_mode", "planned_files",
+            "verification_plan", "steps")));
+  }
+
+  @Test
+  public void legacyAndMalformedPlansNormalizeWithoutRepairRound() {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .build();
+    CodePlanNormalizer normalizer = new CodePlanNormalizer(contract);
+    Map<String, Object> normalized =
+        normalizer.normalize(
+            map(
+                "goal", "构建移动端交互",
+                "quality_mode", "interface_product",
+                "verification_plan",
+                Arrays.asList("syntax_check", "browser_test: 启动和重开"),
+                "quality_bar", "保持交互完整且移动端不溢出",
+                "interface_design_spec", "单列布局，按钮适配触控",
+                "steps",
+                Collections.singletonList(
+                    map("step", "1", "action", "完成核心游戏实现"))));
+
+    List<?> steps = (List<?>) normalized.get("steps");
+    assertTrue(steps.size() >= 3 && steps.size() <= 5);
+    assertEquals("完成核心游戏实现", ((Map<?, ?>) steps.get(0)).get("title"));
+    assertEquals("step-1", ((Map<?, ?>) steps.get(0)).get("id"));
+    assertEquals("保持交互完整且移动端不溢出", normalized.get("quality_bar"));
+    assertEquals("单列布局，按钮适配触控", normalized.get("interface_design_spec"));
+    Map<?, ?> verify = findStep(steps, "verify");
+    assertEquals(Arrays.asList("syntax_check", "browser_test"), verify.get("required_tools"));
+
+    Map<String, Object> malformed =
+        normalizer.normalize(
+            map(
+                "goal", "修复页面",
+                "steps", "[{\"step\":\"1\"}]",
+                "planned_files", "index.html"));
+    assertEquals(4, ((List<?>) malformed.get("steps")).size());
+    assertEquals("targeted_edit", malformed.get("writing_mode"));
+  }
+
+  @Test
   public void metaSchemaExtensionMergesWithoutReplacingBaseProperties() {
     Map<String, Object> extraProperty = new LinkedHashMap<>();
     extraProperty.put("type", "string");
@@ -326,9 +414,271 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void managedPlanAdvancesOnlyFromValidCurrentRunEvidence() {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .requireQualityReview("ui_product")
+            .requireManagedPlan("ui_product")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.QUALITY_REVIEW, CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles);
+    AgentRunContext run = new AgentRunContext(11L, "session", "workspace", "task");
+    coordinator.onRunStarted(run);
+    long generation = coordinator.generation();
+    Map<String, Object> planResult =
+        coordinator.acceptPlan(
+            map(
+                "goal", "实现交互产品",
+                "quality_mode", "interface_product",
+                "verification_plan", Arrays.asList("syntax_check", "browser_test"),
+                "steps",
+                Arrays.asList(
+                    step("discover", "读取上下文", "discover", "read_file"),
+                    step("implement", "完成实现", "implement", "search_replace"),
+                    step("verify", "执行验证", "verify", "syntax_check", "browser_test"),
+                    step("quality", "质量审查", "quality", "quality_review"))));
+    assertEquals("discover", currentStepId(planResult.get("plan_state")));
+    assertTrue(String.valueOf(planResult.get("plan_state")).length() <= 800);
+
+    ToolResult read = coordinator.recordAndDecorate(
+        generation, "read_file", ToolResult.success(map("content", "source")));
+    assertEquals("implement", currentStepId(read.data().get("plan_state")));
+    ToolResult duplicateRead = coordinator.recordAndDecorate(
+        generation, "read_file", ToolResult.success(map("content", "source")));
+    assertFalse(duplicateRead.data().containsKey("plan_state"));
+
+    coordinator.recordAndDecorate(
+        generation, "search_replace", ToolResult.success(map("changed", false)));
+    assertFalse(coordinator.isComplete());
+    ToolResult edited = coordinator.recordAndDecorate(
+        generation, "search_replace", ToolResult.success(map("changed", true)));
+    assertEquals("verify", currentStepId(edited.data().get("plan_state")));
+
+    coordinator.recordAndDecorate(
+        generation, "syntax_check", ToolResult.success(map("passed", true)));
+    coordinator.recordAndDecorate(
+        generation, "browser_test", ToolResult.success(map("passed", false)));
+    assertFalse(coordinator.isComplete());
+    ToolResult verified = coordinator.recordAndDecorate(
+        generation, "browser_test", ToolResult.success(map("passed", true)));
+    assertEquals("quality", currentStepId(verified.data().get("plan_state")));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "quality_review",
+        ToolResult.success(
+            map(
+                "passed", true,
+                "blocking_gaps", "still blocked",
+                "minimal_version_risk", false)));
+    assertFalse(coordinator.isComplete());
+    coordinator.recordAndDecorate(
+        generation,
+        "quality_review",
+        ToolResult.success(
+            map(
+                "passed", true,
+                "blocking_gaps", Collections.emptyList(),
+                "claimed_but_unsupported", Collections.emptyList(),
+                "minimal_version_risk", false)));
+    assertTrue(coordinator.isComplete());
+
+    ToolResult changedAgain = coordinator.recordAndDecorate(
+        generation, "search_replace", ToolResult.success(map("changed", true)));
+    assertFalse(coordinator.isComplete());
+    assertEquals("verify", currentStepId(changedAgain.data().get("plan_state")));
+
+    coordinator.onRunStarted(new AgentRunContext(12L, "session", "workspace", "next"));
+    ToolResult late = coordinator.recordAndDecorate(
+        generation, "browser_test", ToolResult.success(map("passed", true)));
+    assertFalse(late.data().containsKey("plan_state"));
+    assertFalse(coordinator.hasPlan());
+  }
+
+  @Test
+  public void forcePlanBlocksWritesButSkipDoesNotBypassVerification() {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check")
+            .requireManagedPlan("ui_product")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ManagedCodePlanCoordinator force =
+        new ManagedCodePlanCoordinator(CodePlanningMode.FORCE, contract, roles);
+    force.onRunStarted(new AgentRunContext(21L, "s", "w", "task"));
+    ToolInvocation edit =
+        new ToolInvocation("edit", tool("search_replace"), ToolArguments.empty());
+    assertTrue(force.supports(edit));
+    AtomicReference<ToolPolicyDecision> decision = new AtomicReference<>();
+    force.evaluate(null, edit, decision::set);
+    assertEquals("managed_plan_required", decision.get().result().errorCode());
+    assertTrue(decision.get().result().retryable());
+
+    ManagedCodePlanCoordinator skip =
+        new ManagedCodePlanCoordinator(CodePlanningMode.SKIP, contract, roles);
+    skip.onRunStarted(new AgentRunContext(22L, "s", "w", "task"));
+    assertFalse(skip.supports(edit));
+    CodeCompletionValidator validator = new CodeCompletionValidator(contract, skip);
+    ValidationResult missingVerification =
+        validate(
+            validator,
+            Collections.singletonList(finalizeEvidence("completed", "ui_product")));
+    assertFalse(missingVerification.passed());
+    assertTrue(hasIssue(missingVerification, "syntax_check_missing"));
+    assertFalse(hasIssue(missingVerification, "managed_plan_missing"));
+    assertTrue(validate(
+        validator,
+        Collections.singletonList(finalizeEvidence("needs_user_input", "ui_product"))).passed());
+  }
+
+  @Test
+  public void completedRejectsVerificationAndQualityFromBeforeLatestWrite() {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .requireManagedPlan("ui_product")
+            .requireQualityReview("ui_product")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles);
+    coordinator.onRunStarted(new AgentRunContext(31L, "s", "w", "task"));
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "ui",
+            "quality_mode", "interface_product",
+            "verification_plan", Arrays.asList("syntax_check", "browser_test"),
+            "steps", Collections.emptyList()));
+    ToolResult read = ToolResult.success(map("operation", "read_file", "content", "source"));
+    ToolResult edit = ToolResult.success(map("operation", "search_replace", "changed", true));
+    ToolResult syntax = ToolResult.success(map("operation", "syntax_check", "passed", true));
+    ToolResult browser = ToolResult.success(map("operation", "browser_test", "passed", true));
+    ToolResult quality = ToolResult.success(
+        map(
+            "operation", "quality_review",
+            "passed", true,
+            "blocking_gaps", Collections.emptyList(),
+            "claimed_but_unsupported", Collections.emptyList(),
+            "minimal_version_risk", false));
+    coordinator.recordAndDecorate(generation, "read_file", read);
+    coordinator.recordAndDecorate(generation, "search_replace", edit);
+    coordinator.recordAndDecorate(generation, "syntax_check", syntax);
+    coordinator.recordAndDecorate(generation, "browser_test", browser);
+    coordinator.recordAndDecorate(generation, "quality_review", quality);
+    CodeCompletionValidator validator = new CodeCompletionValidator(contract, coordinator);
+    List<ToolResult> evidence = new ArrayList<>(Arrays.asList(
+        read, edit, syntax, browser, quality, finalizeEvidence("completed", "ui_product")));
+    assertTrue(validate(validator, evidence).passed());
+
+    coordinator.recordAndDecorate(generation, "search_replace", edit);
+    evidence.add(evidence.size() - 1, edit);
+    ValidationResult stale = validate(validator, evidence);
+    assertFalse(stale.passed());
+    assertTrue(hasIssue(stale, "managed_plan_incomplete"));
+    assertTrue(hasIssue(stale, "browser_test_missing"));
+    assertTrue(hasIssue(stale, "quality_review_missing"));
+  }
+
+  @Test
   public void nativeAndLegacyCannotBypassFinalizeTool() {
     assertEquals(2, terminalRounds(true));
     assertEquals(2, terminalRounds(false));
+  }
+
+  @Test
+  public void nativeAndLegacyPlansProduceTheSameNormalizedShape() {
+    assertEquals(normalizedPlanRound(true), normalizedPlanRound(false));
+  }
+
+  private Map<String, Object> normalizedPlanRound(boolean nativePlan) {
+    CodeAgentPreset preset =
+        CodeAgentPreset.builder(profile(""))
+            .workspace(workspace)
+            .build();
+    AtomicInteger rounds = new AtomicInteger();
+    ModelGateway gateway =
+        (request, observer) -> {
+          if (rounds.incrementAndGet() == 1) {
+            Map<String, Object> args =
+                map(
+                    "goal", "implement",
+                    "steps", Collections.singletonList(map("step", "1", "action", "edit")));
+            if (nativePlan) {
+              observer.onComplete(
+                  new ModelResponse(
+                      "",
+                      "tool_calls",
+                      Collections.singletonList(
+                          new AgentToolCall(
+                              "plan", CodeAgentToolNames.PLAN_TASK, new ToolArguments(args)))));
+            } else {
+              observer.onComplete(
+                  new ModelResponse(
+                      "{\"next_action\":{\"tool\":\"plan_task\",\"args\":"
+                          + "{\"goal\":\"implement\",\"steps\":[{\"step\":\"1\",\"action\":\"edit\"}]}}}",
+                      "stop",
+                      Collections.emptyList()));
+            }
+          } else {
+            observer.onComplete(
+                new ModelResponse(
+                    "",
+                    "tool_calls",
+                    Collections.singletonList(
+                        new AgentToolCall(
+                            "final",
+                            CodeAgentToolNames.FINALIZE_TASK,
+                            new ToolArguments(
+                                map("status", "blocked", "summary", "done"))))));
+          }
+          return Cancellable.NONE;
+        };
+    AgentEngine engine =
+        new AgentEngine(
+            definition(preset),
+            gateway,
+            new ModelEndpoint("http://localhost", "", "model", 0.2, nativePlan, false),
+            (request, callback) -> Cancellable.NONE,
+            Runnable::run,
+            "session",
+            "workspace",
+            false,
+            5);
+    AtomicReference<Map<String, Object>> normalized = new AtomicReference<>();
+    engine.submit(
+        "task",
+        new AgentObserver() {
+          @Override public void onState(String state) {}
+          @Override public void onDelta(String content, String reasoning) {}
+          @Override public void onToolStarted(String id, String name, ToolArguments arguments) {}
+          @Override public void onToolProgress(
+              String id, String stage, long current, long total, String message) {}
+          @Override public void onToolCompleted(String id, String name, ToolResult result) {
+            if (CodeAgentToolNames.PLAN_TASK.equals(name)) {
+              Object value = result.data().get("normalized_plan");
+              if (value instanceof Map) normalized.set(new LinkedHashMap<>((Map<String, Object>) value));
+            }
+          }
+          @Override public void onValidation(ValidationResult result) {}
+          @Override public void onFinal(String content) {}
+          @Override public void onError(Throwable error) { throw new AssertionError(error); }
+        });
+    assertNotNull(normalized.get());
+    return normalized.get();
   }
 
   private int terminalRounds(boolean nativeTools) {
@@ -389,6 +739,18 @@ public final class CodeAgentPresetTest {
         .verificationContract(
             CodeValidationContract.builder().exemptCompletionTypes("explain").build())
         .build();
+  }
+
+  private String commonPrompt(CodePlanningMode mode) {
+    CodeAgentPreset preset =
+        CodeAgentPreset.builder(profile(""))
+            .workspace(workspace)
+            .planningMode(mode)
+            .build();
+    return preset.promptContributors().get(0)
+        .contribute(new PromptContext("workspace", "task", Collections.emptyMap()))
+        .get(0)
+        .content();
   }
 
   private WorkbenchDefinition definition(CodeAgentPreset preset) {
@@ -506,6 +868,33 @@ public final class CodeAgentPresetTest {
       output.put(String.valueOf(values[index]), values[index + 1]);
     }
     return output;
+  }
+
+  private static Map<String, Object> step(
+      String id, String title, String phase, String... requiredTools) {
+    return map(
+        "id", id,
+        "title", title,
+        "phase", phase,
+        "required_tools", Arrays.asList(requiredTools),
+        "acceptance", Collections.singletonList(title));
+  }
+
+  private static Map<?, ?> findStep(List<?> steps, String phase) {
+    for (Object raw : steps) {
+      if (raw instanceof Map && phase.equals(((Map<?, ?>) raw).get("phase"))) {
+        return (Map<?, ?>) raw;
+      }
+    }
+    throw new AssertionError("missing phase " + phase);
+  }
+
+  private static String currentStepId(Object rawState) {
+    if (!(rawState instanceof Map)) return "";
+    Object current = ((Map<?, ?>) rawState).get("current_step");
+    if (!(current instanceof Map)) return "";
+    Object id = ((Map<?, ?>) current).get("id");
+    return id == null ? "" : String.valueOf(id);
   }
 
   private static AgentObserver observer(AtomicReference<String> output) {
