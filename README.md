@@ -133,11 +133,11 @@ Logcat 使用可直接阅读的中文分段输出：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.1.5
+  publishToMavenLocal -PAIW_VERSION=1.1.7
 
-git tag 1.1.5
+git tag 1.1.7
 git push origin main
-git push origin 1.1.5
+git push origin 1.1.7
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
