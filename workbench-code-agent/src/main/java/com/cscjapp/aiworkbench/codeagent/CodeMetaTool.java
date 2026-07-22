@@ -30,10 +30,7 @@ final class CodeMetaTool implements AgentTool {
   @Override
   public Cancellable execute(
       ToolContext context, ToolArguments arguments, ToolCallback callback) {
-    Map<String, Object> data =
-        CodeAgentToolNames.PLAN_TASK.equals(spec.name())
-            ? new CodePlanNormalizer(spec.inputSchema()).normalize(arguments.asMap())
-            : new LinkedHashMap<>(arguments.asMap());
+    Map<String, Object> data = new LinkedHashMap<>(arguments.asMap());
     data.put("operation", spec.name());
     callback.onComplete(ToolResult.success(data));
     return Cancellable.NONE;

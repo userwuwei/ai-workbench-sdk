@@ -19,15 +19,13 @@ import com.cscjapp.aiworkbench.core.AgentObserver;
 import com.cscjapp.aiworkbench.core.AgentToolCall;
 import com.cscjapp.aiworkbench.core.ModelStreamDelta;
 import com.cscjapp.aiworkbench.core.ModelGateway;
-import com.cscjapp.aiworkbench.core.WorkbenchLogger;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -113,10 +111,9 @@ final class WorkbenchViewModel extends ViewModel {
   private final List<AgentMessage> restoredMessages = new ArrayList<>();
   private final Map<String, ToolArguments> toolArguments = new LinkedHashMap<>();
   private final Map<String, WorkbenchUiItem> browserItems = new LinkedHashMap<>();
-  private final WorkbenchPlanTracker planTracker = new WorkbenchPlanTracker();
+  private final List<String> planStepLabels = new ArrayList<>();
+  private final List<String> planStepStates = new ArrayList<>();
   private final List<String> planMetadata = new ArrayList<>();
-  private final Set<String> successfulPlanTools = new LinkedHashSet<>();
-  private final Map<String, int[]> verificationCounts = new LinkedHashMap<>();
   private final WorkbenchStreamProgressController streamProgress =
       new WorkbenchStreamProgressController();
 
@@ -135,9 +132,6 @@ final class WorkbenchViewModel extends ViewModel {
   private WorkbenchUiItem currentSummary;
   private WorkbenchUiItem currentPlan;
   private ToolRunningState currentToolRunningState = ToolRunningState.hidden();
-  private WorkbenchLogger logger = WorkbenchLogger.none();
-  private int taskRunIndex;
-  private boolean terminalValidationPassed;
 
   LiveData<List<WorkbenchUiItem>> items() {
     return items;
@@ -172,15 +166,13 @@ final class WorkbenchViewModel extends ViewModel {
       WorkbenchLaunchRequest request,
       ModelEndpoint endpoint,
       SessionStore store,
-      ModelGateway gateway,
-      WorkbenchLogger logger) {
+      ModelGateway gateway) {
     if (engine != null) return;
     if (gateway == null) throw new IllegalArgumentException("model gateway required");
     this.definition = definition;
     this.request = request;
     this.endpoint = endpoint;
     this.store = store;
-    this.logger = logger == null ? WorkbenchLogger.none() : logger;
     deepThinking.setValue(request.deepThinking());
     SessionSnapshot previous =
         store == null ? null : store.loadLatest(definition.id(), request.workspaceId());
@@ -227,8 +219,6 @@ final class WorkbenchViewModel extends ViewModel {
     if (Boolean.TRUE.equals(running.getValue()) || demand == null || demand.trim().isEmpty()) {
       return;
     }
-    resetCurrentPlanForRun();
-    taskRunIndex++;
     state.add(WorkbenchUiItem.userDemand(userName, demand.trim()));
     postItems(false);
     running.setValue(true);
@@ -290,11 +280,9 @@ final class WorkbenchViewModel extends ViewModel {
     restoredMessages.clear();
     toolArguments.clear();
     browserItems.clear();
-    planTracker.clear();
+    planStepLabels.clear();
+    planStepStates.clear();
     planMetadata.clear();
-    successfulPlanTools.clear();
-    verificationCounts.clear();
-    terminalValidationPassed = false;
     streamProgress.reset();
     currentThought = null;
     currentReason = null;
@@ -420,7 +408,9 @@ final class WorkbenchViewModel extends ViewModel {
           } else {
             renderToolResult(name, args, result);
           }
-          if (!"plan_task".equals(name)) recordPlanToolResult(name, result);
+          if (result != null && result.isSuccess() && !"plan_task".equals(name)) {
+            advancePlanForTool(name, args, result);
+          }
           refreshContextUsage();
           postItems(true);
         }
@@ -433,25 +423,20 @@ final class WorkbenchViewModel extends ViewModel {
             clearReasonStreamingState();
             deactivateReasonAura(currentReason);
           }
-          if (result == null || !result.passed()) {
-            terminalValidationPassed = false;
+          if (result != null && !result.passed()) {
             WorkbenchUiItem item = WorkbenchUiItem.summary("终态审核未通过", formatIssues(result));
             item.statusLevel = WorkbenchUiItem.STATUS_WARNING;
             item.detailContent = formatIssues(result);
             item.detailExpandable = true;
             state.add(item);
             currentReason = item;
-            logPlanState("validation_failed", "", compactIssues(result));
             postItems(true);
-          } else {
-            terminalValidationPassed = true;
-            if (currentReason != null) {
-              currentReason.title = "终态审核通过";
-              replaceReasonContent("已核对工具证据与完成条件");
-              currentReason.statusLevel = WorkbenchUiItem.STATUS_SUCCESS;
-              deactivateReasonAura(currentReason);
-              postItems(true);
-            }
+          } else if (currentReason != null) {
+            currentReason.title = "终态审核通过";
+            replaceReasonContent("已核对工具证据与完成条件");
+            currentReason.statusLevel = WorkbenchUiItem.STATUS_SUCCESS;
+            deactivateReasonAura(currentReason);
+            postItems(true);
           }
         }
       }
@@ -469,10 +454,7 @@ final class WorkbenchViewModel extends ViewModel {
           currentSummary = WorkbenchUiItem.summary("总结", value);
           currentSummary.statusLevel = WorkbenchUiItem.STATUS_SUCCESS;
           state.add(currentSummary);
-          if (terminalValidationPassed) {
-            completePlan();
-            logPlanState("completed", "", "");
-          }
+          completePlan();
           refreshContextUsage();
           postItems(true);
         }
@@ -706,36 +688,43 @@ final class WorkbenchViewModel extends ViewModel {
       renderToolResult("plan_task", args, result);
       return;
     }
-    Map<String, Object> source =
-        result.data() == null || result.data().isEmpty()
-            ? (args == null ? Collections.emptyMap() : args.asMap())
-            : result.data();
-    planTracker.clear();
+    Map<String, Object> source = args == null ? Collections.emptyMap() : args.asMap();
+    planStepLabels.clear();
+    planStepStates.clear();
     planMetadata.clear();
     String goal = value(source.get("goal"));
     if (!goal.isEmpty()) planMetadata.add("目标：" + goal);
-    String files = summarizeList(source.get("planned_files"), 5, 160);
-    if (!files.isEmpty()) planMetadata.add("涉及文件：" + files);
-    String verification = summarizeList(source.get("verification_plan"), 5, 160);
-    if (!verification.isEmpty()) planMetadata.add("验证策略：" + verification);
     String qualityMode = value(source.get("quality_mode"));
     boolean interfaceProduct = "interface_product".equals(qualityMode);
     planMetadata.add(interfaceProduct ? "质量模式：界面产品化" : "质量模式：标准代码质量");
     String quality = summarizeMapValues(source.get("quality_bar"), 2, 96);
     if (!quality.isEmpty()) planMetadata.add("质量标准：" + quality);
-    String verificationHistory = verificationSummary();
-    if (!verificationHistory.isEmpty()) planMetadata.add("验证记录：" + verificationHistory);
     planMetadata.add("质检状态：未审查");
     if (interfaceProduct) {
       planMetadata.add(source.get("interface_design_spec") instanceof Map
           ? "设计规格：已定义" : "设计规格：未定义");
-      planMetadata.add("打磨状态：未声明");
+      planMetadata.add("打磨状态：未开始");
     }
-    planTracker.load(source.get("steps"));
-    if (planTracker.isEmpty()) planTracker.load(defaultPlanSteps(source, interfaceProduct));
-    for (String tool : successfulPlanTools) planTracker.recordTool(tool);
+    appendPlanSteps(source.get("steps"));
+    if (planStepLabels.isEmpty()) {
+      if (interfaceProduct) {
+        addPlanStep("确定写入形态", "done");
+        addPlanStep("定义界面体验规格", "done");
+        addPlanStep("完成可运行核心骨架", "running");
+        addPlanStep("执行语法检查", "pending");
+        addPlanStep("补强用户可见体验", "pending");
+        addPlanStep("提交结构化质量自查", "pending");
+        addPlanStep("修复质检阻塞缺口", "pending");
+        addPlanStep("收口任务", "pending");
+      } else {
+        addPlanStep("确认入口、模块和真实上下文", "running");
+        addPlanStep("完成核心实现和接入", "pending");
+        addPlanStep("提交结构化质量自查", "pending");
+        addPlanStep("执行 syntax_check 或必要的 browser_test", "pending");
+        addPlanStep("收口任务", "pending");
+      }
+    }
     rebuildPlanItem();
-    logPlanState("created", "", "");
     if (currentReason != null) {
       currentReason.title = "任务计划已建立";
       replaceReasonContent(goal.isEmpty() ? "已建立任务执行计划" : goal);
@@ -744,11 +733,40 @@ final class WorkbenchViewModel extends ViewModel {
     }
   }
 
+  private void appendPlanSteps(Object raw) {
+    if (!(raw instanceof List)) return;
+    for (Object value : (List<?>) raw) {
+      String label;
+      String status = "pending";
+      if (value instanceof Map) {
+        Map<?, ?> map = (Map<?, ?>) value;
+        label = first(map, "title", "step", "name", "description");
+        status = first(map, "status", "state");
+      } else {
+        label = value(value);
+      }
+      if (label.isEmpty()) continue;
+      planStepLabels.add(label);
+      planStepStates.add(normalizePlanStatus(status));
+    }
+    if (!planStepStates.isEmpty() && !planStepStates.contains("running")) planStepStates.set(0, "running");
+  }
+
+  private void addPlanStep(String label, String status) {
+    planStepLabels.add(label);
+    planStepStates.add(status);
+  }
+
   private void rebuildPlanItem() {
     List<String> lines = new ArrayList<>(planMetadata);
-    lines.addAll(planTracker.displayLines());
-    String current = planTracker.currentTitle();
-    if (current.isEmpty()) current = "等待继续";
+    for (int i = 0; i < planStepLabels.size(); i++) {
+      lines.add(planMarker(planStepStates.get(i)) + planStepLabels.get(i));
+    }
+    int runningIndex = planStepStates.indexOf("running");
+    String current =
+        runningIndex >= 0 && runningIndex < planStepLabels.size()
+            ? planStepLabels.get(runningIndex)
+            : planStepStates.contains("pending") ? "等待继续" : "已完成";
     if (currentPlan == null) {
       currentPlan = WorkbenchUiItem.plan("任务计划 · 当前：" + current, lines);
       planState.clear();
@@ -760,78 +778,108 @@ final class WorkbenchViewModel extends ViewModel {
     planItems.postValue(new ArrayList<>(planState));
   }
 
-  private void recordPlanToolResult(String toolName, ToolResult result) {
-    boolean passed = semanticToolPassed(toolName, result);
-    if (isVerificationTool(toolName)) {
-      int[] counts = verificationCounts.get(toolName);
-      if (counts == null) {
-        counts = new int[2];
-        verificationCounts.put(toolName, counts);
-      }
-      counts[passed ? 0 : 1]++;
-      if (!planTracker.isEmpty()) {
-        replacePlanMetadata("验证记录：", "验证记录：" + verificationSummary());
-      }
-    }
-    Map<String, Object> data =
-        result == null || result.data() == null ? Collections.emptyMap() : result.data();
-    if ("quality_review".equals(toolName)) applyQualityReview(data, passed);
-    if (!passed) {
-      if (isVerificationTool(toolName) || "quality_review".equals(toolName)) {
-        logPlanState("verification_failed", toolName, resultMessage(result, "未通过"));
-      }
+  private void advancePlan(boolean completeAll) {
+    if (planStepStates.isEmpty()) return;
+    if (completeAll) {
+      for (int i = 0; i < planStepStates.size(); i++) planStepStates.set(i, "done");
+      rebuildPlanItem();
       return;
     }
-    successfulPlanTools.add(toolName);
-    if (planTracker.recordTool(toolName)) {
+    int current = planStepStates.indexOf("running");
+    if (current < 0) current = planStepStates.indexOf("pending");
+    if (current >= 0) {
+      planStepStates.set(current, "done");
+      for (int i = current + 1; i < planStepStates.size(); i++) {
+        if ("pending".equals(planStepStates.get(i))) {
+          planStepStates.set(i, "running");
+          break;
+        }
+      }
       rebuildPlanItem();
-      logPlanState("advanced", toolName, "");
     }
   }
 
-  static boolean semanticToolPassed(String toolName, ToolResult result) {
-    if (result == null || !result.isSuccess()) return false;
-    Map<String, Object> data = result.data();
-    String status = data == null ? "" : value(data.get("status"));
-    if ("error".equals(status) || "failed".equals(status) || "blocked".equals(status)) return false;
-    if (data != null && data.containsKey("passed") && !bool(data.get("passed"), false)) return false;
-    Map<?, ?> audit = data == null ? Collections.emptyMap() : map(data.get("layout_audit"));
-    if (audit.containsKey("passed") && !bool(audit.get("passed"), false)) return false;
+  /** Mirrors the reference plan card's evidence-driven visible progress. */
+  private void advancePlanForTool(String toolName, ToolArguments args, ToolResult result) {
+    if (planStepStates.isEmpty() || toolName == null) return;
+    if ("finalize_task".equals(toolName)) {
+      advancePlan(true);
+      return;
+    }
     if ("quality_review".equals(toolName)) {
-      return data != null
-          && bool(data.get("passed"), false)
-          && !bool(data.get("minimal_version_risk"), false)
-          && isEmptyCollection(data.get("blocking_gaps"))
-          && isEmptyCollection(data.get("claimed_but_unsupported"));
+      applyQualityReview(args);
+      return;
     }
-    return true;
+
+    int target = findPlanTargetForTool(toolName);
+    if (target < 0) return;
+    for (int i = 0; i < target; i++) {
+      if ("running".equals(planStepStates.get(i)) || "pending".equals(planStepStates.get(i))) {
+        planStepStates.set(i, "done");
+      }
+    }
+    planStepStates.set(target, "done");
+    startNextPending(target + 1);
+    rebuildPlanItem();
   }
 
-  private static boolean isVerificationTool(String toolName) {
-    return toolName != null
-        && (toolName.endsWith("_test")
-            || toolName.endsWith("_check")
-            || toolName.startsWith("verify"));
+  private int findPlanTargetForTool(String toolName) {
+    String[] hints;
+    if (isReadOnlyTool(toolName)) {
+      hints = new String[] {"确认入口", "真实上下文"};
+    } else if (isWriteTool(toolName)) {
+      hints = new String[] {"核心骨架", "核心实现", "用户可见体验", "质检阻塞缺口"};
+    } else if ("syntax_check".equals(toolName)) {
+      hints = new String[] {"语法检查", "syntax_check", "验证", "质检阻塞缺口"};
+    } else if ("browser_test".equals(toolName)) {
+      hints = new String[] {"用户可见体验", "browser_test", "验证", "质检阻塞缺口"};
+    } else {
+      return -1;
+    }
+    int runningIndex = planStepStates.indexOf("running");
+    if (runningIndex >= 0 && labelContainsAny(runningIndex, hints)) return runningIndex;
+    for (int i = 0; i < planStepLabels.size(); i++) {
+      if (("pending".equals(planStepStates.get(i)) || "running".equals(planStepStates.get(i)))
+          && labelContainsAny(i, hints)) {
+        return i;
+      }
+    }
+    return -1;
   }
 
-  private void applyQualityReview(Map<String, Object> review, boolean passed) {
+  private boolean labelContainsAny(int index, String[] hints) {
+    if (index < 0 || index >= planStepLabels.size()) return false;
+    String label = planStepLabels.get(index);
+    for (String hint : hints) if (label.contains(hint)) return true;
+    return false;
+  }
+
+  private void applyQualityReview(ToolArguments args) {
+    Map<String, Object> review = args == null ? Collections.emptyMap() : args.asMap();
+    boolean passed = bool(review.get("passed"), false)
+        && !bool(review.get("minimal_version_risk"), false)
+        && isEmptyCollection(review.get("blocking_gaps"))
+        && isEmptyCollection(review.get("claimed_but_unsupported"));
     replacePlanMetadata("质检状态：", passed ? "质检状态：已通过" : "质检状态：有待补强");
 
     String polish = value(review.get("experience_polish_status"));
     if ("separate_pass_done".equals(polish)) {
       replacePlanMetadata("打磨状态：", "打磨状态：已独立完成");
+      markMatchingStep("补强用户可见体验", "done");
     } else if ("integrated_in_implementation".equals(polish)) {
       replacePlanMetadata("打磨状态：", "打磨状态：并入实现");
-    } else {
-      replacePlanMetadata("打磨状态：", "打磨状态：未声明");
+      markMatchingStep("补强用户可见体验", "skipped");
     }
 
+    int reviewStep = markMatchingStep("结构化质量自查", "done");
     if (passed) {
       replacePlanMetadata("待补强：", null);
+      markMatchingStep("修复质检阻塞缺口", "skipped");
     } else {
       String gaps = summarizeList(review.get("blocking_gaps"), 3, 120);
       replacePlanMetadata("待补强：", gaps.isEmpty() ? null : "待补强：" + gaps);
     }
+    startNextPending(reviewStep + 1);
     rebuildPlanItem();
   }
 
@@ -842,182 +890,36 @@ final class WorkbenchViewModel extends ViewModel {
     if (replacement != null && !replacement.isEmpty()) planMetadata.add(replacement);
   }
 
+  private int markMatchingStep(String hint, String status) {
+    for (int i = 0; i < planStepLabels.size(); i++) {
+      if (planStepLabels.get(i).contains(hint)) {
+        planStepStates.set(i, status);
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private void startNextPending(int from) {
+    for (int i = 0; i < planStepStates.size(); i++) {
+      if ("running".equals(planStepStates.get(i))) planStepStates.set(i, "pending");
+    }
+    for (int i = Math.max(0, from); i < planStepStates.size(); i++) {
+      if ("pending".equals(planStepStates.get(i))) {
+        planStepStates.set(i, "running");
+        return;
+      }
+    }
+    for (int i = 0; i < Math.max(0, from) && i < planStepStates.size(); i++) {
+      if ("pending".equals(planStepStates.get(i))) {
+        planStepStates.set(i, "running");
+        return;
+      }
+    }
+  }
+
   private void completePlan() {
-    if (planTracker.isEmpty()) return;
-    planTracker.complete();
-    rebuildPlanItem();
-  }
-
-  private void resetCurrentPlanForRun() {
-    planState.clear();
-    planTracker.clear();
-    planMetadata.clear();
-    successfulPlanTools.clear();
-    verificationCounts.clear();
-    terminalValidationPassed = false;
-    currentPlan = null;
-    planItems.setValue(new ArrayList<>());
-  }
-
-  private static List<Map<String, Object>> defaultPlanSteps(
-      Map<String, Object> source, boolean interfaceProduct) {
-    List<Map<String, Object>> steps = new ArrayList<>();
-    steps.add(
-        planStep(
-            "implement",
-            "完成核心实现",
-            "implement",
-            Collections.<String>emptyList()));
-    String verification = summarizeList(source.get("verification_plan"), 3, 96);
-    steps.add(
-        planStep(
-            "verify",
-            verification.isEmpty() ? "执行真实验证" : "执行验证：" + verification,
-            "verify",
-            verificationToolNames(source.get("verification_plan"))));
-    if (interfaceProduct || bool(source.get("self_review_required"), false)) {
-      steps.add(
-          planStep(
-              "quality",
-              "提交结构化质量审查",
-              "quality",
-              Collections.singletonList("quality_review")));
-    }
-    steps.add(
-        planStep(
-            "finalize",
-            "核对证据并结束任务",
-            "finalize",
-            Collections.singletonList("finalize_task")));
-    return steps;
-  }
-
-  private static Map<String, Object> planStep(
-      String id, String title, String phase, List<String> requiredTools) {
-    Map<String, Object> step = new LinkedHashMap<>();
-    step.put("id", id);
-    step.put("title", title);
-    step.put("phase", phase);
-    step.put("required_tools", requiredTools);
-    step.put("status", "pending");
-    return step;
-  }
-
-  private void logPlanState(String event, String tool, String detail) {
-    if (planTracker.isEmpty()) return;
-    logger.log(
-        "plan_state",
-        formatPlanLog(
-            Math.max(1, taskRunIndex),
-            event,
-            metadataValue("目标："),
-            metadataValue("涉及文件："),
-            planTracker.labels(),
-            planTracker.currentPhase(),
-            tool,
-            verificationSummary(),
-            detail));
-  }
-
-  static String formatPlanLog(
-      int run,
-      String event,
-      String goal,
-      String files,
-      List<String> steps,
-      String current,
-      String tool,
-      String verification,
-      String detail) {
-    StringBuilder message = new StringBuilder();
-    message
-        .append("[任务计划][run=")
-        .append(Math.max(1, run))
-        .append("][event=")
-        .append(event)
-        .append("]\n");
-    appendLogLine(message, "目标", goal);
-    appendLogLine(message, "文件", files);
-    appendLogLine(message, "步骤", joinLimited(steps, " → ", 260));
-    appendLogLine(message, "当前", current);
-    if (tool != null && !tool.isEmpty()) appendLogLine(message, "工具", tool);
-    if (!verification.isEmpty()) appendLogLine(message, "验证", verification);
-    if (detail != null && !detail.isEmpty()) {
-      appendLogLine(message, "说明", compactLogValue(detail, 180));
-    }
-    return compactLogValue(message.toString().trim(), 1000);
-  }
-
-  private String metadataValue(String prefix) {
-    for (String value : planMetadata) {
-      if (value.startsWith(prefix)) return value.substring(prefix.length()).trim();
-    }
-    return "";
-  }
-
-  private String verificationSummary() {
-    List<String> values = new ArrayList<>();
-    for (Map.Entry<String, int[]> entry : verificationCounts.entrySet()) {
-      int[] counts = entry.getValue();
-      StringBuilder value =
-          new StringBuilder(entry.getKey()).append(' ').append(counts[0]).append("通过");
-      if (counts[1] > 0) value.append('/').append(counts[1]).append("失败");
-      values.add(value.toString());
-    }
-    return joinLimited(values, "；", 220);
-  }
-
-  private static void appendLogLine(StringBuilder out, String key, String value) {
-    if (value == null || value.isEmpty()) return;
-    if (out.length() > 0 && out.charAt(out.length() - 1) != '\n') out.append('\n');
-    out.append(key).append('=').append(value);
-  }
-
-  private static String compactLogValue(String value, int maxChars) {
-    if (value == null) return "";
-    String compact = value.replace('\r', ' ').replace("\n\n", "\n").trim();
-    return compact.length() <= maxChars ? compact : compact.substring(0, maxChars - 1) + "…";
-  }
-
-  private static String compactIssues(ValidationResult result) {
-    if (result == null) return "validation_failed";
-    List<String> values = new ArrayList<>();
-    for (ValidationIssue issue : result.issues()) {
-      if (issue == null) continue;
-      values.add(issue.code() == null || issue.code().isEmpty() ? issue.message() : issue.code());
-      if (values.size() >= 3) break;
-    }
-    return joinLimited(values, "；", 180);
-  }
-
-  private static List<String> strings(Object raw) {
-    List<String> result = new ArrayList<>();
-    if (raw instanceof List) {
-      for (Object value : (List<?>) raw) {
-        String text = value(value);
-        if (!text.isEmpty()) result.add(text);
-      }
-    } else {
-      String text = value(raw);
-      if (!text.isEmpty()) result.add(text);
-    }
-    return result;
-  }
-
-  private static List<String> verificationToolNames(Object raw) {
-    List<String> result = new ArrayList<>();
-    for (String value : strings(raw)) {
-      String[] tokens = value.split("[^A-Za-z0-9_]+");
-      for (String token : tokens) {
-        if (token.matches("[A-Za-z][A-Za-z0-9_]*")
-            && (token.endsWith("_test")
-                || token.endsWith("_check")
-                || token.startsWith("verify"))) {
-          if (!result.contains(token)) result.add(token);
-        }
-      }
-    }
-    return result;
+    advancePlan(true);
   }
 
   private void renderBrowserResult(
@@ -1181,38 +1083,24 @@ final class WorkbenchViewModel extends ViewModel {
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("items", uiItems);
     data.put("plan_items", uiPlans);
-    data.put("plan_steps", planTracker.snapshot());
-    data.put("plan_step_labels", planTracker.labels());
-    data.put("plan_step_states", planTracker.states());
+    data.put("plan_step_labels", new ArrayList<>(planStepLabels));
+    data.put("plan_step_states", new ArrayList<>(planStepStates));
     data.put("plan_metadata", new ArrayList<>(planMetadata));
-    data.put("task_run_index", taskRunIndex);
     data.put("model_round", modelRoundIndex);
     data.put("deep_thinking", Boolean.TRUE.equals(deepThinking.getValue()));
     if (engine != null) data.put("messages", encodeMessages(engine.messages()));
-    store.save(new SessionSnapshot(4, sessionId, definition.id(), request.workspaceId(), data));
+    store.save(new SessionSnapshot(3, sessionId, definition.id(), request.workspaceId(), data));
   }
 
   private void restore(SessionSnapshot snapshot) {
     if (snapshot == null) return;
     restoreItems(snapshot.state().get("items"), state);
     restoreItems(snapshot.state().get("plan_items"), planState);
-    if (snapshot.schemaVersion() >= 4 && snapshot.state().get("plan_steps") instanceof List) {
-      planTracker.restore(snapshot.state().get("plan_steps"));
-    } else {
-      planTracker.restoreLegacy(
-          snapshot.state().get("plan_step_labels"), snapshot.state().get("plan_step_states"));
-    }
+    restoreStrings(snapshot.state().get("plan_step_labels"), planStepLabels);
+    restoreStrings(snapshot.state().get("plan_step_states"), planStepStates);
     restoreStrings(snapshot.state().get("plan_metadata"), planMetadata);
     modelRoundIndex = integer(snapshot.state().get("model_round"), 0);
-    taskRunIndex = integer(snapshot.state().get("task_run_index"), 0);
-    terminalValidationPassed = false;
-    if (!planState.isEmpty()) {
-      currentPlan = planState.get(0);
-      currentPlan.title = "任务计划 · 历史计划";
-      List<String> lines = new ArrayList<>(planMetadata);
-      lines.addAll(planTracker.displayLines());
-      currentPlan.steps = lines;
-    }
+    if (!planState.isEmpty()) currentPlan = planState.get(0);
     Object rawMessages = snapshot.state().get("messages");
     if (rawMessages instanceof List) decodeMessages((List<?>) rawMessages);
     items.setValue(new ArrayList<>(state));
@@ -1552,6 +1440,22 @@ final class WorkbenchViewModel extends ViewModel {
 
   private static int integer(Object raw, int fallback) {
     return raw instanceof Number ? ((Number) raw).intValue() : fallback;
+  }
+
+  private static String normalizePlanStatus(String value) {
+    if ("done".equals(value) || "completed".equals(value) || "success".equals(value)) return "done";
+    if ("running".equals(value) || "in_progress".equals(value) || "active".equals(value)) return "running";
+    if ("blocked".equals(value) || "error".equals(value)) return "blocked";
+    if ("skipped".equals(value)) return "skipped";
+    return "pending";
+  }
+
+  private static String planMarker(String state) {
+    if ("done".equals(state)) return "✓ ";
+    if ("running".equals(state)) return "▶ ";
+    if ("blocked".equals(state)) return "⚠ ";
+    if ("skipped".equals(state)) return "— ";
+    return "○ ";
   }
 
   private static String formatIssues(ValidationResult result) {

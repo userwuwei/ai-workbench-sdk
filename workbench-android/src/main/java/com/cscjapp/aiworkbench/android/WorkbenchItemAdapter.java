@@ -182,9 +182,6 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         LinearLayout stepsContainer = helper.getView(R.id.aiw_llPlanSteps);
 
         String goal = "";
-        String files = "";
-        String verification = "";
-        String verificationHistory = "";
         String quality = "";
         String qualityFocus = "";
         String qualityMode = "";
@@ -200,12 +197,6 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
                 String trimLine = line.trim();
                 if (trimLine.startsWith("目标：")) {
                     goal = trimLine;
-                } else if (trimLine.startsWith("涉及文件：")) {
-                    files = trimLine;
-                } else if (trimLine.startsWith("验证策略：")) {
-                    verification = trimLine;
-                } else if (trimLine.startsWith("验证记录：")) {
-                    verificationHistory = trimLine;
                 } else if (trimLine.startsWith("质量标准：")) {
                     quality = trimLine.replace("质量标准：", "");
                 } else if (trimLine.startsWith("质检重点：")) {
@@ -218,8 +209,6 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
                     designStatus = trimLine.replace("设计规格：", "设计");
                 } else if (trimLine.startsWith("打磨状态：")) {
                     polishStatus = trimLine.replace("打磨状态：", "打磨");
-                } else if (trimLine.startsWith("待补强：")) {
-                    qualityFocus = trimLine.replace("待补强：", "待补强 ");
                 } else {
                     planSteps.add(trimLine);
                 }
@@ -228,8 +217,7 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
 
         tvProgress.setText(formatPlanCurrentStep(item.title));
         bindPlanProgress(tvPlanCount, pbPlanProgress, planSteps);
-        String planContext = mergePlanLines(goal, files, verification, verificationHistory);
-        bindPlanGoal(tvPlanGoal, item.detailExpanded ? planContext : "");
+        bindPlanGoal(tvPlanGoal, item.detailExpanded ? goal : "");
         String compactQuality = mergePlanQuality(mergePlanQuality(mergePlanQuality(qualityMode, qualityStatus), designStatus), polishStatus);
         bindPlanQuality(qualityContainer, item.detailExpanded
                 ? mergePlanQuality(compactQuality, mergePlanQuality(qualityFocus, quality))
@@ -263,8 +251,8 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         boolean footerVisible = !planSteps.isEmpty();
         helper.setGone(R.id.aiw_llPlanFooter, footerVisible);
         tvPlanFooter.setText(item.detailExpanded
-                ? "已显示全部计划详情"
-                : hiddenCount > 0 ? "计划详情已收起" : "");
+                ? "已展开全部步骤，完整计划仍会回传给模型"
+                : hiddenCount > 0 ? "完整计划已折叠，不占用主流程空间" : "");
         tvPlanExpand.setText(item.detailExpanded ? "收起" : "展开");
         tvPlanExpand.setOnClickListener(footerVisible ? v -> {
             item.detailExpanded = !item.detailExpanded;
@@ -298,7 +286,7 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
                     continue;
                 }
                 total++;
-                if (step.trim().startsWith("✓") || step.trim().startsWith("—")) {
+                if (step.trim().startsWith("✓")) {
                     done++;
                 }
             }
@@ -308,23 +296,6 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         progressBar.setProgress(total <= 0 ? 0 : Math.round(done * 100f / total));
         progressBar.setProgressTintList(ColorStateList.valueOf(Color.parseColor("#74EBD5")));
         progressBar.setProgressBackgroundTintList(ColorStateList.valueOf(Color.parseColor("#28364F")));
-    }
-
-    private String mergePlanLines(String... values) {
-        StringBuilder result = new StringBuilder();
-        if (values == null) {
-            return "";
-        }
-        for (String value : values) {
-            if (TextUtils.isEmpty(value)) {
-                continue;
-            }
-            if (result.length() > 0) {
-                result.append('\n');
-            }
-            result.append(value);
-        }
-        return result.toString();
     }
 
     private void bindPlanGoal(TextView tvPlanGoal, String goal) {

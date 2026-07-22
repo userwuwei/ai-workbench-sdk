@@ -7,7 +7,6 @@ java {
 dependencies {
     api project(':workbench-api')
     implementation project(':workbench-tools-file')
-    implementation 'com.google.code.gson:gson:2.10.1'
     testImplementation project(':workbench-core')
     testImplementation 'junit:junit:4.13.2'
 }

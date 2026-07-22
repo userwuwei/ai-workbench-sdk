@@ -78,13 +78,10 @@ final class CodeMetaToolSchemas {
     properties.put("planned_files", arrayOfString("预计创建或修改的文件。"));
     properties.put("verification_plan", arrayOfString("完成前要执行的真实验证。"));
     properties.put("implementation_shape", object("文件拆分和实现形态。"));
-    properties.put("steps", arrayOfPlanSteps());
+    properties.put("steps", arrayOfObject("短执行步骤。"));
     properties.put("self_review_required", bool("完成前是否要求结构化自查。"));
     properties.put("risks", arrayOfString("已识别的实现风险。"));
-    return objectSchema(
-        properties,
-        Arrays.asList(
-            "goal", "quality_mode", "writing_mode", "planned_files", "verification_plan", "steps"));
+    return objectSchema(properties, Arrays.asList("goal", "quality_mode"));
   }
 
   private static Map<String, Object> qualitySchema() {
@@ -197,28 +194,6 @@ final class CodeMetaToolSchemas {
     schema.put("type", "array");
     schema.put("description", description);
     schema.put("items", Collections.singletonMap("type", "object"));
-    return schema;
-  }
-
-  private static Map<String, Object> arrayOfPlanSteps() {
-    Map<String, Object> properties = new LinkedHashMap<>();
-    properties.put("id", string("稳定步骤 ID，例如 implement。"));
-    properties.put("title", string("面向用户的完整动作标题，不能只填数字。"));
-    properties.put(
-        "phase",
-        enumeration(
-            "步骤阶段。", "discover", "implement", "verify", "quality", "finalize"));
-    properties.put("required_tools", arrayOfString("完成本步骤所需的真实工具。"));
-    properties.put("acceptance", arrayOfString("本步骤的可验证验收条件。"));
-    Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", "array");
-    schema.put("description", "3 到 5 个核心步骤，按真实工具结果推进。");
-    schema.put(
-        "items",
-        objectSchema(
-            properties, Arrays.asList("id", "title", "phase", "required_tools", "acceptance")));
-    schema.put("minItems", 1);
-    schema.put("maxItems", 8);
     return schema;
   }
 

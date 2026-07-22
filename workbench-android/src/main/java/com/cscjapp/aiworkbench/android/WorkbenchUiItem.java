@@ -67,7 +67,6 @@ final class WorkbenchUiItem implements MultiItemEntity {
   static WorkbenchUiItem plan(String progress, List<String> steps) {
     WorkbenchUiItem item = new WorkbenchUiItem(TYPE_PLAN, progress, "");
     item.steps = copyStrings(steps);
-    item.detailExpanded = true;
     return item;
   }
 
