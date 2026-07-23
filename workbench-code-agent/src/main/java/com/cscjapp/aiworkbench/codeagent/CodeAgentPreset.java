@@ -39,8 +39,9 @@ public final class CodeAgentPreset {
             roles,
             builder.workspace);
 
+    boolean hasGoalDrivenReadPlan = hasTool(builder.languageTools, "read_plan");
     List<PromptContributor> prompts = new ArrayList<>();
-    prompts.add(commonPrompt(builder.planningMode));
+    prompts.add(commonPrompt(builder.planningMode, hasGoalDrivenReadPlan));
     if (!builder.profile.languageRules().isEmpty()) {
       prompts.add(
           context ->
@@ -106,7 +107,8 @@ public final class CodeAgentPreset {
     return validators;
   }
 
-  private static PromptContributor commonPrompt(CodePlanningMode planningMode) {
+  private static PromptContributor commonPrompt(
+      CodePlanningMode planningMode, boolean hasGoalDrivenReadPlan) {
     return context -> {
       boolean nativeTools = !Boolean.FALSE.equals(context.runtime().get("native_tools"));
       String protocol =
@@ -119,6 +121,7 @@ public final class CodeAgentPreset {
               + planningInstruction(planningMode)
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
               + "\n修改已有文件前先读取真实内容；同一文件多个修改点合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。"
+              + readPlanningInstruction(hasGoalDrivenReadPlan)
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
               + "\n只有运行时明确声明 precreated_entry_replace_allowed 的指定预创建入口，首次完整生成时才允许对已存在路径调用 create_file；该例外不授权其他文件。"
               + "\n工具失败、验证失败或质量 blocker 必须真实修复后重试，禁止虚构通过。"
@@ -128,6 +131,20 @@ public final class CodeAgentPreset {
           new PromptSection(
               "code_agent_protocol", PromptPhase.BASE, 0, 5000, content));
     };
+  }
+
+  private static String readPlanningInstruction(boolean available) {
+    if (!available) return "";
+    return "\n跨 DOM/CSS/函数/调用链排查，或 browser_test、syntax_check 失败后的修复，必须直接调用一次 read_plan：在 goal 和 evidence_requirements 中声明阅读目的、待回答问题、证据类型及符号/选择器信号，不得先散发调用多个 read_file，也不得填写行号。"
+        + "\nread_plan.coverage_summary.ready_for_edit=true 时直接使用 edit_anchor_pack 的真实源码进入一次合并 search_replace；为 false 时只针对 missing_evidence_types 做增量 read_plan，禁止猜测 old。";
+  }
+
+  private static boolean hasTool(List<? extends AgentTool> tools, String name) {
+    if (tools == null || name == null) return false;
+    for (AgentTool tool : tools) {
+      if (tool != null && tool.spec() != null && name.equals(tool.spec().name())) return true;
+    }
+    return false;
   }
 
   private static String planningInstruction(CodePlanningMode mode) {

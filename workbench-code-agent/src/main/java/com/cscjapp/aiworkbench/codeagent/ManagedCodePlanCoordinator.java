@@ -22,6 +22,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private List<PlanStep> steps = new ArrayList<>();
   private final List<Evidence> evidence = new ArrayList<>();
   private final Map<String, Long> pathRevisions = new LinkedHashMap<>();
+  private final Map<String, ReadCoverage> readCoverageByPath = new LinkedHashMap<>();
   private final Map<String, String> createdFileBindings = new LinkedHashMap<>();
   private final Set<String> unresolvedWritePaths = new LinkedHashSet<>();
   private Map<String, Object> currentState = Collections.emptyMap();
@@ -57,6 +58,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     steps = new ArrayList<>();
     evidence.clear();
     pathRevisions.clear();
+    readCoverageByPath.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
@@ -75,6 +77,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     steps = new ArrayList<>();
     evidence.clear();
     pathRevisions.clear();
+    readCoverageByPath.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
@@ -176,7 +179,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return;
     }
     if (role == CodeToolRole.VERIFY || role == CodeToolRole.QUALITY) {
-      boolean valid = validEvidence(role, result);
+      boolean valid = validEvidence(toolName, role, result);
       boolean removed = evidence.removeIf(item ->
           item.generation == generation
               && item.revision == revision
@@ -186,7 +189,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         return;
       }
     }
-    if (!validEvidence(role, result)) return;
+    if (!validEvidence(toolName, role, result)) return;
     if (role == CodeToolRole.READ) {
       List<String> paths = evidencePaths(role, arguments, result.data());
       if (paths.isEmpty()) return;
@@ -200,6 +203,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
             pathRevisions.getOrDefault(path, 0L),
             true));
       }
+      if ("read_plan".equals(toolName)) recordReadCoverage(paths, result.data());
     } else {
       evidence.add(new Evidence(toolName, role, "", "", generation, revision, true));
     }
@@ -246,13 +250,17 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     revision++;
     evidence.removeIf(item -> item.role == CodeToolRole.VERIFY || item.role == CodeToolRole.QUALITY);
     pathRevisions.put(path, revision);
+    readCoverageByPath.remove(path);
   }
 
-  private boolean validEvidence(CodeToolRole role, ToolResult result) {
+  private boolean validEvidence(String toolName, CodeToolRole role, ToolResult result) {
     if (role == null || !result.isSuccess()) return false;
     Map<String, Object> data = result.data();
     if (Boolean.FALSE.equals(data.get("passed"))) return false;
-    if (role == CodeToolRole.READ) return hasReadContent(data);
+    if (role == CodeToolRole.READ) {
+      if ("read_plan".equals(toolName)) return validReadPlan(data);
+      return hasReadContent(data);
+    }
     if (role == CodeToolRole.VERIFY) return Boolean.TRUE.equals(data.get("passed"));
     if (role == CodeToolRole.QUALITY) {
       return Boolean.TRUE.equals(data.get("passed"))
@@ -261,6 +269,36 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           && emptyValue(data.get("claimed_but_unsupported"));
     }
     return role == CodeToolRole.DISCOVER;
+  }
+
+  private static boolean validReadPlan(Map<String, Object> data) {
+    Object rawCoverage = data.get("coverage_summary");
+    if (!(rawCoverage instanceof Map)
+        || !Boolean.TRUE.equals(((Map<?, ?>) rawCoverage).get("ready_for_edit"))) return false;
+    if (text(data.get("revision")).isEmpty()) return false;
+    Object evidence = data.get("evidence");
+    if (!(evidence instanceof List) || ((List<?>) evidence).isEmpty()) return false;
+    for (Object raw : (List<?>) evidence) {
+      if (raw instanceof Map && ((Map<?, ?>) raw).containsKey("content")) return true;
+    }
+    return false;
+  }
+
+  private void recordReadCoverage(List<String> paths, Map<String, Object> data) {
+    if (paths == null || paths.isEmpty()) return;
+    LinkedHashSet<String> evidenceIds = new LinkedHashSet<>();
+    Object rawEvidence = data.get("evidence");
+    if (rawEvidence instanceof List) {
+      for (Object raw : (List<?>) rawEvidence) {
+        if (!(raw instanceof Map)) continue;
+        String id = text(((Map<?, ?>) raw).get("evidence_id"));
+        if (!id.isEmpty()) evidenceIds.add(id);
+      }
+    }
+    String sourceRevision = text(data.get("revision"));
+    for (String path : paths) {
+      readCoverageByPath.put(path, new ReadCoverage(sourceRevision, evidenceIds));
+    }
   }
 
   private List<String> evidencePaths(
@@ -368,7 +406,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private static boolean hasReadContent(Map<String, Object> data) {
-    if (data.containsKey("content") || nonEmptyList(data.get("read_paths"))) return true;
+    if (data.containsKey("content")) return true;
+    Object evidence = data.get("evidence");
+    if (evidence instanceof List) {
+      for (Object raw : (List<?>) evidence) {
+        if (raw instanceof Map && ((Map<?, ?>) raw).containsKey("content")) return true;
+      }
+    }
     Object items = data.get("items");
     if (!(items instanceof List)) return false;
     for (Object raw : (List<?>) items) {
@@ -775,6 +819,16 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       this.generation = generation;
       this.revision = revision;
       this.passed = passed;
+    }
+  }
+
+  private static final class ReadCoverage {
+    final String sourceRevision;
+    final List<String> evidenceIds;
+
+    ReadCoverage(String sourceRevision, Collection<String> evidenceIds) {
+      this.sourceRevision = sourceRevision;
+      this.evidenceIds = Collections.unmodifiableList(new ArrayList<>(evidenceIds));
     }
   }
 

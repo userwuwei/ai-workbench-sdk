@@ -39,6 +39,7 @@ import com.cscjapp.aiworkbench.tools.file.LocalWorkspaceAccess;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -103,6 +104,25 @@ public final class CodeAgentPresetTest {
     assertFalse(common.contains("create_file 用于写入模型已经生成的完整内容"));
     assertFalse(common.contains("目标冲突由本地用户决定覆盖或新建"));
     assertTrue(composed.contains("language-specific-rules"));
+  }
+
+  @Test
+  public void readPlanPromptProtocolIsEnabledOnlyWhenToolIsRegistered() {
+    CodeAgentPreset withoutReadPlan =
+        CodeAgentPreset.builder(profile("")).workspace(workspace).build();
+    CodeAgentPreset withReadPlan =
+        CodeAgentPreset.builder(profile(""))
+            .workspace(workspace)
+            .languageTools(Collections.singletonList(tool("read_plan")))
+            .build();
+    PromptContext context = new PromptContext("workspace", "task", Collections.emptyMap());
+    String absent = withoutReadPlan.promptContributors().get(0).contribute(context).get(0).content();
+    String present = withReadPlan.promptContributors().get(0).contribute(context).get(0).content();
+
+    assertFalse(absent.contains("evidence_requirements"));
+    assertTrue(present.contains("evidence_requirements"));
+    assertTrue(present.contains("ready_for_edit=true"));
+    assertTrue(present.contains("不得先散发调用多个 read_file"));
   }
 
   @Test
@@ -399,6 +419,13 @@ public final class CodeAgentPresetTest {
         new ToolInvocation("r", read, path),
         ToolResult.success(Collections.singletonMap("path", "main.txt")));
     assertEquals(
+        ToolPolicyDecision.Kind.ERROR,
+        decision(policy, new ToolInvocation("e-path-only", edit, path)).kind());
+    policy.onToolCompleted(
+        first,
+        new ToolInvocation("r-content", read, path),
+        ToolResult.success(map("path", "main.txt", "content", "before")));
+    assertEquals(
         ToolPolicyDecision.Kind.PROCEED,
         decision(policy, new ToolInvocation("e2", edit, path)).kind());
 
@@ -445,8 +472,8 @@ public final class CodeAgentPresetTest {
                 root.getAbsolutePath(),
                 "items",
                 Arrays.asList(
-                    map("result", map("path", "index.html")),
-                    map("result", map("resolved_path", "style.css"))),
+                    map("result", map("path", "index.html", "content", "index.html")),
+                    map("result", map("resolved_path", "style.css", "content", "style.css"))),
                 "truncated",
                 true)));
 
@@ -459,7 +486,7 @@ public final class CodeAgentPresetTest {
     ToolPolicyDecision missing = decision(policy, editInvocation("game.js", edit));
     assertEquals(ToolPolicyDecision.Kind.ERROR, missing.kind());
     assertEquals("read_evidence_required", missing.result().errorCode());
-    assertTrue(missing.result().message().contains("批量读取中被截断"));
+    assertTrue(missing.result().message().contains("当前 revision"));
 
     policy.onToolCompleted(
         run,
@@ -467,7 +494,7 @@ public final class CodeAgentPresetTest {
             "read-game",
             read,
             new ToolArguments(Collections.singletonMap("path", "game.js"))),
-        ToolResult.success(Collections.singletonMap("path", "game.js")));
+        ToolResult.success(map("path", "game.js", "content", "game.js")));
     assertEquals(
         ToolPolicyDecision.Kind.PROCEED,
         decision(policy, editInvocation("game.js", edit)).kind());
@@ -525,7 +552,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void explicitReadPathsAuthorizeGenericReadResults() throws Exception {
+  public void explicitReadPathsWithoutContentDoNotAuthorizeEdits() throws Exception {
     File style = new File(root, "style.css");
     Files.write(style.toPath(), "body{}".getBytes(StandardCharsets.UTF_8));
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
@@ -545,8 +572,47 @@ public final class CodeAgentPresetTest {
                 "read_paths", Collections.singletonList(style.getAbsolutePath()))));
 
     assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
+        ToolPolicyDecision.Kind.ERROR,
         decision(policy, editInvocation("style.css", tool("search_replace"))).kind());
+  }
+
+  @Test
+  public void readyReadPlanMustMatchCurrentFileRevisionAndInvalidatesOnChange() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ReadBeforeEditPolicy policy = new ReadBeforeEditPolicy(workspace, roles);
+    AgentRunContext run = new AgentRunContext(18L, "s", "workspace", "task");
+    AgentTool readPlan = tool("read_plan");
+    AgentTool edit = tool("search_replace");
+    ToolArguments path = new ToolArguments(Collections.singletonMap("path", "main.txt"));
+    policy.onRunStarted(run);
+
+    Map<String, Object> base = map(
+        "path", "main.txt",
+        "revision", sha256(new File(root, "main.txt")),
+        "evidence", Collections.singletonList(map("evidence_id", "ev_main", "content", "before")));
+    Map<String, Object> incomplete = new LinkedHashMap<>(base);
+    incomplete.put("coverage_summary", map("ready_for_edit", false));
+    policy.onToolCompleted(
+        run, new ToolInvocation("plan-incomplete", readPlan, path), ToolResult.success(incomplete));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editInvocation("main.txt", edit)).kind());
+
+    Map<String, Object> stale = new LinkedHashMap<>(base);
+    stale.put("revision", String.join("", Collections.nCopies(64, "0")));
+    stale.put("coverage_summary", map("ready_for_edit", true));
+    policy.onToolCompleted(
+        run, new ToolInvocation("plan-stale", readPlan, path), ToolResult.success(stale));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editInvocation("main.txt", edit)).kind());
+
+    Map<String, Object> ready = new LinkedHashMap<>(base);
+    ready.put("coverage_summary", map("ready_for_edit", true));
+    policy.onToolCompleted(
+        run, new ToolInvocation("plan-ready", readPlan, path), ToolResult.success(ready));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, editInvocation("main.txt", edit)).kind());
+
+    Files.write(new File(root, "main.txt").toPath(), "changed".getBytes(StandardCharsets.UTF_8));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editInvocation("main.txt", edit)).kind());
   }
 
   private static ToolInvocation editInvocation(String path, AgentTool edit) {
@@ -714,6 +780,46 @@ public final class CodeAgentPresetTest {
         generation, "browser_test", ToolResult.success(map("passed", true)));
     assertFalse(late.data().containsKey("plan_state"));
     assertFalse(coordinator.hasPlan());
+  }
+
+  @Test
+  public void managedPlanAcceptsOnlyReadyGoalDrivenReadCoverage() throws Exception {
+    CodeValidationContract contract =
+        CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(19L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "repair resize",
+            "steps",
+            Arrays.asList(
+                step("discover", "collect evidence", "discover", "read_plan"),
+                step("implement", "apply edit", "implement", "search_replace"),
+                step("verify", "verify", "verify", "syntax_check"))));
+    ToolArguments arguments = new ToolArguments(map("path", "main.txt"));
+    Map<String, Object> readData =
+        map(
+            "path", "main.txt",
+            "revision", sha256(new File(root, "main.txt")),
+            "read_paths", Collections.singletonList("main.txt"),
+            "evidence", Collections.singletonList(map("evidence_id", "ev_main", "content", "before")));
+    Map<String, Object> incomplete = new LinkedHashMap<>(readData);
+    incomplete.put("coverage_summary", map("ready_for_edit", false));
+    ToolResult ignored = coordinator.recordAndDecorate(
+        generation, "read_plan", arguments, ToolResult.success(incomplete));
+    assertFalse(ignored.data().containsKey("plan_state"));
+
+    Map<String, Object> ready = new LinkedHashMap<>(readData);
+    ready.put("coverage_summary", map("ready_for_edit", true));
+    ToolResult accepted = coordinator.recordAndDecorate(
+        generation, "read_plan", arguments, ToolResult.success(ready));
+    assertEquals("implement", currentStepId(accepted.data().get("plan_state")));
   }
 
   @Test
@@ -1837,6 +1943,14 @@ public final class CodeAgentPresetTest {
         throw new AssertionError(error);
       }
     };
+  }
+
+  private static String sha256(File file) throws Exception {
+    byte[] bytes = Files.readAllBytes(file.toPath());
+    byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+    StringBuilder result = new StringBuilder();
+    for (byte value : digest) result.append(String.format("%02x", value & 0xff));
+    return result.toString();
   }
 
   private static void delete(File file) {

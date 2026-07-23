@@ -16,7 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
-/** Builds the bounded, request-only view of completed large write turns. */
+/** Builds the bounded request view of completed large writes and goal-driven evidence reads. */
 final class AgentHistoryRequestProjection {
   static final int LARGE_WRITE_ARGUMENT_CHARS = 2048;
   private static final int MAX_RETRY_ITEMS = 8;
@@ -72,10 +72,9 @@ final class AgentHistoryRequestProjection {
   }
 
   private static Projection create(AgentToolCall call, AgentMessage resultMessage) {
-    if (call == null
-        || call.arguments() == null
-        || resultMessage == null
-        || !isWriteTool(call.name())) return null;
+    if (call == null || call.arguments() == null || resultMessage == null) return null;
+    if ("read_plan".equals(call.name())) return compactReadPlan(call, resultMessage);
+    if (!isWriteTool(call.name())) return null;
     String rawArguments = GSON.toJson(call.arguments().asMap());
     if (rawArguments.length() <= LARGE_WRITE_ARGUMENT_CHARS) return null;
     JsonObject result = parseObject(resultMessage.content());
@@ -148,6 +147,41 @@ final class AgentHistoryRequestProjection {
     compactResult.add("data", compactData);
     compactResult.addProperty("retryable", booleanValue(result.get("retryable")));
     return new Projection(new ToolArguments(compactArguments), GSON.toJson(compactResult));
+  }
+
+  private static Projection compactReadPlan(AgentToolCall call, AgentMessage resultMessage) {
+    JsonObject result = parseObject(resultMessage.content());
+    if (result == null) return null;
+    JsonObject data = object(result.get("data"));
+    if (data == null) return null;
+    JsonObject compactResult = new JsonObject();
+    copyJson(result, compactResult, "status", "error_code", "message", "retryable");
+    JsonObject compactData = new JsonObject();
+    copyJson(
+        data,
+        compactData,
+        "operation",
+        "mode",
+        "path",
+        "goal",
+        "revision",
+        "revision_consistent",
+        "internal_expansion_performed",
+        "line_budget",
+        "total_returned_lines",
+        "truncated",
+        "resolved_targets",
+        "evidence",
+        "coverage_summary",
+        "edit_anchor_pack",
+        "read_paths",
+        "recommended_next_action",
+        "next_read_plan_delta",
+        "message",
+        "plan_state");
+    compactData.addProperty("history_projection", "goal_driven_read_compacted");
+    compactResult.add("data", compactData);
+    return new Projection(call.arguments(), GSON.toJson(compactResult));
   }
 
   private static Map<String, Object> compactArguments(

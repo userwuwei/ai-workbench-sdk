@@ -368,6 +368,58 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
+  public void readPlanHistoryKeepsSingleEvidenceCopyAndDropsInternalBatchPayloads() {
+    String source = "function resizeCanvas() { return canvas.width; }";
+    ToolArguments arguments =
+        new ToolArguments(
+            map(
+                "path", "/project/index.html",
+                "goal", "fix resize",
+                "evidence_requirements",
+                Collections.singletonList(
+                    map(
+                        "id", "resize_flow",
+                        "question", "where is resize registered",
+                        "evidence_types", Arrays.asList("definition", "event_binding"),
+                        "signals", Collections.singletonList("resizeCanvas")))));
+    Map<String, Object> evidence =
+        map(
+            "evidence_id", "ev_resize",
+            "requirement_ids", Collections.singletonList("resize_flow"),
+            "role", "definition",
+            "content", source);
+    Map<String, Object> data =
+        map(
+            "operation", "read_plan",
+            "mode", "goal_driven_evidence_batch",
+            "path", "/project/index.html",
+            "revision", String.join("", Collections.nCopies(64, "a")),
+            "evidence", Collections.singletonList(evidence),
+            "coverage_summary", map("ready_for_edit", true),
+            "items", Collections.singletonList(map("result", map("content", source))),
+            "content", source,
+            "recommended_next_action", "search_replace");
+    List<AgentMessage> history =
+        Arrays.asList(
+            AgentMessage.assistant(
+                "",
+                Collections.singletonList(new AgentToolCall("read-plan", "read_plan", arguments))),
+            AgentMessage.tool(
+                "read-plan", "read_plan", ToolResultCodec.toJson(ToolResult.success(data))));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    assertSame(arguments, projected.get(0).toolCalls().get(0).arguments());
+    JsonObject result = JsonParser.parseString(projected.get(1).content()).getAsJsonObject();
+    JsonObject compactData = result.getAsJsonObject("data");
+    assertTrue(compactData.has("evidence"));
+    assertFalse(compactData.has("items"));
+    assertFalse(compactData.has("content"));
+    assertEquals("goal_driven_read_compacted", compactData.get("history_projection").getAsString());
+    assertEquals(projected.get(1).content().indexOf(source), projected.get(1).content().lastIndexOf(source));
+  }
+
+  @Test
   public void characterBudgetCountsToolArgumentsAndToolResults() {
     String large = String.join("", Collections.nCopies(6000, "x"));
     Map<String, Object> arguments = new LinkedHashMap<>();
@@ -528,6 +580,14 @@ public class AgentHistoryRequestProjectionTest {
     data.put("total_lines", content.split("\\n", -1).length - 1);
     data.put("content", content);
     return data;
+  }
+
+  private static Map<String, Object> map(Object... values) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    for (int index = 0; index + 1 < values.length; index += 2) {
+      result.put(String.valueOf(values[index]), values[index + 1]);
+    }
+    return result;
   }
 
   private static String javascript(int lines) {
