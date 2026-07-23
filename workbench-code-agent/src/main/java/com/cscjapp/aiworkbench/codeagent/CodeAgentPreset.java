@@ -135,8 +135,8 @@ public final class CodeAgentPreset {
 
   private static String readPlanningInstruction(boolean available) {
     if (!available) return "";
-    return "\n跨 DOM/CSS/函数/调用链排查，或 browser_test、syntax_check 失败后的修复，必须直接调用一次 read_plan：在 goal 和 evidence_requirements 中声明阅读目的、待回答问题、证据类型及符号/选择器信号，不得先散发调用多个 read_file，也不得填写行号。"
-        + "\nread_plan.coverage_summary.ready_for_edit=true 时直接使用 edit_anchor_pack 的真实源码进入一次合并 search_replace；为 false 时只针对 missing_evidence_types 做增量 read_plan，禁止猜测 old。";
+    return "\n首次接触当前 revision 的普通源码文件时，优先只传 path 使用 read_file 完整读取；已知具体跨区域问题或验证失败证据时，可使用 read_plan.evidence_requirements 一次定位 DOM/CSS/函数/调用链。读取工具是非破坏性的，由你根据上下文自行选择。"
+        + "\nread_plan.coverage_summary.ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入合并 search_replace；为 false 时根据 missing_evidence_types/missing_signals 决定继续读取或调整判断，禁止猜测 old。";
   }
 
   private static boolean hasTool(List<? extends AgentTool> tools, String name) {

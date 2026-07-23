@@ -103,6 +103,12 @@ public class FileToolsTest {
     ws.writeAtomic("main.txt", content.toString(), false);
     ReadFileTool tool = new ReadFileTool(ws);
 
+    ToolResult full = tool.run(new ToolArguments().with("path", "main.txt"));
+    assertEquals("full_file", full.data().get("mode"));
+    assertEquals(Boolean.TRUE, full.data().get("full_file"));
+    assertTrue(String.valueOf(full.data().get("revision")).matches("[0-9a-f]{64}"));
+    assertEquals(content.toString(), full.data().get("content"));
+
     ToolResult window =
         tool.run(
             new ToolArguments()
@@ -111,6 +117,8 @@ public class FileToolsTest {
                 .with("end_line", 20));
     assertEquals(10, window.data().get("start_line"));
     assertEquals(20, window.data().get("end_line"));
+    assertEquals("range", window.data().get("mode"));
+    assertEquals(Boolean.FALSE, window.data().get("full_file"));
     assertEquals(11, String.valueOf(window.data().get("content")).split("\\n", -1).length);
 
     ToolResult symbol =

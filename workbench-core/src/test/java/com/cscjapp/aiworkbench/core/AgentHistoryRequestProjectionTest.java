@@ -31,8 +31,17 @@ public class AgentHistoryRequestProjectionTest {
     AgentMessage result =
         AgentMessage.tool(
             "write-1", "search_replace", ToolResultCodec.toJson(ToolResult.success(data)));
+    AgentMessage browserCall = AgentMessage.assistant(
+        "",
+        Collections.singletonList(new AgentToolCall(
+            "browser-1", "browser_test", new ToolArguments(map("goal", "verify")))));
+    AgentMessage browserResult = AgentMessage.tool(
+        "browser-1", "browser_test",
+        ToolResultCodec.toJson(ToolResult.success(map("passed", true))));
     List<AgentMessage> history =
-        Arrays.asList(AgentMessage.system("system"), AgentMessage.user("task"), assistant, result);
+        Arrays.asList(
+            AgentMessage.system("system"), AgentMessage.user("task"), assistant, result,
+            browserCall, browserResult);
 
     int originalChars = AgentHistory.estimatedChars(history);
     List<AgentMessage> projected = AgentHistory.forModelRequest(history, 80, 120000);
@@ -71,6 +80,70 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
+  public void onlyLatestBoundedWriteIsPreservedUntilBrowserPasses() {
+    String first = javascript(180);
+    String second = javascript(190);
+    ToolArguments firstArguments = searchReplaceArguments("/project/src/script.js", first);
+    ToolArguments secondArguments = searchReplaceArguments("/project/src/script.js", second);
+    List<AgentMessage> history = new java.util.ArrayList<>();
+    history.add(AgentMessage.assistant("", Collections.singletonList(
+        new AgentToolCall("write-1", "search_replace", firstArguments))));
+    history.add(AgentMessage.tool(
+        "write-1", "search_replace",
+        ToolResultCodec.toJson(ToolResult.success(successData("/project/src/script.js", first)))));
+    history.add(AgentMessage.assistant("", Collections.singletonList(
+        new AgentToolCall("write-2", "search_replace", secondArguments))));
+    history.add(AgentMessage.tool(
+        "write-2", "search_replace",
+        ToolResultCodec.toJson(ToolResult.success(successData("/project/src/script.js", second)))));
+    history.add(AgentMessage.assistant("", Collections.singletonList(
+        new AgentToolCall("browser", "browser_test", new ToolArguments(map("goal", "verify"))))));
+    history.add(AgentMessage.tool(
+        "browser", "browser_test",
+        ToolResultCodec.toJson(ToolResult.success(
+            map("passed", false, "failure_kind", "product_code_failure")))));
+
+    List<AgentMessage> beforePass = AgentHistoryRequestProjection.project(history);
+    assertFalse(beforePass.get(0).toolCalls().get(0).arguments().asMap().toString().contains(first));
+    assertTrue(beforePass.get(2).toolCalls().get(0).arguments().asMap().toString().contains(second));
+
+    history.add(AgentMessage.assistant("", Collections.singletonList(
+        new AgentToolCall("browser-pass", "browser_test", new ToolArguments(map("goal", "verify"))))));
+    history.add(AgentMessage.tool(
+        "browser-pass", "browser_test",
+        ToolResultCodec.toJson(ToolResult.success(map("passed", true)))));
+    List<AgentMessage> afterPass = AgentHistoryRequestProjection.project(history);
+    assertFalse(afterPass.get(2).toolCalls().get(0).arguments().asMap().toString().contains(second));
+  }
+
+  @Test
+  public void duplicateFullReadsKeepOnlyLatestSourceCopy() {
+    String source = javascript(80);
+    ToolArguments arguments = new ToolArguments(map("path", "/project/src/script.js"));
+    Map<String, Object> data = map(
+        "path", "/project/src/script.js",
+        "content", source,
+        "revision", "abc",
+        "mode", "full_file",
+        "full_file", true,
+        "total_lines", 80);
+    List<AgentMessage> history = Arrays.asList(
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("read-1", "read_file", arguments))),
+        AgentMessage.tool("read-1", "read_file", ToolResultCodec.toJson(ToolResult.success(data))),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("read-2", "read_file", arguments))),
+        AgentMessage.tool("read-2", "read_file", ToolResultCodec.toJson(ToolResult.success(data))));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+    assertFalse(JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject().getAsJsonObject("data").has("content"));
+    assertTrue(projected.get(1).content().contains("stale_full_read_compacted"));
+    assertEquals(source, JsonParser.parseString(projected.get(3).content())
+        .getAsJsonObject().getAsJsonObject("data").get("content").getAsString());
+  }
+
+  @Test
   public void createAndRewriteKeepRoleCountsAndHashes() {
     String content = javascript(180);
     Map<String, Object> create = new LinkedHashMap<>();
@@ -101,7 +174,14 @@ public class AgentHistoryRequestProjectionTest {
                 "rewrite",
                 "rewrite",
                 ToolResultCodec.toJson(
-                    ToolResult.success(successData("/project/src/existing.js", content)))));
+                    ToolResult.success(successData("/project/src/existing.js", content)))),
+            AgentMessage.assistant(
+                "",
+                Collections.singletonList(new AgentToolCall(
+                    "browser", "browser_test", new ToolArguments(map("goal", "verify"))))),
+            AgentMessage.tool(
+                "browser", "browser_test",
+                ToolResultCodec.toJson(ToolResult.success(map("passed", true)))));
 
     List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
 
@@ -574,7 +654,7 @@ public class AgentHistoryRequestProjectionTest {
     assertEquals("done", output.get());
     assertNotNull(secondRequest.get());
     AgentMessage projectedCall = secondRequest.get().messages().get(2);
-    assertFalse(projectedCall.toolCalls().get(0).arguments().asMap().toString().contains(content));
+    assertTrue(projectedCall.toolCalls().get(0).arguments().asMap().toString().contains(content));
     List<AgentMessage> fullHistory = engine.messages();
     assertTrue(fullHistory.get(2).toolCalls().get(0).arguments().asMap().toString().contains(content));
     assertEquals(

@@ -124,7 +124,8 @@ public final class CodeAgentPresetTest {
     assertFalse(absent.contains("evidence_requirements"));
     assertTrue(present.contains("evidence_requirements"));
     assertTrue(present.contains("ready_for_edit=true"));
-    assertTrue(present.contains("不得先散发调用多个 read_file"));
+    assertTrue(present.contains("首次接触当前 revision"));
+    assertTrue(present.contains("读取工具是非破坏性的"));
   }
 
   @Test
@@ -397,7 +398,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void ordinaryReadNeverAuthorizesEditAndCreateDoesNotNeedRead() throws Exception {
+  public void fullOrdinaryReadAuthorizesEditAndCreateDoesNotNeedRead() throws Exception {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("read_file", CodeToolRole.READ);
     roles.put("search_replace", CodeToolRole.EDIT);
@@ -428,7 +429,7 @@ public final class CodeAgentPresetTest {
         new ToolInvocation("r-content", read, path),
         ToolResult.success(map("path", "main.txt", "content", "before")));
     assertEquals(
-        ToolPolicyDecision.Kind.ERROR,
+        ToolPolicyDecision.Kind.PROCEED,
         decision(policy, new ToolInvocation("e2", edit, path)).kind());
 
     policy.onRunStarted(new AgentRunContext(2L, "s", "workspace", "next"));
@@ -438,7 +439,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void batchAndOrdinaryReadsDoNotAuthorizeEdits() throws Exception {
+  public void batchWithoutDirectContentDoesNotAuthorizeButFullOrdinaryReadDoes() throws Exception {
     for (String name : Arrays.asList("index.html", "style.css", "game.js")) {
       Files.write(
           new File(root, name).toPath(),
@@ -498,12 +499,12 @@ public final class CodeAgentPresetTest {
             new ToolArguments(Collections.singletonMap("path", "game.js"))),
         ToolResult.success(map("path", "game.js", "content", "game.js")));
     assertEquals(
-        ToolPolicyDecision.Kind.ERROR,
+        ToolPolicyDecision.Kind.PROCEED,
         decision(policy, editInvocation("game.js", edit)).kind());
   }
 
   @Test
-  public void successfulWriteInvalidatesReadEvidenceButFailedOrUnchangedWriteDoesNot()
+  public void successfulWriteRefreshesReadEvidenceAndFailedOrUnchangedWriteDoesNot()
       throws Exception {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("read_plan", CodeToolRole.READ);
@@ -533,7 +534,7 @@ public final class CodeAgentPresetTest {
         run,
         editMain,
         ToolResult.success(map("resolved_path", "main.txt", "changed", true)));
-    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editMain).kind());
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, editMain).kind());
 
     policy.onToolCompleted(
         run,
@@ -867,17 +868,16 @@ public final class CodeAgentPresetTest {
     coordinator.onRunStarted(run);
 
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("list_dir", "read_plan", "plan_task", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("list_dir", "read_file", "read_plan", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
-    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
+    assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
     assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file_batch"));
     ToolInvocation hiddenBatch =
         new ToolInvocation(
             "hidden-batch",
             tool("read_file_batch"),
             new ToolArguments(map("path", root.getAbsolutePath())));
-    assertTrue(coordinator.supports(hiddenBatch));
-    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(coordinator, hiddenBatch).kind());
+    assertFalse(coordinator.supports(hiddenBatch));
 
     long generation = coordinator.generation();
     coordinator.acceptPlan(
@@ -903,7 +903,7 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(ready));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("create_file", "search_replace", "rewrite", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "create_file", "search_replace", "rewrite", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     coordinator.recordAndDecorate(
@@ -912,12 +912,12 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true)));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("syntax_check", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "syntax_check", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     coordinator.recordAndDecorate(
         generation, "syntax_check", ToolResult.success(map("passed", true)));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("browser_test", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "browser_test", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     coordinator.recordAndDecorate(
@@ -925,14 +925,14 @@ public final class CodeAgentPresetTest {
         "browser_test",
         ToolResult.success(map("passed", false, "failure_kind", "test_plan_invalid")));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("browser_test", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "browser_test", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     coordinator.recordAndDecorate(
         generation,
         "browser_test",
         ToolResult.success(map("passed", false, "failure_kind", "product_code_failure")));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_plan", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "create_file", "search_replace", "rewrite", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     coordinator.recordAndDecorate(
@@ -941,7 +941,7 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(ready));
     assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("search_replace"));
-    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_plan"));
+    assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("read_plan"));
 
     coordinator.recordAndDecorate(
         generation,
@@ -950,35 +950,19 @@ public final class CodeAgentPresetTest {
         ToolResult.error(
             "file_tool_error", "search_match_count:0:expected=1:actual=0", false));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_file", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList(
+            "read_file", "read_plan", "create_file", "search_replace", "rewrite", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     AgentTool recoveryRead = tool("read_file");
-    assertEquals(
-        ToolPolicyDecision.Kind.ERROR,
-        decision(
-                coordinator,
-                new ToolInvocation(
-                    "full-read",
-                    recoveryRead,
-                    new ToolArguments(map("path", "main.txt"))))
-            .kind());
-    assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
-        decision(
-                coordinator,
-                new ToolInvocation(
-                    "bounded-read",
-                    recoveryRead,
-                    new ToolArguments(
-                        map("path", "main.txt", "start_line", 1, "end_line", 1))))
-            .kind());
+    assertFalse(coordinator.supports(new ToolInvocation(
+        "full-read", recoveryRead, new ToolArguments(map("path", "main.txt")))));
     coordinator.recordAndDecorate(
         generation,
         "read_file",
         new ToolArguments(map("path", "main.txt", "start_line", 1, "end_line", 1)),
         ToolResult.success(map("path", "main.txt", "content", "before")));
     assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("search_replace"));
-    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
+    assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
   }
 
   @Test
@@ -1017,8 +1001,9 @@ public final class CodeAgentPresetTest {
     policy.onToolCompleted(
         run,
         new ToolInvocation(
-            "refresh", readFile, new ToolArguments(Collections.singletonMap("path", "main.txt"))),
-        ToolResult.success(map("path", "main.txt", "content", "before")));
+            "refresh", readFile,
+            new ToolArguments(map("path", "main.txt", "start_line", 1, "end_line", 1))),
+        ToolResult.success(map("path", "main.txt", "content", "before", "truncated", true)));
     ToolInvocation exact =
         new ToolInvocation(
             "retry",
@@ -1039,9 +1024,10 @@ public final class CodeAgentPresetTest {
     policy.onToolCompleted(
         run,
         new ToolInvocation(
-            "late-refresh", readFile, new ToolArguments(Collections.singletonMap("path", "main.txt"))),
-        ToolResult.success(map("path", "main.txt", "content", "before")));
-    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, exact).kind());
+            "late-refresh", readFile,
+            new ToolArguments(map("path", "main.txt", "start_line", 1, "end_line", 1))),
+        ToolResult.success(map("path", "main.txt", "content", "before", "truncated", true)));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, exact).kind());
   }
 
   @Test

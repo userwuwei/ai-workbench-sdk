@@ -31,6 +31,8 @@ final class AgentHistoryRequestProjection {
   static List<AgentMessage> project(List<AgentMessage> source) {
     List<AgentMessage> safe = AgentHistory.sanitize(source);
     if (safe.isEmpty()) return safe;
+    Set<String> preservedWriteCalls = preservedWriteCalls(safe);
+    Set<String> preservedFullReadCalls = preservedFullReadCalls(safe);
     List<AgentMessage> out = new ArrayList<>(safe.size());
     boolean anyChanged = false;
     for (int index = 0; index < safe.size(); ) {
@@ -50,7 +52,11 @@ final class AgentHistoryRequestProjection {
       Map<String, Projection> projections = new LinkedHashMap<>();
       List<AgentToolCall> calls = new ArrayList<>(message.toolCalls().size());
       for (AgentToolCall call : message.toolCalls()) {
-        Projection projection = create(call, resultsByCallId.get(call.id()));
+        Projection projection = create(
+            call,
+            resultsByCallId.get(call.id()),
+            preservedWriteCalls.contains(call.id()),
+            preservedFullReadCalls.contains(call.id()));
         if (projection == null) calls.add(call);
         else {
           calls.add(new AgentToolCall(call.id(), call.name(), projection.arguments));
@@ -71,12 +77,20 @@ final class AgentHistoryRequestProjection {
     return anyChanged ? Collections.unmodifiableList(out) : safe;
   }
 
-  private static Projection create(AgentToolCall call, AgentMessage resultMessage) {
+  private static Projection create(
+      AgentToolCall call,
+      AgentMessage resultMessage,
+      boolean preserveWritePayload,
+      boolean preserveFullRead) {
     if (call == null || call.arguments() == null || resultMessage == null) return null;
+    if ("read_file".equals(call.name())) {
+      return preserveFullRead ? null : compactStaleFullRead(call, resultMessage);
+    }
     if ("read_plan".equals(call.name())) return compactReadPlan(call, resultMessage);
     if ("browser_test".equals(call.name())) return compactBrowserTest(call, resultMessage);
     if (!isWriteTool(call.name())) return null;
     String rawArguments = GSON.toJson(call.arguments().asMap());
+    if (preserveWritePayload && rawArguments.length() <= MAX_REPAIR_PAYLOAD_CHARS) return null;
     if (rawArguments.length() <= LARGE_WRITE_ARGUMENT_CHARS) return null;
     JsonObject result = parseObject(resultMessage.content());
     if (result == null) return null;
@@ -148,6 +162,101 @@ final class AgentHistoryRequestProjection {
     compactResult.add("data", compactData);
     compactResult.addProperty("retryable", booleanValue(result.get("retryable")));
     return new Projection(new ToolArguments(compactArguments), GSON.toJson(compactResult));
+  }
+
+  /**
+   * Keep exactly the latest successful, bounded write visible until browser verification passes.
+   * Earlier writes are compacted, while syntax or product failures retain the latest payload so the
+   * model can author selectors and repair anchors without a forced read round.
+   */
+  private static Set<String> preservedWriteCalls(List<AgentMessage> messages) {
+    String latest = "";
+    for (int index = 0; index < messages.size(); index++) {
+      AgentMessage message = messages.get(index);
+      if (message.role() != AgentMessage.Role.ASSISTANT || message.toolCalls().isEmpty()) continue;
+      Map<String, AgentMessage> results = new LinkedHashMap<>();
+      int cursor = index + 1;
+      while (cursor < messages.size() && messages.get(cursor).role() == AgentMessage.Role.TOOL) {
+        AgentMessage result = messages.get(cursor++);
+        results.put(result.toolCallId(), result);
+      }
+      for (AgentToolCall call : message.toolCalls()) {
+        AgentMessage resultMessage = results.get(call.id());
+        JsonObject result = resultMessage == null ? null : parseObject(resultMessage.content());
+        JsonObject data = result == null ? null : object(result.get("data"));
+        if (isWriteTool(call.name())
+            && result != null
+            && successfulWithoutPartialFailure(result, data)
+            && GSON.toJson(call.arguments().asMap()).length() <= MAX_REPAIR_PAYLOAD_CHARS) {
+          latest = call.id();
+        } else if ("browser_test".equals(call.name())
+            && result != null
+            && "success".equalsIgnoreCase(string(result.get("status")))
+            && data != null
+            && booleanValue(data.get("passed"))) {
+          latest = "";
+        }
+      }
+    }
+    return latest.isEmpty() ? Collections.emptySet() : Collections.singleton(latest);
+  }
+
+  private static Set<String> preservedFullReadCalls(List<AgentMessage> messages) {
+    Map<String, String> latestByPath = new LinkedHashMap<>();
+    for (int index = 0; index < messages.size(); index++) {
+      AgentMessage message = messages.get(index);
+      if (message.role() != AgentMessage.Role.ASSISTANT || message.toolCalls().isEmpty()) continue;
+      Map<String, AgentMessage> results = new LinkedHashMap<>();
+      int cursor = index + 1;
+      while (cursor < messages.size() && messages.get(cursor).role() == AgentMessage.Role.TOOL) {
+        AgentMessage result = messages.get(cursor++);
+        results.put(result.toolCallId(), result);
+      }
+      for (AgentToolCall call : message.toolCalls()) {
+        if (!"read_file".equals(call.name())) continue;
+        AgentMessage resultMessage = results.get(call.id());
+        JsonObject result = resultMessage == null ? null : parseObject(resultMessage.content());
+        JsonObject data = result == null ? null : object(result.get("data"));
+        if (result == null
+            || !"success".equalsIgnoreCase(string(result.get("status")))
+            || data == null
+            || !isFullRead(call, data)
+            || string(data.get("content")).isEmpty()) continue;
+        String path = string(data.get("path"));
+        if (path.isEmpty()) path = call.arguments().getString("path", "");
+        if (!path.isEmpty()) latestByPath.put(path, call.id());
+      }
+    }
+    return latestByPath.isEmpty()
+        ? Collections.emptySet() : new LinkedHashSet<>(latestByPath.values());
+  }
+
+  private static boolean isFullRead(AgentToolCall call, JsonObject data) {
+    if (booleanValue(data.get("full_file")) || "full_file".equals(string(data.get("mode")))) {
+      return true;
+    }
+    Map<String, Object> arguments = call.arguments().asMap();
+    return !arguments.containsKey("start_line")
+        && !arguments.containsKey("end_line")
+        && value(arguments.get("target_function")).isEmpty()
+        && value(arguments.get("target_class")).isEmpty()
+        && value(arguments.get("target_method")).isEmpty();
+  }
+
+  private static Projection compactStaleFullRead(
+      AgentToolCall call, AgentMessage resultMessage) {
+    JsonObject result = parseObject(resultMessage.content());
+    if (result == null) return null;
+    JsonObject data = object(result.get("data"));
+    if (data == null || !isFullRead(call, data) || string(data.get("content")).isEmpty()) return null;
+    JsonObject compactResult = new JsonObject();
+    copyJson(result, compactResult, "status", "error_code", "message", "retryable");
+    JsonObject compactData = new JsonObject();
+    copyJson(data, compactData,
+        "operation", "path", "resolved_path", "revision", "mode", "full_file", "total_lines");
+    compactData.addProperty("history_projection", "stale_full_read_compacted");
+    compactResult.add("data", compactData);
+    return new Projection(call.arguments(), GSON.toJson(compactResult));
   }
 
   private static Projection compactReadPlan(AgentToolCall call, AgentMessage resultMessage) {

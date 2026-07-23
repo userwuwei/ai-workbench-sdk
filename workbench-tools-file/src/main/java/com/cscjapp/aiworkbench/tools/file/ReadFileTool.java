@@ -1,6 +1,8 @@
 package com.cscjapp.aiworkbench.tools.file;
 
 import com.cscjapp.aiworkbench.api.*;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
 
 public final class ReadFileTool extends AbstractFileTool {
@@ -11,7 +13,7 @@ public final class ReadFileTool extends AbstractFileTool {
   public ToolSpec spec() {
     return new ToolSpec(
         "read_file",
-        "读取文本文件；精确编辑恢复时使用符号定位或不超过 80 行的短窗口",
+        "读取文本文件全文或目标短窗口；首次接触普通文件时优先只传 path 完整读取",
         ToolSchemas.object(
             new String[][] {
               {"path", "string", "相对路径"},
@@ -49,12 +51,23 @@ public final class ReadFileTool extends AbstractFileTool {
     d.put("path", p);
     d.put("content", content);
     d.put("total_lines", lines.length);
+    d.put("revision", sha256(source));
+    d.put("mode", windowed ? "range" : "full_file");
+    d.put("full_file", !windowed);
     if (windowed) {
       d.put("start_line", start);
       d.put("end_line", Math.min(end, lines.length));
       d.put("truncated", start > 1 || end < lines.length);
     }
     return ToolResult.success(d);
+  }
+
+  private static String sha256(String source) throws Exception {
+    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+    byte[] hash = digest.digest(source.getBytes(StandardCharsets.UTF_8));
+    StringBuilder result = new StringBuilder();
+    for (byte value : hash) result.append(String.format(Locale.US, "%02x", value));
+    return result.toString();
   }
 
   private static int findLine(String[] lines, String symbol) {

@@ -62,7 +62,16 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
         && writeMayHaveChanged(result)) {
       Set<String> changedPaths = new LinkedHashSet<>();
       collectWritePaths(invocation, result.data(), changedPaths);
-      for (String path : changedPaths) readEvidence.remove(path);
+      // A successful local write is itself current-revision evidence: the model supplied the
+      // payload and search_replace/rewrite applied it atomically. Keep later repair edits flowing
+      // without forcing a non-destructive read round.
+      boolean completeSuccess = result.isSuccess()
+          && !Boolean.TRUE.equals(result.data().get("partial_apply"))
+          && !positive(result.data().get("failed_count"));
+      for (String path : changedPaths) {
+        if (completeSuccess) addRevisionEvidence(path, "", true);
+        else readEvidence.remove(path);
+      }
       recoveryPendingPaths.removeAll(changedPaths);
     } else if (completedRole == CodeToolRole.EDIT) {
       collectRecoveryFailure(invocation, result);
@@ -138,8 +147,8 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
                   "read_evidence_required",
                   "当前任务尚未获得该文件当前 revision 的真实源码证据，暂时无法修改："
                       + canonical
-                      + "。请先使用 ready_for_edit=true 的 read_plan；只有 search_replace 精确匹配失败后，"
-                      + "才可用同路径 read_file 的真实短锚点重试。",
+                      + "。请先使用 read_file 获取完整源码或真实短锚点，也可以使用 "
+                      + "ready_for_edit=true 的 read_plan 收集跨区域证据。",
                   true));
         }
       }
@@ -175,7 +184,7 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
     if ("read_file".equals(toolName) && data.containsKey("content")) {
       String path = text(first(data, "resolved_path", "path"));
       if (path.isEmpty()) path = invocation.arguments().getString("path", "");
-      addRecoveryEvidence(path, text(data.get("content")));
+      addFileEvidence(path, invocation.arguments(), data);
     }
   }
 
@@ -204,16 +213,41 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
     }
   }
 
-  private void addRecoveryEvidence(String path, String content) {
-    if (path == null || path.trim().isEmpty() || content.isEmpty() || lineCount(content) > 80) return;
+  private void addFileEvidence(
+      String path, ToolArguments arguments, Map<String, Object> data) {
+    String content = text(data.get("content"));
+    if (path == null || path.trim().isEmpty() || content.isEmpty()) return;
     try {
       File resolved = workspace.resolveSafely(path);
       if (!resolved.exists() || !resolved.isFile()) return;
       String canonical = resolved.getCanonicalPath();
-      if (!recoveryPendingPaths.contains(canonical)) return;
-      readEvidence.put(canonical, new ReadEvidence(sha256(resolved), false, content));
+      String actualRevision = sha256(resolved);
+      String expectedRevision = text(data.get("revision"));
+      if (!expectedRevision.isEmpty() && !actualRevision.equalsIgnoreCase(expectedRevision)) return;
+      int totalLines = positiveInt(data.get("total_lines"));
+      boolean full = Boolean.TRUE.equals(data.get("full_file"))
+          || "full_file".equals(text(data.get("mode")))
+          || (!Boolean.TRUE.equals(data.get("truncated"))
+              && totalLines > 0
+              && lineCount(content) >= totalLines)
+          || (arguments != null
+              && !arguments.asMap().containsKey("start_line")
+              && !arguments.asMap().containsKey("end_line")
+              && text(arguments.get("target_function")).isEmpty()
+              && text(arguments.get("target_class")).isEmpty()
+              && text(arguments.get("target_method")).isEmpty());
+      readEvidence.put(canonical, new ReadEvidence(actualRevision, full, full ? "" : content));
     } catch (Exception ignored) {
-      // Invalid or concurrently replaced paths never become recovery evidence.
+      // Invalid or concurrently replaced paths never become edit evidence.
+    }
+  }
+
+  private static int positiveInt(Object value) {
+    if (value instanceof Number) return ((Number) value).intValue();
+    try {
+      return Integer.parseInt(text(value));
+    } catch (Exception ignored) {
+      return -1;
     }
   }
 

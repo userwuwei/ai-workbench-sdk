@@ -2,6 +2,8 @@ package com.cscjapp.aiworkbench.codeagent;
 
 import com.cscjapp.aiworkbench.api.*;
 import java.io.File;
+import java.io.FileInputStream;
+import java.security.MessageDigest;
 import java.util.*;
 
 /** Run-scoped managed plan shared by Code Agent tools and completion validation. */
@@ -101,20 +103,25 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       AgentRoundContext context, List<ToolSpec> registeredTools) {
     LinkedHashSet<String> allowed = new LinkedHashSet<>();
     allowed.add(CodeAgentToolNames.FINALIZE_TASK);
+    // Reads are non-destructive. Keep the two model-facing read tools available in every
+    // coding round and let the model choose between a full baseline read and a focused plan.
+    allowed.add("read_file");
+    allowed.add("read_plan");
 
     if (!recoverableEditPath.isEmpty()) {
-      if (recoveryReadReady) addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
-      else allowed.add("read_file");
+      if (recoveryReadReady || hasReadyReadCoverage()) {
+        addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+      }
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
     if (!verificationFailureTool.isEmpty()) {
       if (retryBrowserPlanWithoutCodeRead()) {
         allowed.add("browser_test");
-      } else if (hasReadyReadCoverage()) {
+      } else if (hasRoleAtRevision(CodeToolRole.CREATE)
+          || hasRoleAtRevision(CodeToolRole.EDIT)
+          || hasReadyReadCoverage()) {
         addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
-      } else {
-        allowed.add("read_plan");
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
@@ -131,10 +138,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if ("discover".equals(current.phase)) {
         allowed.add(CodeAgentToolNames.PLAN_TASK);
         allowed.add("list_dir");
-        allowed.add("read_plan");
       } else if ("implement".equals(current.phase)) {
-        if (requiresReadCoverage(current) && !hasReadyReadCoverage()) allowed.add("read_plan");
-        else addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        if (!requiresReadCoverage(current) || hasReadyReadCoverage()) {
+          addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        }
       } else if ("verify".equals(current.phase)) {
         String missingVerification = nextMissingVerificationTool();
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
@@ -149,7 +156,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     } else {
       allowed.add(CodeAgentToolNames.PLAN_TASK);
       allowed.add("list_dir");
-      allowed.add("read_plan");
     }
     return ToolSelection.onlyNames(registeredTools, allowed);
   }
@@ -157,9 +163,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   @Override
   public synchronized boolean supports(ToolInvocation invocation) {
     if (invocation == null) return false;
-    String toolName = invocation.tool().spec().name();
-    CodeToolRole role = role(toolName);
-    if (role == CodeToolRole.READ && !"read_plan".equals(toolName)) return true;
+    CodeToolRole role = role(invocation.tool().spec().name());
     return mode == CodePlanningMode.FORCE
         && !hasPlan()
         && (role == CodeToolRole.CREATE || role == CodeToolRole.EDIT);
@@ -168,27 +172,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   @Override
   public Cancellable evaluate(
       ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
-    if (role(invocation.tool().spec().name()) == CodeToolRole.READ) {
-      String toolName = invocation.tool().spec().name();
-      String requested = canonicalEvidenceFile(text(invocation.arguments().get("path")));
-      synchronized (this) {
-        if ("read_file".equals(toolName)
-            && !recoverableEditPath.isEmpty()
-            && recoverableEditPath.equals(requested)
-            && boundedRecoveryRead(invocation.arguments())) {
-          callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
-        } else {
-          callback.resolve(
-              ToolPolicyDecision.error(
-                  "goal_driven_read_required",
-                  "常规代码收集必须使用 read_plan。read_file 仅在 search_replace 精确匹配失败后，"
-                      + "用于刷新同一路径的真实编辑锚点，并且必须指定函数/类/方法符号，"
-                      + "或不超过 80 行的 start_line/end_line 窗口。",
-                  true));
-        }
-      }
-      return Cancellable.NONE;
-    }
     callback.resolve(ToolPolicyDecision.error(
         "managed_plan_required",
         "当前任务要求在首次写入前调用 plan_task 建立短计划。",
@@ -287,19 +270,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (!validEvidence(toolName, role, result)) return;
     if (role == CodeToolRole.READ) {
-      if (!"read_plan".equals(toolName)) {
-        boolean recoveryAccepted = false;
-        if ("read_file".equals(toolName) && result.isSuccess()) {
-          String path = canonicalEvidenceFile(text(firstValue(result.data(), "resolved_path", "path")));
-          if (path.isEmpty()) path = canonicalEvidenceFile(text(arguments.get("path")));
-          if (!recoverableEditPath.isEmpty()
-              && recoverableEditPath.equals(path)
-              && result.data().containsKey("content")) {
-            recoveryReadReady = true;
-            recoveryAccepted = true;
-          }
+      if ("read_file".equals(toolName) && result.isSuccess()) {
+        String path = canonicalEvidenceFile(text(firstValue(result.data(), "resolved_path", "path")));
+        if (path.isEmpty()) path = canonicalEvidenceFile(text(arguments.get("path")));
+        if (!recoverableEditPath.isEmpty()
+            && recoverableEditPath.equals(path)
+            && result.data().containsKey("content")) {
+          recoveryReadReady = true;
         }
-        if (recoveryAccepted) return;
       }
       List<String> paths = evidencePaths(role, arguments, result.data());
       if (paths.isEmpty()) return;
@@ -313,7 +291,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
             pathRevisions.getOrDefault(path, 0L),
             true));
       }
-      if ("read_plan".equals(toolName)) recordReadCoverage(paths, result.data());
+      recordReadCoverage(paths, result.data());
     } else {
       evidence.add(new Evidence(toolName, role, "", "", generation, revision, true));
     }
@@ -419,8 +397,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         if (!id.isEmpty()) evidenceIds.add(id);
       }
     }
-    String sourceRevision = text(data.get("revision"));
+    String declaredRevision = text(data.get("revision"));
     for (String path : paths) {
+      String sourceRevision = declaredRevision.isEmpty()
+          ? currentSourceRevision(path) : declaredRevision;
       readCoverageByPath.put(path, new ReadCoverage(sourceRevision, evidenceIds));
     }
   }
@@ -447,6 +427,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private boolean hasReadyReadCoverage() {
+    Iterator<Map.Entry<String, ReadCoverage>> iterator = readCoverageByPath.entrySet().iterator();
+    while (iterator.hasNext()) {
+      Map.Entry<String, ReadCoverage> entry = iterator.next();
+      String current = currentSourceRevision(entry.getKey());
+      if (current.isEmpty() || !current.equalsIgnoreCase(entry.getValue().sourceRevision)) {
+        iterator.remove();
+      }
+    }
     return !readCoverageByPath.isEmpty();
   }
 
@@ -636,6 +624,27 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
   }
 
+  private String currentSourceRevision(String canonicalPath) {
+    if (canonicalPath == null || canonicalPath.isEmpty()) return "";
+    try {
+      File file = new File(canonicalPath).getCanonicalFile();
+      if (!file.exists() || !file.isFile()) return "";
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      try (FileInputStream input = new FileInputStream(file)) {
+        byte[] buffer = new byte[8192];
+        int read;
+        while ((read = input.read(buffer)) >= 0) {
+          if (read > 0) digest.update(buffer, 0, read);
+        }
+      }
+      StringBuilder out = new StringBuilder();
+      for (byte value : digest.digest()) out.append(String.format(Locale.US, "%02x", value));
+      return out.toString();
+    } catch (Exception ignored) {
+      return "";
+    }
+  }
+
   private static boolean hasReadContent(Map<String, Object> data) {
     if (data.containsKey("content")) return true;
     Object evidence = data.get("evidence");
@@ -668,7 +677,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private boolean satisfied(PlanStep step) {
-    if ("discover".equals(step.phase)) return hasRole(CodeToolRole.READ) || hasRole(CodeToolRole.DISCOVER);
+    if ("discover".equals(step.phase)) {
+      if (!step.requiredTools.isEmpty()) {
+        for (String tool : step.requiredTools) if (hasTool(canonicalToolName(tool))) return true;
+        return false;
+      }
+      return hasRole(CodeToolRole.READ) || hasRole(CodeToolRole.DISCOVER);
+    }
     if ("implement".equals(step.phase)) return implementationSatisfied(step);
     if ("verify".equals(step.phase)) {
       for (String tool : requiredVerificationTools(step)) if (!hasCurrentTool(tool)) return false;
@@ -738,6 +753,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           && item.revision == revision
           && item.passed
           && expected.equals(item.toolName)) return true;
+    }
+    return false;
+  }
+
+  private boolean hasTool(String toolName) {
+    String expected = canonicalToolName(toolName);
+    for (Evidence item : evidence) {
+      if (item.generation == generation && item.passed && expected.equals(item.toolName)) return true;
     }
     return false;
   }
