@@ -24,6 +24,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private final Map<String, Long> pathRevisions = new LinkedHashMap<>();
   private final Map<String, String> createdFileBindings = new LinkedHashMap<>();
   private final Set<String> unresolvedWritePaths = new LinkedHashSet<>();
+  private final Map<String, Long> interactionEvidence = new LinkedHashMap<>();
+  private final Map<String, Set<String>> failedInteractionVariants = new LinkedHashMap<>();
+  private final Set<String> failedInvocationSignatures = new LinkedHashSet<>();
+  private String nextAction = "";
   private Map<String, Object> currentState = Collections.emptyMap();
   private boolean stateChanged;
 
@@ -59,6 +63,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     pathRevisions.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
+    interactionEvidence.clear();
+    failedInteractionVariants.clear();
+    failedInvocationSignatures.clear();
+    nextAction = "";
     currentState = Collections.emptyMap();
     stateChanged = false;
   }
@@ -77,6 +85,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     pathRevisions.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
+    interactionEvidence.clear();
+    failedInteractionVariants.clear();
+    failedInvocationSignatures.clear();
+    nextAction = "";
     currentState = Collections.emptyMap();
     stateChanged = false;
   }
@@ -103,10 +115,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   synchronized Map<String, Object> acceptPlan(Map<String, ?> arguments) {
+    Map<String, Object> previous = normalizedPlan;
     Map<String, Object> next = normalizer.normalize(arguments);
-    if (normalizedPlan != null && text(next.get("replan_reason")).isEmpty()) {
+    if (previous != null && text(next.get("replan_reason")).isEmpty()) {
       next.put("replan_reason", "基于当前任务的新证据调整剩余步骤");
     }
+    appendWaivedChecks(previous, next);
     normalizedPlan = next;
     planId = "plan-" + activeRunId + "-" + (++planSequence);
     files = decodeFiles(next.get("planned_files"));
@@ -119,6 +133,92 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     result.put("plan_state", state());
     stateChanged = false;
     return result;
+  }
+
+  synchronized ToolResult duplicateAttempt(String toolName, ToolArguments arguments) {
+    String signature = invocationSignature(toolName, arguments);
+    if (signature.isEmpty() || !failedInvocationSignatures.contains(signature)) return null;
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("operation", toolName);
+    data.put("passed", false);
+    data.put("failure_class", "duplicate_attempt_no_new_evidence");
+    data.put("next_action", nextAction.isEmpty() ? "change_strategy" : nextAction);
+    if (hasPlan()) data.put("plan_state", state());
+    return ToolResult.error(
+        "duplicate_attempt_no_new_evidence",
+        "当前文件版本已执行过完全相同且失败的调用；请修改选择器、步骤、代码或重新规划不可验证检查。",
+        true,
+        data);
+  }
+
+  synchronized ToolResult executeMeta(String toolName, ToolArguments arguments) {
+    if (CodeAgentToolNames.PLAN_TASK.equals(toolName)) {
+      return ToolResult.success(acceptPlan(arguments.asMap()));
+    }
+    Map<String, Object> data = new LinkedHashMap<>(arguments.asMap());
+    data.put("operation", toolName);
+    if (CodeAgentToolNames.QUALITY_REVIEW.equals(toolName) && hasPlan()) {
+      List<String> missing = missingRequiredInteractionIds();
+      List<String> evidenceMissing = missingBeforeQuality();
+      List<String> claimed = stringList(data.get("covered_interaction_check_ids"));
+      List<String> covered = coveredRequiredInteractionIds();
+      List<String> unsupported = new ArrayList<>();
+      for (String claim : claimed) if (!covered.contains(claim)) unsupported.add(claim);
+      if (!unsupported.isEmpty()) {
+        data.put("passed", false);
+        data.put("unsupported_claims", unsupported);
+        data.put("covered_interaction_check_ids", covered);
+        data.put("next_action", "remove_unsupported_quality_claims");
+        data.put("plan_state", state());
+        return ToolResult.error(
+            "quality_claims_unsupported",
+            "质量审查引用了当前 revision 未覆盖的交互检查：" + String.join(", ", unsupported),
+            true,
+            data);
+      }
+      if (!missing.isEmpty() || !evidenceMissing.isEmpty()) {
+        data.put("passed", false);
+        data.put("missing_required_checks", missing);
+        data.put("missing_evidence", evidenceMissing);
+        data.put("covered_interaction_check_ids", covered);
+        data.put("next_action", nextActionFor(missing, evidenceMissing));
+        data.put("plan_state", state());
+        return ToolResult.error(
+            "quality_evidence_incomplete",
+            "质量审查前仍缺少当前文件版本的真实证据：" + joinMissing(missing, evidenceMissing),
+            true,
+            data);
+      }
+      data.put("covered_interaction_check_ids", covered);
+      mergeAdvisoryWarnings(data);
+    }
+    if (CodeAgentToolNames.FINALIZE_TASK.equals(toolName)
+        && "completed".equals(text(data.get("status")))) {
+      String completionType = text(data.get("completion_type"));
+      if (completionType.isEmpty()) completionType = "code_generation";
+      boolean planRequired = mode == CodePlanningMode.FORCE
+          || (mode != CodePlanningMode.SKIP && contract.requiresManagedPlan(completionType));
+      List<String> missing = missingRequiredInteractionIds();
+      List<String> evidenceMissing = missingBeforeQuality();
+      if (planRequired && !hasPlan()) evidenceMissing.add(0, "plan:plan_task");
+      if (hasPlan() && !hasRoleAtRevision(CodeToolRole.QUALITY) && requiresQuality()) {
+        evidenceMissing.add("quality:quality_review");
+      }
+      if (!missing.isEmpty() || !evidenceMissing.isEmpty() || (hasPlan() && !isComplete())) {
+        data.put("passed", false);
+        data.put("missing_required_checks", missing);
+        data.put("missing_evidence", unique(evidenceMissing));
+        data.put("next_action", nextActionFor(missing, evidenceMissing));
+        if (hasPlan()) data.put("plan_state", state());
+        return ToolResult.error(
+            "completion_evidence_incomplete",
+            "任务尚未具备完成条件：" + joinMissing(missing, evidenceMissing),
+            true,
+            data);
+      }
+      mergeAdvisoryWarnings(data);
+    }
+    return ToolResult.success(data);
   }
 
   synchronized ToolResult recordAndDecorate(
@@ -171,6 +271,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private void record(String toolName, ToolArguments arguments, ToolResult result) {
     CodeToolRole role = role(toolName);
+    if (role == CodeToolRole.VERIFY && "browser_test".equals(toolName)) {
+      recordInteractionAudit(arguments, result);
+    }
+    if (!validEvidence(role, result)) {
+      recordFailedInvocation(toolName, arguments, result);
+    } else {
+      nextAction = "";
+    }
     if (role == CodeToolRole.CREATE || role == CodeToolRole.EDIT) {
       recordWrite(toolName, role, arguments, result);
       return;
@@ -245,6 +353,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private void advanceRevision(String path) {
     revision++;
     evidence.removeIf(item -> item.role == CodeToolRole.VERIFY || item.role == CodeToolRole.QUALITY);
+    interactionEvidence.clear();
+    failedInteractionVariants.clear();
+    failedInvocationSignatures.clear();
+    nextAction = "";
     pathRevisions.put(path, revision);
   }
 
@@ -458,6 +570,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private boolean hasCurrentTool(String toolName) {
     String expected = canonicalToolName(toolName);
+    if ("browser_test".equals(expected) && !requiredInteractionIds().isEmpty()
+        && !missingRequiredInteractionIds().isEmpty()) return false;
     for (Evidence item : evidence) {
       if (item.generation == generation
           && item.revision == revision
@@ -484,6 +598,212 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     return false;
   }
 
+  private void recordInteractionAudit(ToolArguments arguments, ToolResult result) {
+    Map<String, Object> data = result.data();
+    if (!result.isSuccess()
+        || !"run_steps".equals(text(data.get("browser_operation")))
+        || Boolean.FALSE.equals(data.get("steps_passed"))) return;
+    Object raw = data.get("interaction_audit");
+    if (!(raw instanceof Map)) {
+      Object layout = data.get("layout_audit");
+      if (layout instanceof Map) raw = ((Map<?, ?>) layout).get("interaction_audit");
+    }
+    if (!(raw instanceof Map) || !Boolean.TRUE.equals(((Map<?, ?>) raw).get("passed"))) return;
+    Map<?, ?> audit = (Map<?, ?>) raw;
+    Set<String> rejected = new LinkedHashSet<>();
+    rejected.addAll(stringList(audit.get("preexisting_assertions")));
+    rejected.addAll(stringList(audit.get("indeterminate_assertions")));
+    rejected.addAll(stringList(audit.get("invalid_check_ids")));
+    for (String checkId : stringList(audit.get("covered_check_ids"))) {
+      if (!rejected.contains(checkId)) interactionEvidence.put(checkId, revision);
+    }
+    for (String checkId : interactionEvidence.keySet()) {
+      failedInteractionVariants.remove(failureKey(checkId));
+    }
+    recompute();
+  }
+
+  private void recordFailedInvocation(
+      String toolName, ToolArguments arguments, ToolResult result) {
+    if (result == null || (result.isSuccess() && !Boolean.FALSE.equals(result.data().get("passed")))) {
+      return;
+    }
+    String invocationSignature = invocationSignature(toolName, arguments);
+    if (!invocationSignature.isEmpty()) failedInvocationSignatures.add(invocationSignature);
+    String checkId = text(result.data().get("failed_check_id"));
+    Object failure = result.data().get("step_failure");
+    if (checkId.isEmpty() && failure instanceof Map) {
+      checkId = text(((Map<?, ?>) failure).get("check_id"));
+    }
+    if (checkId.isEmpty()) {
+      List<String> missing = stringList(result.data().get("missing_check_ids"));
+      if (!missing.isEmpty()) checkId = missing.get(0);
+    }
+    if (checkId.isEmpty()) {
+      nextAction = "change_strategy";
+    } else {
+      String key = failureKey(checkId);
+      Set<String> variants = failedInteractionVariants.computeIfAbsent(
+          key, ignored -> new LinkedHashSet<>());
+      String failureClass = text(result.data().get("failure_class"));
+      variants.add((failureClass.isEmpty() ? "unknown" : failureClass)
+          + ":" + invocationSignature);
+      nextAction = variants.size() >= 2
+          ? "replan_unverifiable_check:" + limit(checkId, 48)
+          : "repair_interaction_check:" + limit(checkId, 48);
+    }
+    recompute();
+  }
+
+  private String failureKey(String checkId) {
+    return revision + ":" + text(checkId);
+  }
+
+  private String invocationSignature(String toolName, ToolArguments arguments) {
+    if (toolName == null || arguments == null) return "";
+    return toolName + ":" + revision + ":" + arguments.asMap().hashCode();
+  }
+
+  private List<String> requiredInteractionIds() {
+    List<String> out = new ArrayList<>();
+    for (Map<String, Object> check : interactionChecks()) {
+      if (Boolean.TRUE.equals(check.get("required"))) addUnique(out, text(check.get("check_id")));
+    }
+    return out;
+  }
+
+  private List<String> coveredRequiredInteractionIds() {
+    List<String> out = new ArrayList<>();
+    for (String id : requiredInteractionIds()) {
+      if (interactionEvidence.getOrDefault(id, -1L) == revision) out.add(id);
+    }
+    return out;
+  }
+
+  private List<String> missingRequiredInteractionIds() {
+    List<String> covered = coveredRequiredInteractionIds();
+    List<String> out = new ArrayList<>();
+    for (String id : requiredInteractionIds()) if (!covered.contains(id)) out.add(id);
+    return out;
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<Map<String, Object>> interactionChecks() {
+    Object raw = normalizedPlan == null ? null : normalizedPlan.get("interaction_checks");
+    if (!(raw instanceof List)) return Collections.emptyList();
+    List<Map<String, Object>> out = new ArrayList<>();
+    for (Object item : (List<?>) raw) if (item instanceof Map) {
+      out.add((Map<String, Object>) item);
+    }
+    return out;
+  }
+
+  private List<String> advisoryWarnings() {
+    List<String> out = new ArrayList<>();
+    for (Map<String, Object> check : interactionChecks()) {
+      if (Boolean.TRUE.equals(check.get("required"))) continue;
+      String description = limit(text(check.get("description")), 72);
+      String reason = limit(text(check.get("advisory_reason")), 48);
+      addUnique(out, description + (reason.isEmpty() ? "" : "（" + reason + "）"));
+    }
+    Object waived = normalizedPlan == null ? null : normalizedPlan.get("waived_checks");
+    if (waived instanceof List) for (Object item : (List<?>) waived) {
+      if (!(item instanceof Map)) continue;
+      Map<?, ?> map = (Map<?, ?>) item;
+      String id = limit(text(map.get("check_id")), 48);
+      String reason = limit(text(map.get("reason")), 64);
+      addUnique(out, "已调整检查 " + id + (reason.isEmpty() ? "" : "：" + reason));
+    }
+    return out;
+  }
+
+  private List<String> missingBeforeQuality() {
+    List<String> out = new ArrayList<>();
+    for (PlanStep step : steps) {
+      if ("quality".equals(step.phase) || step.done) continue;
+      out.addAll(missing(step));
+    }
+    return unique(out);
+  }
+
+  private boolean requiresQuality() {
+    if ("interface_product".equals(qualityMode())) return true;
+    for (PlanStep step : steps) if ("quality".equals(step.phase)) return true;
+    return false;
+  }
+
+  private String nextActionFor(List<String> missingChecks, List<String> evidenceMissing) {
+    if (!missingChecks.isEmpty()) return "run_interaction_check:" + limit(missingChecks.get(0), 48);
+    if (evidenceMissing != null && !evidenceMissing.isEmpty()) return limit(evidenceMissing.get(0), 72);
+    if (requiresQuality() && !hasRoleAtRevision(CodeToolRole.QUALITY)) return "quality_review";
+    return "";
+  }
+
+  private void mergeAdvisoryWarnings(Map<String, Object> data) {
+    List<String> warnings = advisoryWarnings();
+    if (warnings.isEmpty()) return;
+    List<String> issues = stringList(data.get("minor_issues"));
+    for (String warning : warnings) addUnique(issues, warning);
+    data.put("minor_issues", issues);
+    data.put("advisory_warnings", warnings);
+  }
+
+  private void appendWaivedChecks(Map<String, Object> previous, Map<String, Object> next) {
+    if (previous == null) return;
+    Map<String, Map<String, Object>> nextRequired = requiredCheckMap(next);
+    Map<String, Map<String, Object>> nextAll = checkMap(next);
+    List<Map<String, Object>> waived = new ArrayList<>();
+    Object existing = previous.get("waived_checks");
+    if (existing instanceof List) for (Object item : (List<?>) existing) {
+      if (item instanceof Map) waived.add(new LinkedHashMap<>((Map<String, Object>) item));
+    }
+    for (Map.Entry<String, Map<String, Object>> entry : requiredCheckMap(previous).entrySet()) {
+      if (nextRequired.containsKey(entry.getKey())) continue;
+      Map<String, Object> value = new LinkedHashMap<>();
+      value.put("check_id", entry.getKey());
+      value.put("description", entry.getValue().get("description"));
+      Map<String, Object> downgraded = nextAll.get(entry.getKey());
+      String reason = downgraded == null ? text(next.get("replan_reason"))
+          : text(downgraded.get("advisory_reason"));
+      value.put("reason", reason.isEmpty() ? "replan_removed_required_check" : reason);
+      waived.add(value);
+    }
+    if (!waived.isEmpty()) next.put("waived_checks", waived);
+  }
+
+  private static Map<String, Map<String, Object>> requiredCheckMap(Map<String, Object> plan) {
+    Map<String, Map<String, Object>> all = checkMap(plan);
+    all.entrySet().removeIf(entry -> !Boolean.TRUE.equals(entry.getValue().get("required")));
+    return all;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Map<String, Object>> checkMap(Map<String, Object> plan) {
+    Map<String, Map<String, Object>> out = new LinkedHashMap<>();
+    if (plan == null || !(plan.get("interaction_checks") instanceof List)) return out;
+    for (Object item : (List<?>) plan.get("interaction_checks")) if (item instanceof Map) {
+      Map<String, Object> check = (Map<String, Object>) item;
+      String id = text(check.get("check_id"));
+      if (!id.isEmpty()) out.put(id, check);
+    }
+    return out;
+  }
+
+  private static String joinMissing(List<String> checks, List<String> evidence) {
+    List<String> all = new ArrayList<>();
+    if (checks != null) for (String check : checks) all.add("interaction:" + check);
+    if (evidence != null) all.addAll(evidence);
+    return all.isEmpty() ? "unknown" : String.join(", ", unique(all));
+  }
+
+  private static List<String> unique(List<String> source) {
+    return new ArrayList<>(new LinkedHashSet<>(source == null ? Collections.emptyList() : source));
+  }
+
+  private static void addUnique(List<String> target, String value) {
+    if (value != null && !value.isEmpty() && !target.contains(value)) target.add(value);
+  }
+
   private Map<String, Object> buildState() {
     Map<String, Object> state = new LinkedHashMap<>();
     state.put("plan_id", planId);
@@ -503,6 +823,18 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       state.put("current_step", item);
       state.put("missing_evidence", missing(current));
     }
+    List<String> required = requiredInteractionIds();
+    List<String> covered = coveredRequiredInteractionIds();
+    List<String> missingChecks = missingRequiredInteractionIds();
+    state.put("ready_for_quality", missingBeforeQuality().isEmpty() && missingChecks.isEmpty());
+    state.put("completion_ready", isComplete());
+    if (!required.isEmpty()) state.put("required_check_ids", required);
+    if (!covered.isEmpty()) state.put("covered_check_ids", covered);
+    if (!missingChecks.isEmpty()) state.put("missing_check_ids", missingChecks);
+    List<String> advisory = advisoryWarnings();
+    if (!advisory.isEmpty()) state.put("advisory_warnings", advisory);
+    String action = !nextAction.isEmpty() ? nextAction : nextActionFor(missingChecks, missingBeforeQuality());
+    if (!action.isEmpty()) state.put("next_action", action);
     state.put("done_steps", done);
     trimState(state);
     return state;
@@ -537,11 +869,18 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   @SuppressWarnings("unchecked")
   private static void trimState(Map<String, Object> state) {
     Object raw = state.get("missing_evidence");
-    if (!(raw instanceof List)) return;
-    List<String> missing = (List<String>) raw;
+    List<String> missing = raw instanceof List ? (List<String>) raw : new ArrayList<>();
+    Object advisoryRaw = state.get("advisory_warnings");
+    List<String> advisory = advisoryRaw instanceof List
+        ? (List<String>) advisoryRaw : new ArrayList<>();
+    while (jsonLength(state) > MAX_STATE_CHARS && advisory.size() > 1) {
+      advisory.remove(advisory.size() - 1);
+    }
     while (jsonLength(state) > MAX_STATE_CHARS && missing.size() > 1) {
       missing.remove(missing.size() - 1);
     }
+    if (jsonLength(state) > MAX_STATE_CHARS) state.remove("advisory_warnings");
+    if (jsonLength(state) > MAX_STATE_CHARS) state.remove("covered_check_ids");
     if (jsonLength(state) > MAX_STATE_CHARS && !missing.isEmpty()) {
       missing.set(0, limit(missing.get(0), 32));
     }

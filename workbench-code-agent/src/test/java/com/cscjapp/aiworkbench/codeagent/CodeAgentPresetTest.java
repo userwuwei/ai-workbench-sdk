@@ -312,11 +312,12 @@ public final class CodeAgentPresetTest {
                     map("check_id", "非法 id", "expected", "方向按钮改变方向"))));
     List<?> checks = (List<?>) normalized.get("interaction_checks");
     assertEquals(4, checks.size());
-    assertEquals("interaction-1", ((Map<?, ?>) checks.get(0)).get("check_id"));
+    assertTrue(String.valueOf(((Map<?, ?>) checks.get(0)).get("check_id")).startsWith("check-"));
     assertEquals("restart", ((Map<?, ?>) checks.get(1)).get("check_id"));
     assertEquals("restart-2", ((Map<?, ?>) checks.get(2)).get("check_id"));
-    assertEquals("interaction-4", ((Map<?, ?>) checks.get(3)).get("check_id"));
+    assertTrue(String.valueOf(((Map<?, ?>) checks.get(3)).get("check_id")).startsWith("check-"));
     assertEquals("方向按钮改变方向", ((Map<?, ?>) checks.get(3)).get("description"));
+    for (Object check : checks) assertEquals(false, ((Map<?, ?>) check).get("required"));
   }
 
   @Test
@@ -332,11 +333,154 @@ public final class CodeAgentPresetTest {
                   "interaction_checks", invalid));
       List<?> checks = (List<?>) normalized.get("interaction_checks");
       assertEquals(1, checks.size());
-      assertEquals("interaction-required", ((Map<?, ?>) checks.get(0)).get("check_id"));
+      assertEquals("core_interaction", ((Map<?, ?>) checks.get(0)).get("check_id"));
+      assertEquals(true, ((Map<?, ?>) checks.get(0)).get("required"));
       assertTrue(
           String.valueOf(((Map<?, ?>) checks.get(0)).get("description"))
-              .contains("操作前后"));
+              .contains("核心用户操作"));
     }
+  }
+
+  @Test
+  public void structuredInteractionChecksLimitRequiredAndKeepAdvisoryRisk() {
+    CodePlanNormalizer normalizer =
+        new CodePlanNormalizer(CodeValidationContract.builder().build());
+    List<Map<String, Object>> checks = new ArrayList<>();
+    for (int index = 1; index <= 5; index++) {
+      checks.add(map(
+          "check_id", "check-" + index,
+          "description", "检查" + index,
+          "required", true,
+          "action", "click",
+          "observable_state", "data-state-" + index,
+          "expected_change", "before -> after",
+          "deterministic_setup", "known initial state"));
+    }
+    Map<String, Object> normalized = normalizer.normalize(map(
+        "goal", "交互页面", "interaction_required", true, "interaction_checks", checks));
+    List<?> output = (List<?>) normalized.get("interaction_checks");
+    int required = 0;
+    int advisory = 0;
+    for (Object raw : output) {
+      Map<?, ?> check = (Map<?, ?>) raw;
+      if (Boolean.TRUE.equals(check.get("required"))) required++;
+      else if ("required_limit".equals(check.get("advisory_reason"))) advisory++;
+    }
+    assertEquals(5, output.size());
+    assertEquals(3, required);
+    assertEquals(2, advisory);
+  }
+
+  @Test
+  public void interactionEvidenceControlsQualityAndFinalizeFromOneLedger() {
+    ManagedCodePlanCoordinator coordinator = interactiveCoordinator(72L, "direction");
+    long generation = coordinator.generation();
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+    coordinator.recordAndDecorate(
+        generation, "syntax_check", ToolArguments.empty(),
+        ToolResult.success(map("passed", true)));
+    coordinator.recordAndDecorate(
+        generation, "browser_test", ToolArguments.empty(),
+        ToolResult.success(map("passed", true, "browser_operation", "preview_project")));
+
+    ToolResult premature = coordinator.executeMeta(
+        "quality_review", new ToolArguments(map("passed", true)));
+    assertEquals(ToolResult.Status.ERROR, premature.status());
+    assertEquals("quality_evidence_incomplete", premature.errorCode());
+    assertEquals(Collections.singletonList("direction"),
+        premature.data().get("missing_required_checks"));
+
+    ToolArguments browserArguments = new ToolArguments(map(
+        "operation", "run_steps",
+        "interaction_check_ids", Collections.singletonList("direction")));
+    ToolResult verified = ToolResult.success(map(
+        "passed", true,
+        "browser_operation", "run_steps",
+        "steps_passed", true,
+        "interaction_audit", map(
+            "applicable", true,
+            "passed", true,
+            "covered_check_ids", Collections.singletonList("direction"),
+            "preexisting_assertions", Collections.emptyList(),
+            "indeterminate_assertions", Collections.emptyList(),
+            "invalid_check_ids", Collections.emptyList())));
+    coordinator.recordAndDecorate(generation, "browser_test", browserArguments, verified);
+    ToolArguments qualityArguments = new ToolArguments(map(
+        "passed", true,
+        "blocking_gaps", Collections.emptyList(),
+        "claimed_but_unsupported", Collections.emptyList(),
+        "minimal_version_risk", false));
+    ToolResult quality = coordinator.executeMeta("quality_review", qualityArguments);
+    assertTrue(quality.isSuccess());
+    assertEquals(Collections.singletonList("direction"),
+        quality.data().get("covered_interaction_check_ids"));
+    coordinator.recordAndDecorate(generation, "quality_review", qualityArguments, quality);
+
+    ToolResult finalize = coordinator.executeMeta(
+        "finalize_task", new ToolArguments(map(
+            "status", "completed", "completion_type", "ui_product")));
+    assertTrue(finalize.isSuccess());
+    assertTrue(coordinator.isComplete());
+  }
+
+  @Test
+  public void exactFailedInvocationIsRejectedWithoutExecutingAgain() {
+    ManagedCodePlanCoordinator coordinator = interactiveCoordinator(73L, "direction");
+    ToolArguments arguments = new ToolArguments(map(
+        "operation", "run_steps",
+        "interaction_check_ids", Collections.singletonList("direction")));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "browser_test", arguments,
+        ToolResult.success(map(
+            "passed", false,
+            "failed_check_id", "direction",
+            "failure_class", "assertion_timeout")));
+
+    ToolResult duplicate = coordinator.duplicateAttempt("browser_test", arguments);
+
+    assertNotNull(duplicate);
+    assertEquals("duplicate_attempt_no_new_evidence", duplicate.errorCode());
+    assertEquals("duplicate_attempt_no_new_evidence",
+        duplicate.data().get("failure_class"));
+  }
+
+  private ManagedCodePlanCoordinator interactiveCoordinator(long runId, String checkId) {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("syntax_check", "browser_test")
+        .requireManagedPlan("ui_product")
+        .requireQualityReview("ui_product")
+        .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("list_dir", CodeToolRole.DISCOVER);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(runId, "session", "workspace", "task"));
+    coordinator.acceptPlan(map(
+        "goal", "交互产品",
+        "quality_mode", "interface_product",
+        "planned_files", Collections.singletonList(map("path", "main.txt", "action", "edit")),
+        "verification_plan", Arrays.asList("syntax_check", "browser_test"),
+        "interaction_required", true,
+        "interaction_checks", Collections.singletonList(map(
+            "check_id", checkId,
+            "description", "方向变化",
+            "required", true,
+            "action", "click",
+            "observable_state", "data-direction",
+            "expected_change", "right -> down",
+            "deterministic_setup", "initial right"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "list_dir", ToolArguments.empty(),
+        ToolResult.success(map("items", Collections.singletonList("main.txt"))));
+    return coordinator;
   }
 
   @Test
@@ -1207,7 +1351,7 @@ public final class CodeAgentPresetTest {
                     "failed_count", 1)));
     assertEquals(ToolResult.Status.ERROR, failed.status());
     assertTrue(failed.retryable());
-    assertFalse(failed.data().containsKey("plan_state"));
+    assertTrue(failed.data().containsKey("plan_state"));
     assertTrue(coordinator.isComplete());
     assertTrue(coordinator.hasCurrentEvidence("syntax_check"));
     assertTrue(coordinator.hasCurrentEvidence("quality_review"));

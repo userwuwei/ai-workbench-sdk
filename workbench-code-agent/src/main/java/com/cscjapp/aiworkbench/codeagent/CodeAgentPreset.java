@@ -122,6 +122,9 @@ public final class CodeAgentPreset {
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
               + "\n只有运行时明确声明 precreated_entry_replace_allowed 的指定预创建入口，首次完整生成时才允许对已存在路径调用 create_file；该例外不授权其他文件。"
               + "\n工具失败、验证失败或质量 blocker 必须真实修复后重试，禁止虚构通过。"
+              + "\n交互检查只把关键、确定、可观察的最多3项设为 required；随机、长时序或当前工具无法稳定构造的检查设为 advisory 并保留风险说明。"
+              + "\n交互验证使用唯一顺序：click/input(check_id)，随后使用同一 check_id 的只读断言；操作前状态由运行时自动探测，禁止显式提交返回 false 的前置断言。依赖同一页面状态的操作必须合并到一次 run_steps。"
+              + "\n交互页面优先用一次 run_steps 同时完成核心交互与布局审计，不要默认先执行 preview_project。只有 plan_state.ready_for_quality=true 后才能 quality_review，只有 completion_ready=true 后才能 finalize_task。"
               + "\n完成前执行适用的真实验证和 quality_review，最后调用 finalize_task。"
               + "\n无法继续或确实需要用户输入时，也必须通过 finalize_task 返回真实状态。";
       return Collections.singletonList(
@@ -240,6 +243,11 @@ public final class CodeAgentPreset {
     public Cancellable execute(
         ToolContext context, ToolArguments arguments, ToolCallback callback) {
       long runGeneration = planCoordinator.generation();
+      ToolResult duplicate = planCoordinator.duplicateAttempt(spec().name(), arguments);
+      if (duplicate != null) {
+        callback.onComplete(duplicate);
+        return Cancellable.NONE;
+      }
       return delegate.execute(
           context,
           arguments,

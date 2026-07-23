@@ -46,14 +46,22 @@ final class CodePlanNormalizer {
     while (steps.size() > MAX_STEPS) mergeDuplicatePhase(steps);
     out.put("steps", steps);
     if (out.containsKey("interaction_checks") || bool(out.get("interaction_required"))) {
-      List<Map<String, Object>> checks = normalizeInteractionChecks(out.get("interaction_checks"));
-      if (checks.isEmpty() && bool(out.get("interaction_required"))) {
-        Map<String, Object> check = new LinkedHashMap<>();
-        check.put("check_id", "interaction-required");
-        check.put("description", "执行真实操作并验证操作前后可观察状态发生变化");
-        checks.add(check);
+      NormalizedInteractionChecks normalized =
+          normalizeInteractionChecks(out.get("interaction_checks"));
+      if (requiredCount(normalized.checks) == 0 && bool(out.get("interaction_required"))) {
+        if (normalized.checks.size() >= 5) {
+          normalized.checks.remove(normalized.checks.size() - 1);
+          normalized.warnings.add("为 core_interaction 保留硬门禁位置，末项 advisory 已省略");
+        }
+        normalized.checks.add(coreInteractionCheck());
+        normalized.warnings.add("未收到完整的确定性交互契约，已生成 core_interaction 核心检查");
       }
-      out.put("interaction_checks", checks);
+      out.put("interaction_checks", normalized.checks);
+      if (!normalized.warnings.isEmpty()) {
+        out.put("interaction_check_warnings", normalized.warnings);
+      } else {
+        out.remove("interaction_check_warnings");
+      }
     }
     String reason = limit(text(out.get("replan_reason")), 200);
     if (reason.isEmpty()) out.remove("replan_reason");
@@ -222,30 +230,103 @@ final class CodePlanNormalizer {
     return out;
   }
 
-  private static List<Map<String, Object>> normalizeInteractionChecks(Object raw) {
-    List<Map<String, Object>> out = new ArrayList<>();
+  private static NormalizedInteractionChecks normalizeInteractionChecks(Object raw) {
+    NormalizedInteractionChecks normalized = new NormalizedInteractionChecks();
     List<?> values = raw instanceof List ? (List<?>) raw
         : text(raw).isEmpty() ? Collections.emptyList() : Collections.singletonList(raw);
     Set<String> ids = new LinkedHashSet<>();
-    int index = 0;
+    int requestedRequired = 0;
+    int dropped = 0;
     for (Object value : values) {
-      if (out.size() >= 6) break;
-      index++;
       Map<?, ?> map = value instanceof Map ? (Map<?, ?>) value : Collections.emptyMap();
       String description = value instanceof Map
-          ? first(map, "description", "title", "name", "action", "check", "assertion", "expected")
+          ? first(map, "description", "title", "name", "check", "assertion", "expected", "action")
           : text(value);
+      if (normalized.checks.size() >= 5) {
+        dropped++;
+        String omitted = limit(description, 72);
+        if (!omitted.isEmpty() && normalized.warnings.size() < 4) {
+          normalized.warnings.add("未纳入硬门禁的建议检查：" + omitted);
+        }
+        continue;
+      }
       description = limit(description, 160);
       if (description.isEmpty()) continue;
       String requested = limit(first(map, "check_id", "id"), 64);
-      String id = validIdentifier(requested) ? requested : "interaction-" + index;
+      String id = validIdentifier(requested) ? requested : stableCheckId(description);
       id = uniqueId(id, ids);
+      String action = limit(first(map, "action"), 40);
+      String observable = limit(first(map, "observable_state", "observable"), 120);
+      String expected = limit(first(map, "expected_change", "expected"), 120);
+      String setup = limit(first(map, "deterministic_setup", "setup"), 120);
+      boolean wantsRequired = value instanceof Map && bool(map.get("required"));
+      boolean completeContract = !action.isEmpty()
+          && !observable.isEmpty()
+          && !expected.isEmpty()
+          && !setup.isEmpty();
+      boolean required = wantsRequired && completeContract && requestedRequired < 3;
+      String advisoryReason = limit(first(map, "advisory_reason", "waive_reason"), 160);
+      if (wantsRequired && !completeContract) {
+        advisoryReason = "missing_deterministic_contract";
+      } else if (wantsRequired && requestedRequired >= 3) {
+        advisoryReason = "required_limit";
+      } else if (!wantsRequired && advisoryReason.isEmpty()) {
+        advisoryReason = value instanceof Map ? "non_blocking_check" : "legacy_string_check";
+      }
+      if (required) requestedRequired++;
       Map<String, Object> check = new LinkedHashMap<>();
       check.put("check_id", id);
       check.put("description", description);
-      out.add(check);
+      check.put("required", required);
+      if (!action.isEmpty()) check.put("action", action);
+      if (!observable.isEmpty()) check.put("observable_state", observable);
+      if (!expected.isEmpty()) check.put("expected_change", expected);
+      if (!setup.isEmpty()) check.put("deterministic_setup", setup);
+      if (!required) check.put("advisory_reason", advisoryReason);
+      normalized.checks.add(check);
     }
-    return out;
+    if (dropped > 0) normalized.warnings.add("interaction_checks 超过5项，已省略" + dropped + "项");
+    return normalized;
+  }
+
+  private static int requiredCount(List<Map<String, Object>> checks) {
+    int count = 0;
+    for (Map<String, Object> check : checks) if (Boolean.TRUE.equals(check.get("required"))) count++;
+    return count;
+  }
+
+  private static Map<String, Object> coreInteractionCheck() {
+    Map<String, Object> check = new LinkedHashMap<>();
+    check.put("check_id", "core_interaction");
+    check.put("description", "执行一次核心用户操作并验证可观察状态发生变化");
+    check.put("required", true);
+    check.put("action", "click_or_input");
+    check.put("observable_state", "visible_or_accessible_state");
+    check.put("expected_change", "操作后状态与操作前不同");
+    check.put("deterministic_setup", "页面初始状态可加载并可观察");
+    return check;
+  }
+
+  private static String stableCheckId(String description) {
+    String normalized = text(description).toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256")
+          .digest(normalized.getBytes(StandardCharsets.UTF_8));
+      StringBuilder hex = new StringBuilder("check-");
+      for (int index = 0; index < 6; index++) {
+        int value = digest[index] & 0xff;
+        if (value < 16) hex.append('0');
+        hex.append(Integer.toHexString(value));
+      }
+      return hex.toString();
+    } catch (Exception ignored) {
+      return "check-" + Integer.toHexString(normalized.hashCode());
+    }
+  }
+
+  private static final class NormalizedInteractionChecks {
+    final List<Map<String, Object>> checks = new ArrayList<>();
+    final List<String> warnings = new ArrayList<>();
   }
 
   private static void addDefaults(
