@@ -43,8 +43,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.After;
@@ -146,6 +148,7 @@ public final class CodeAgentPresetTest {
     assertTrue(stepProperties.containsKey("phase"));
     assertTrue(stepProperties.containsKey("required_tools"));
     assertTrue(stepProperties.containsKey("acceptance"));
+    assertTrue(stepProperties.containsKey("file_refs"));
     assertTrue(((List<?>) schema.get("required")).containsAll(
         Arrays.asList(
             "goal", "quality_mode", "writing_mode", "planned_files",
@@ -187,8 +190,153 @@ public final class CodeAgentPresetTest {
                 "goal", "修复页面",
                 "steps", "[{\"step\":\"1\"}]",
                 "planned_files", "index.html"));
-    assertEquals(4, ((List<?>) malformed.get("steps")).size());
+    assertEquals(3, ((List<?>) malformed.get("steps")).size());
     assertEquals("targeted_edit", malformed.get("writing_mode"));
+  }
+
+  @Test
+  public void plannedFilesReceiveStableIdsAndImplementationMappings() {
+    CodePlanNormalizer normalizer =
+        new CodePlanNormalizer(
+            CodeValidationContract.builder()
+                .defaultRequiredEvidence("syntax_check", "browser_test")
+                .build());
+    Map<String, Object> source =
+        map(
+            "goal", "调整两个文件",
+            "planned_files",
+            Arrays.asList(
+                map("path", "index.html", "action", "edit"),
+                map("path", "styles.css", "action", "edit")),
+            "steps",
+            Arrays.asList(
+                step("index-step", "修改页面", "implement", "search_replace", "rewrite"),
+                step("style-step", "修改样式", "implement", "search_replace", "rewrite")));
+    Map<String, Object> first = normalizer.normalize(source);
+    Map<String, Object> second = normalizer.normalize(source);
+    List<?> files = (List<?>) first.get("planned_files");
+    List<?> repeatedFiles = (List<?>) second.get("planned_files");
+    String indexId = String.valueOf(((Map<?, ?>) files.get(0)).get("file_id"));
+    String styleId = String.valueOf(((Map<?, ?>) files.get(1)).get("file_id"));
+
+    assertEquals(indexId, ((Map<?, ?>) repeatedFiles.get(0)).get("file_id"));
+    assertEquals(styleId, ((Map<?, ?>) repeatedFiles.get(1)).get("file_id"));
+    assertFalse(indexId.equals(styleId));
+    assertEquals(
+        Collections.singletonList(indexId),
+        ((Map<?, ?>) ((List<?>) first.get("steps")).get(0)).get("file_refs"));
+    assertEquals(
+        Collections.singletonList(styleId),
+        ((Map<?, ?>) ((List<?>) first.get("steps")).get(1)).get("file_refs"));
+
+    Map<String, Object> explicit =
+        normalizer.normalize(
+            map(
+                "goal", "显式映射",
+                "planned_files", source.get("planned_files"),
+                "steps",
+                Collections.singletonList(
+                    map(
+                        "id", "implement",
+                        "title", "完成实现",
+                        "phase", "implement",
+                        "file_refs", Arrays.asList("styles.css", "index.html")))));
+    assertEquals(
+        Arrays.asList(styleId, indexId),
+        ((Map<?, ?>) ((List<?>) explicit.get("steps")).get(0)).get("file_refs"));
+  }
+
+  @Test
+  public void ambiguousPlanRegeneratesFileStepsWithoutDroppingFiles() {
+    CodePlanNormalizer normalizer =
+        new CodePlanNormalizer(CodeValidationContract.builder().defaultRequiredEvidence("verify").build());
+    Map<String, Object> normalized =
+        normalizer.normalize(
+            map(
+                "goal", "多文件实现",
+                "planned_files",
+                Arrays.asList(
+                    map("path", "a.txt", "action", "edit"),
+                    map("path", "b.txt", "action", "edit"),
+                    map("path", "c.txt", "action", "create")),
+                "steps",
+                Arrays.asList(
+                    step("first", "第一部分", "implement", "search_replace"),
+                    step("second", "第二部分", "implement", "search_replace"))));
+    Set<String> expected = new LinkedHashSet<>();
+    for (Object raw : (List<?>) normalized.get("planned_files")) {
+      expected.add(String.valueOf(((Map<?, ?>) raw).get("file_id")));
+    }
+    Set<String> actual = new LinkedHashSet<>();
+    for (Object raw : (List<?>) normalized.get("steps")) {
+      Map<?, ?> step = (Map<?, ?>) raw;
+      if (!"implement".equals(step.get("phase"))) continue;
+      for (Object ref : (List<?>) step.get("file_refs")) actual.add(String.valueOf(ref));
+    }
+    assertEquals(expected, actual);
+    assertTrue(((List<?>) normalized.get("steps")).size() <= 5);
+  }
+
+  @Test
+  public void missingStepsPutDiscoverBeforeFileMappedImplementation() {
+    CodePlanNormalizer normalizer =
+        new CodePlanNormalizer(
+            CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build());
+    Map<String, Object> normalized =
+        normalizer.normalize(
+            map(
+                "goal", "创建完整产品",
+                "planned_files",
+                Arrays.asList(
+                    map("path", "index.html", "action", "create"),
+                    map("path", "styles.css", "action", "create"))));
+    List<?> steps = (List<?>) normalized.get("steps");
+    assertEquals("discover", ((Map<?, ?>) steps.get(0)).get("phase"));
+    assertEquals("implement", ((Map<?, ?>) steps.get(1)).get("phase"));
+    assertEquals(2, ((List<?>) ((Map<?, ?>) steps.get(1)).get("file_refs")).size());
+  }
+
+  @Test
+  public void interactionChecksNormalizeStringsObjectsAndDuplicateIds() {
+    CodePlanNormalizer normalizer =
+        new CodePlanNormalizer(CodeValidationContract.builder().build());
+    Map<String, Object> normalized =
+        normalizer.normalize(
+            map(
+                "goal", "交互页面",
+                "interaction_checks",
+                Arrays.asList(
+                    "启动游戏后状态变化",
+                    map("check_id", "restart", "description", "重新开始会重置分数"),
+                    map("check_id", "restart", "action", "重新开始会重置棋盘"),
+                    map("check_id", "非法 id", "expected", "方向按钮改变方向"))));
+    List<?> checks = (List<?>) normalized.get("interaction_checks");
+    assertEquals(4, checks.size());
+    assertEquals("interaction-1", ((Map<?, ?>) checks.get(0)).get("check_id"));
+    assertEquals("restart", ((Map<?, ?>) checks.get(1)).get("check_id"));
+    assertEquals("restart-2", ((Map<?, ?>) checks.get(2)).get("check_id"));
+    assertEquals("interaction-4", ((Map<?, ?>) checks.get(3)).get("check_id"));
+    assertEquals("方向按钮改变方向", ((Map<?, ?>) checks.get(3)).get("description"));
+  }
+
+  @Test
+  public void requiredInteractionGetsDefaultDynamicCheckWithoutRepairRound() {
+    CodePlanNormalizer normalizer =
+        new CodePlanNormalizer(CodeValidationContract.builder().build());
+    for (Object invalid : Arrays.asList(null, "", Collections.singletonList(map("id", "missing")))) {
+      Map<String, Object> normalized =
+          normalizer.normalize(
+              map(
+                  "goal", "交互页面",
+                  "interaction_required", true,
+                  "interaction_checks", invalid));
+      List<?> checks = (List<?>) normalized.get("interaction_checks");
+      assertEquals(1, checks.size());
+      assertEquals("interaction-required", ((Map<?, ?>) checks.get(0)).get("check_id"));
+      assertTrue(
+          String.valueOf(((Map<?, ?>) checks.get(0)).get("description"))
+              .contains("操作前后"));
+    }
   }
 
   @Test
@@ -326,6 +474,57 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void successfulWriteInvalidatesReadEvidenceButFailedOrUnchangedWriteDoesNot()
+      throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("create_file", CodeToolRole.CREATE);
+    ReadBeforeEditPolicy policy = new ReadBeforeEditPolicy(workspace, roles);
+    AgentRunContext run = new AgentRunContext(9L, "s", "workspace", "task");
+    AgentTool read = tool("read_file");
+    AgentTool edit = tool("search_replace");
+    ToolInvocation readMain =
+        new ToolInvocation(
+            "read", read, new ToolArguments(Collections.singletonMap("path", "main.txt")));
+    ToolInvocation editMain = editInvocation("main.txt", edit);
+    policy.onRunStarted(run);
+    policy.onToolCompleted(
+        run, readMain, ToolResult.success(map("path", "main.txt", "content", "before")));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, editMain).kind());
+
+    policy.onToolCompleted(
+        run,
+        editMain,
+        ToolResult.success(map("resolved_path", "main.txt", "changed", true)));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editMain).kind());
+
+    policy.onToolCompleted(
+        run, readMain, ToolResult.success(map("path", "main.txt", "content", "after")));
+    policy.onToolCompleted(
+        run,
+        editMain,
+        ToolResult.success(map("path", "main.txt", "changed", false)));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, editMain).kind());
+
+    policy.onToolCompleted(
+        run,
+        editMain,
+        ToolResult.error("write_failed", "failed", true, map("path", "main.txt")));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, editMain).kind());
+
+    policy.onToolCompleted(
+        run,
+        editMain,
+        ToolResult.error(
+            "partial_write",
+            "partially applied",
+            true,
+            map("path", "main.txt", "partial_apply", true, "applied_count", 1)));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editMain).kind());
+  }
+
+  @Test
   public void explicitReadPathsAuthorizeGenericReadResults() throws Exception {
     File style = new File(root, "style.css");
     Files.write(style.toPath(), "body{}".getBytes(StandardCharsets.UTF_8));
@@ -428,7 +627,7 @@ public final class CodeAgentPresetTest {
     roles.put("browser_test", CodeToolRole.VERIFY);
     roles.put(CodeAgentToolNames.QUALITY_REVIEW, CodeToolRole.QUALITY);
     ManagedCodePlanCoordinator coordinator =
-        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles);
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
     AgentRunContext run = new AgentRunContext(11L, "session", "workspace", "task");
     coordinator.onRunStarted(run);
     long generation = coordinator.generation();
@@ -448,17 +647,29 @@ public final class CodeAgentPresetTest {
     assertTrue(String.valueOf(planResult.get("plan_state")).length() <= 800);
 
     ToolResult read = coordinator.recordAndDecorate(
-        generation, "read_file", ToolResult.success(map("content", "source")));
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "content", "source")));
     assertEquals("implement", currentStepId(read.data().get("plan_state")));
     ToolResult duplicateRead = coordinator.recordAndDecorate(
-        generation, "read_file", ToolResult.success(map("content", "source")));
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "content", "source")));
     assertFalse(duplicateRead.data().containsKey("plan_state"));
 
     coordinator.recordAndDecorate(
-        generation, "search_replace", ToolResult.success(map("changed", false)));
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", false)));
     assertFalse(coordinator.isComplete());
     ToolResult edited = coordinator.recordAndDecorate(
-        generation, "search_replace", ToolResult.success(map("changed", true)));
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
     assertEquals("verify", currentStepId(edited.data().get("plan_state")));
 
     coordinator.recordAndDecorate(
@@ -491,7 +702,10 @@ public final class CodeAgentPresetTest {
     assertTrue(coordinator.isComplete());
 
     ToolResult changedAgain = coordinator.recordAndDecorate(
-        generation, "search_replace", ToolResult.success(map("changed", true)));
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
     assertFalse(coordinator.isComplete());
     assertEquals("verify", currentStepId(changedAgain.data().get("plan_state")));
 
@@ -500,6 +714,634 @@ public final class CodeAgentPresetTest {
         generation, "browser_test", ToolResult.success(map("passed", true)));
     assertFalse(late.data().containsKey("plan_state"));
     assertFalse(coordinator.hasPlan());
+  }
+
+  @Test
+  public void managedPlanTracksEachCanonicalFileAndTreatsEditToolsAsAlternatives()
+      throws Exception {
+    Files.write(new File(root, "index.html").toPath(), "page".getBytes(StandardCharsets.UTF_8));
+    Files.write(new File(root, "styles.css").toPath(), "style".getBytes(StandardCharsets.UTF_8));
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .requireQualityReview("ui_product")
+            .requireManagedPlan("ui_product")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("rewrite", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(41L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "修改页面和样式",
+            "quality_mode", "interface_product",
+            "planned_files",
+            Arrays.asList(
+                map("path", "index.html", "action", "edit"),
+                map("path", "styles.css", "action", "edit")),
+            "steps",
+            Arrays.asList(
+                step("discover", "读取上下文", "discover", "read_file"),
+                step("index-step", "修改页面", "implement", "search_replace", "rewrite"),
+                step("style-step", "修改样式", "implement", "search_replace", "rewrite"),
+                step("verify", "执行验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "质量审查", "quality", "quality_review"))));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "index.html")),
+        ToolResult.success(map("path", "index.html", "content", "source")));
+    ToolResult indexEdited =
+        coordinator.recordAndDecorate(
+            generation,
+            "search_replace",
+            new ToolArguments(map("path", "index.html")),
+            ToolResult.success(map("path", "index.html", "changed", true)));
+    assertEquals("style-step", currentStepId(indexEdited.data().get("plan_state")));
+    assertTrue(
+        ((List<?>) ((Map<?, ?>) indexEdited.data().get("plan_state")).get("missing_evidence"))
+            .contains("edit:styles.css"));
+
+    ToolResult styleEdited =
+        coordinator.recordAndDecorate(
+            generation,
+            "search_replace",
+            new ToolArguments(map("path", "styles.css")),
+            ToolResult.success(map("path", "styles.css", "changed", true)));
+    assertEquals("verify", currentStepId(styleEdited.data().get("plan_state")));
+    assertFalse(
+        ((List<?>) ((Map<?, ?>) styleEdited.data().get("plan_state")).get("missing_evidence"))
+            .contains("rewrite"));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "syntax_check",
+        ToolArguments.empty(),
+        ToolResult.success(map("passed", true)));
+    ToolResult browser =
+        coordinator.recordAndDecorate(
+            generation,
+            "browser_test",
+            ToolArguments.empty(),
+            ToolResult.success(map("passed", true)));
+    assertEquals("quality", currentStepId(browser.data().get("plan_state")));
+    coordinator.recordAndDecorate(
+        generation,
+        "quality_review",
+        ToolArguments.empty(),
+        ToolResult.success(
+            map(
+                "passed", true,
+                "blocking_gaps", Collections.emptyList(),
+                "claimed_but_unsupported", Collections.emptyList(),
+                "minimal_version_risk", false)));
+    assertTrue(coordinator.isComplete());
+
+    ToolResult changedAgain =
+        coordinator.recordAndDecorate(
+            generation,
+            "rewrite",
+            new ToolArguments(map("path", "index.html")),
+            ToolResult.success(map("path", "index.html", "changed", true)));
+    assertFalse(coordinator.isComplete());
+    assertEquals("verify", currentStepId(changedAgain.data().get("plan_state")));
+    assertTrue(String.valueOf(changedAgain.data().get("plan_state")).length() <= 800);
+  }
+
+  @Test
+  public void plannedFileEvidenceRequiresTheRealResolvedPath() throws Exception {
+    Files.write(new File(root, "other.txt").toPath(), "other".getBytes(StandardCharsets.UTF_8));
+    CodeValidationContract contract =
+        CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(42L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "修改两个文件",
+            "planned_files",
+            Arrays.asList(
+                map("path", "main.txt", "action", "edit"),
+                map("path", "other.txt", "action", "edit")),
+            "steps",
+            Collections.singletonList(
+                step("implement", "修改全部文件", "implement", "search_replace", "rewrite"))));
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "unplanned.txt")),
+        ToolResult.success(map("resolved_path", "unplanned.txt", "changed", true)));
+    ToolResult otherPath =
+        coordinator.recordAndDecorate(
+            generation,
+            "search_replace",
+            new ToolArguments(map("path", "other.txt")),
+            ToolResult.success(map("resolved_path", "other.txt", "changed", true)));
+    Map<?, ?> state = (Map<?, ?>) otherPath.data().get("plan_state");
+    assertEquals("implement", currentStepId(state));
+    List<?> missing = (List<?>) state.get("missing_evidence");
+    assertTrue(missing.contains("edit:main.txt"));
+    assertFalse(missing.contains("edit:other.txt"));
+  }
+
+  @Test
+  public void pathSpecificMissingEvidenceRemainsCompact() {
+    CodeValidationContract contract =
+        CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(43L, "s", "workspace", "task"));
+    List<Map<String, Object>> files = new ArrayList<>();
+    for (int index = 0; index < 8; index++) {
+      files.add(
+          map(
+              "path",
+              "very/long/generated/component/path/number-"
+                  + index
+                  + "/responsive-interaction-styles.css",
+              "action",
+              "edit"));
+    }
+    Map<String, Object> result =
+        coordinator.acceptPlan(
+            map(
+                "goal", "修改多个长路径文件",
+                "planned_files", files,
+                "steps",
+                Collections.singletonList(
+                    step("implement", "完成全部文件实现", "implement", "search_replace"))));
+    Object state = result.get("plan_state");
+    assertTrue(String.valueOf(state).length() <= 800);
+    assertEquals(8, ((List<?>) ((Map<?, ?>) state).get("missing_evidence")).size());
+  }
+
+  @Test
+  public void invalidDirectoryOutsideAndSymlinkPathsNeverBecomeManagedEvidence()
+      throws Exception {
+    File directory = new File(root, "folder");
+    assertTrue(directory.mkdir());
+    File outside = Files.createTempDirectory("aiw-outside").toFile();
+    File outsideFile = new File(outside, "outside.txt");
+    Files.write(outsideFile.toPath(), "outside".getBytes(StandardCharsets.UTF_8));
+    File escape = new File(root, "escape.txt");
+    try {
+      Files.createSymbolicLink(escape.toPath(), outsideFile.toPath());
+      Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+      roles.put("read_file", CodeToolRole.READ);
+      roles.put("search_replace", CodeToolRole.EDIT);
+      roles.put("syntax_check", CodeToolRole.VERIFY);
+      ManagedCodePlanCoordinator coordinator =
+          new ManagedCodePlanCoordinator(
+              CodePlanningMode.ADAPTIVE,
+              CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build(),
+              roles,
+              workspace);
+      coordinator.onRunStarted(new AgentRunContext(44L, "s", "workspace", "task"));
+      long generation = coordinator.generation();
+      Map<String, Object> plan =
+          coordinator.acceptPlan(
+              map(
+                  "goal", "安全修改",
+                  "steps",
+                  Arrays.asList(
+                      step("discover", "读取", "discover", "read_file"),
+                      step("implement", "修改", "implement", "search_replace"),
+                      step("verify", "验证", "verify", "syntax_check"))));
+      assertEquals("discover", currentStepId(plan.get("plan_state")));
+
+      for (String path : Arrays.asList("folder", "../outside.txt", "escape.txt")) {
+        ToolResult invalidRead =
+            coordinator.recordAndDecorate(
+                generation,
+                "read_file",
+                new ToolArguments(map("path", path)),
+                ToolResult.success(map("path", path, "content", "misreported")));
+        assertFalse(invalidRead.data().containsKey("plan_state"));
+      }
+      ToolResult validRead =
+          coordinator.recordAndDecorate(
+              generation,
+              "read_file",
+              new ToolArguments(map("path", "main.txt")),
+              ToolResult.success(map("path", "main.txt", "content", "before")));
+      assertEquals("implement", currentStepId(validRead.data().get("plan_state")));
+
+      for (String path : Arrays.asList("folder", "../outside.txt", "escape.txt")) {
+        ToolResult invalidWrite =
+            coordinator.recordAndDecorate(
+                generation,
+                "search_replace",
+                new ToolArguments(map("path", path)),
+                ToolResult.success(map("path", path, "changed", true)));
+        assertFalse(invalidWrite.data().containsKey("plan_state"));
+      }
+      ToolResult validWrite =
+          coordinator.recordAndDecorate(
+              generation,
+              "search_replace",
+              new ToolArguments(map("path", "main.txt")),
+              ToolResult.success(map("path", "main.txt", "changed", true)));
+      assertEquals("verify", currentStepId(validWrite.data().get("plan_state")));
+    } finally {
+      Files.deleteIfExists(escape.toPath());
+      delete(outside);
+    }
+  }
+
+  @Test
+  public void createNewConflictRebindsOnlyTheRequestedPlannedFile() throws Exception {
+    File requested = new File(root, "entry.html");
+    Files.write(requested.toPath(), "precreated".getBytes(StandardCharsets.UTF_8));
+    CodeValidationContract contract =
+        CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("create_file", CodeToolRole.CREATE);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(45L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    Map<String, Object> planArguments =
+        map(
+            "goal", "创建入口和备用入口",
+            "planned_files",
+            Arrays.asList(
+                map("path", "entry.html", "action", "create"),
+                map("path", "entry-1.html", "action", "create")),
+            "steps",
+            Collections.singletonList(
+                step("implement", "创建两个入口", "implement", "create_file")));
+    coordinator.acceptPlan(planArguments);
+
+    Files.write(
+        new File(root, "entry-1.html").toPath(),
+        "created by conflict resolution".getBytes(StandardCharsets.UTF_8));
+    ToolArguments transformed =
+        new ToolArguments(
+            map(
+                "path", "entry-1.html",
+                "__requested_path", "entry.html",
+                "__conflict_resolution", "create_new"));
+    ToolResult created =
+        coordinator.recordAndDecorate(
+            generation,
+            "create_file",
+            transformed,
+            ToolResult.success(
+                map(
+                    "requested_path", "entry.html",
+                    "resolved_path", "entry-1.html",
+                    "path", "entry-1.html",
+                    "conflict_resolution", "create_new",
+                    "created", true)));
+    Map<?, ?> state = (Map<?, ?>) created.data().get("plan_state");
+    assertEquals("implement", currentStepId(state));
+    List<?> missing = (List<?>) state.get("missing_evidence");
+    assertEquals(Collections.singletonList("create:entry-1.html"), missing);
+
+    Map<String, Object> replanned = coordinator.acceptPlan(planArguments);
+    Map<?, ?> replannedState = (Map<?, ?>) replanned.get("plan_state");
+    assertEquals("implement", currentStepId(replannedState));
+    assertEquals(
+        Collections.singletonList("create:entry-1.html"),
+        replannedState.get("missing_evidence"));
+  }
+
+  @Test
+  public void mismatchedCreatePathsWithoutVerifiedCreateNewMetadataAreRejected()
+      throws Exception {
+    Files.write(
+        new File(root, "requested.html").toPath(),
+        "requested".getBytes(StandardCharsets.UTF_8));
+    Files.write(
+        new File(root, "different.html").toPath(),
+        "different".getBytes(StandardCharsets.UTF_8));
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("create_file", CodeToolRole.CREATE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(
+            CodePlanningMode.ADAPTIVE,
+            CodeValidationContract.builder().build(),
+            roles,
+            workspace);
+    coordinator.onRunStarted(new AgentRunContext(46L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "创建入口",
+            "planned_files", Collections.singletonList(map("path", "requested.html", "action", "create")),
+            "steps", Collections.singletonList(step("implement", "创建入口", "implement", "create_file"))));
+    ToolResult rejected =
+        coordinator.recordAndDecorate(
+            generation,
+            "create_file",
+            new ToolArguments(map("path", "requested.html")),
+            ToolResult.success(
+                map(
+                    "requested_path", "wrong.html",
+                    "resolved_path", "different.html",
+                    "conflict_resolution", "create_new",
+                    "created", true)));
+    assertFalse(rejected.data().containsKey("plan_state"));
+    assertFalse(coordinator.isComplete());
+  }
+
+  @Test
+  public void legacyPlannedFileWithoutActionCanSafelyRebindCreateNew() throws Exception {
+    Files.write(
+        new File(root, "legacy.html").toPath(),
+        "precreated".getBytes(StandardCharsets.UTF_8));
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("create_file", CodeToolRole.CREATE);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(
+            CodePlanningMode.ADAPTIVE,
+            CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build(),
+            roles,
+            workspace);
+    coordinator.onRunStarted(new AgentRunContext(47L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "兼容旧计划创建入口",
+            "planned_files", Collections.singletonList(map("path", "legacy.html")),
+            "steps", Collections.singletonList(step("implement", "创建入口", "implement", "create_file"))));
+    Files.write(
+        new File(root, "legacy-1.html").toPath(),
+        "created".getBytes(StandardCharsets.UTF_8));
+    ToolResult created =
+        coordinator.recordAndDecorate(
+            generation,
+            "create_file",
+            new ToolArguments(
+                map(
+                    "path", "legacy-1.html",
+                    "__requested_path", "legacy.html",
+                    "__conflict_resolution", "create_new")),
+            ToolResult.success(
+                map(
+                    "requested_path", "legacy.html",
+                    "resolved_path", "legacy-1.html",
+                    "conflict_resolution", "create_new",
+                    "created", true)));
+    assertTrue(created.data().containsKey("plan_state"));
+    assertFalse("implement".equals(currentStepId(created.data().get("plan_state"))));
+  }
+
+  @Test
+  public void partialSuccessAndErrorPreserveStatusAndInvalidateCurrentEvidence() {
+    for (boolean error : Arrays.asList(false, true)) {
+      ManagedCodePlanCoordinator coordinator = managedPlan("edit", 50L + (error ? 1 : 0), true);
+      completeManagedPlan(coordinator, "search_replace", true);
+      assertTrue(coordinator.isComplete());
+
+      Map<String, Object> partialData =
+          map(
+              "path", "main.txt",
+              "changed", true,
+              "applied_count", 1);
+      if (!error) {
+        partialData.put("requested_count", 2);
+        partialData.put("failed_count", 1);
+      }
+      ToolResult source = error
+          ? ToolResult.error("partial_write", "one replacement failed", true, partialData)
+          : ToolResult.success(partialData);
+      ToolResult decorated =
+          coordinator.recordAndDecorate(
+              coordinator.generation(),
+              "search_replace",
+              new ToolArguments(map("path", "main.txt")),
+              source);
+
+      assertEquals(source.status(), decorated.status());
+      assertEquals(source.errorCode(), decorated.errorCode());
+      assertEquals(source.retryable(), decorated.retryable());
+      assertTrue(decorated.data().containsKey("plan_state"));
+      assertEquals("implement", currentStepId(decorated.data().get("plan_state")));
+      assertTrue(
+          ((List<?>) ((Map<?, ?>) decorated.data().get("plan_state")).get("missing_evidence"))
+              .contains("edit:main.txt"));
+      assertFalse(coordinator.isComplete());
+      assertFalse(coordinator.hasCurrentEvidence("syntax_check"));
+      assertFalse(coordinator.hasCurrentEvidence("quality_review"));
+    }
+  }
+
+  @Test
+  public void completeEditRepairsPartialEditWithoutRequiringOriginalCreateAgain() {
+    ManagedCodePlanCoordinator coordinator = managedPlan("create", 52L, false);
+    completeManagedPlan(coordinator, "create_file", false);
+    assertTrue(coordinator.isComplete());
+
+    ToolResult partial =
+        coordinator.recordAndDecorate(
+            coordinator.generation(),
+            "search_replace",
+            new ToolArguments(map("path", "main.txt")),
+            ToolResult.success(
+                map(
+                    "path", "main.txt",
+                    "changed", true,
+                    "applied_count", 1,
+                    "failed_indexes", Collections.singletonList(1))));
+    assertEquals("implement", currentStepId(partial.data().get("plan_state")));
+    assertFalse(coordinator.isComplete());
+
+    ToolResult repaired =
+        coordinator.recordAndDecorate(
+            coordinator.generation(),
+            "search_replace",
+            new ToolArguments(map("path", "main.txt")),
+            ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+    assertEquals("verify", currentStepId(repaired.data().get("plan_state")));
+    assertFalse(
+        ((List<?>) ((Map<?, ?>) repaired.data().get("plan_state")).get("missing_evidence"))
+            .contains("create:main.txt"));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "syntax_check",
+        ToolArguments.empty(),
+        ToolResult.success(map("passed", true)));
+    assertTrue(coordinator.isComplete());
+  }
+
+  @Test
+  public void failedWriteWithoutMutationDoesNotRegressCompletedPlan() {
+    ManagedCodePlanCoordinator coordinator = managedPlan("edit", 53L, true);
+    completeManagedPlan(coordinator, "search_replace", true);
+    assertTrue(coordinator.isComplete());
+
+    ToolResult failed =
+        coordinator.recordAndDecorate(
+            coordinator.generation(),
+            "search_replace",
+            new ToolArguments(map("path", "main.txt")),
+            ToolResult.error(
+                "not_applied",
+                "no replacement was applied",
+                true,
+                map(
+                    "path", "main.txt",
+                    "changed", false,
+                    "requested_count", 1,
+                    "applied_count", 0,
+                    "failed_count", 1)));
+    assertEquals(ToolResult.Status.ERROR, failed.status());
+    assertTrue(failed.retryable());
+    assertFalse(failed.data().containsKey("plan_state"));
+    assertTrue(coordinator.isComplete());
+    assertTrue(coordinator.hasCurrentEvidence("syntax_check"));
+    assertTrue(coordinator.hasCurrentEvidence("quality_review"));
+  }
+
+  @Test
+  public void latestVerifyAndQualityFailuresRevokeEvidenceAndCanRecover() {
+    ManagedCodePlanCoordinator coordinator = managedPlan("edit", 54L, true);
+    completeManagedPlan(coordinator, "search_replace", true);
+    assertTrue(coordinator.isComplete());
+
+    ToolResult failedVerify =
+        coordinator.recordAndDecorate(
+            coordinator.generation(),
+            "syntax_check",
+            ToolArguments.empty(),
+            ToolResult.success(map("passed", false)));
+    assertEquals("verify", currentStepId(failedVerify.data().get("plan_state")));
+    assertFalse(coordinator.isComplete());
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "syntax_check",
+        ToolArguments.empty(),
+        ToolResult.success(map("passed", true)));
+    assertTrue(coordinator.isComplete());
+
+    ToolResult erroredVerify =
+        coordinator.recordAndDecorate(
+            coordinator.generation(),
+            "syntax_check",
+            ToolArguments.empty(),
+            ToolResult.error("syntax_failed", "syntax failed", true, map("passed", false)));
+    assertEquals(ToolResult.Status.ERROR, erroredVerify.status());
+    assertTrue(erroredVerify.retryable());
+    assertEquals("verify", currentStepId(erroredVerify.data().get("plan_state")));
+    assertFalse(coordinator.isComplete());
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "syntax_check",
+        ToolArguments.empty(),
+        ToolResult.success(map("passed", true)));
+    assertTrue(coordinator.isComplete());
+
+    ToolResult erroredQuality =
+        coordinator.recordAndDecorate(
+            coordinator.generation(),
+            "quality_review",
+            ToolArguments.empty(),
+            ToolResult.error("quality_failed", "quality failed", false, map("passed", false)));
+    assertEquals(ToolResult.Status.ERROR, erroredQuality.status());
+    assertEquals("quality", currentStepId(erroredQuality.data().get("plan_state")));
+    assertFalse(coordinator.isComplete());
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "quality_review",
+        ToolArguments.empty(),
+        passingQuality());
+    assertTrue(coordinator.isComplete());
+  }
+
+  @Test
+  public void everyPartialIndicatorAndRequestedCountMismatchLeavesWriteUnresolved() {
+    List<Map<String, Object>> indicators =
+        Arrays.asList(
+            map("partial_apply", true),
+            map("failed_count", 1),
+            map("skipped_count", 1),
+            map("failed_indexes", Collections.singletonList(0)),
+            map("skipped_indexes", Collections.singletonList(0)),
+            map("failed_replacements", Collections.singletonList("old")),
+            map("skipped_replacements", Collections.singletonList("old")),
+            map("failed_units", Collections.singletonList("unit")),
+            map("skipped_units", Collections.singletonList("unit")),
+            map("failures", Collections.singletonList("failure")),
+            map("errors", Collections.singletonList("error")),
+            map("results", Collections.singletonList(map("status", "failed"))),
+            map("requested_count", 2, "applied_count", 1, "no_change_count", 0));
+    long runId = 60L;
+    for (Map<String, Object> indicator : indicators) {
+      ManagedCodePlanCoordinator coordinator = managedPlan("edit", runId++, false);
+      completeManagedPlan(coordinator, "search_replace", false);
+      Map<String, Object> data = new LinkedHashMap<>(indicator);
+      data.put("path", "main.txt");
+      data.put("changed", true);
+      if (!data.containsKey("applied_count")) data.put("applied_count", 1);
+      ToolResult partial =
+          coordinator.recordAndDecorate(
+              coordinator.generation(),
+              "search_replace",
+              new ToolArguments(map("path", "main.txt")),
+              ToolResult.success(data));
+      assertEquals("indicator=" + indicator, "implement", currentStepId(partial.data().get("plan_state")));
+      assertFalse("indicator=" + indicator, coordinator.isComplete());
+      assertFalse("indicator=" + indicator, coordinator.hasCurrentEvidence("syntax_check"));
+    }
+  }
+
+  @Test
+  public void implementationFileMappingNeverExpandsPlanBeyondFiveSteps() {
+    Map<String, Object> normalized =
+        new CodePlanNormalizer(
+                CodeValidationContract.builder()
+                    .defaultRequiredEvidence("syntax_check", "browser_test")
+                    .build())
+            .normalize(
+                map(
+                    "goal", "完成混合文件任务",
+                    "quality_mode", "interface_product",
+                    "planned_files",
+                    Arrays.asList(
+                        map("path", "new.html", "action", "create"),
+                        map("path", "main.txt", "action", "edit"),
+                        map("path", "unknown.asset")),
+                    "steps",
+                    Arrays.asList(
+                        step("discover", "读取上下文", "discover", "read_file"),
+                        step("implement-a", "先处理一部分", "implement", "search_replace"),
+                        step("implement-b", "再处理一部分", "implement", "create_file"),
+                        step("verify", "执行验证", "verify", "syntax_check", "browser_test"),
+                        step("quality", "质量审查", "quality", "quality_review"))));
+    List<?> steps = (List<?>) normalized.get("steps");
+    assertEquals(5, steps.size());
+    Set<String> expected = new LinkedHashSet<>();
+    for (Object raw : (List<?>) normalized.get("planned_files")) {
+      expected.add(String.valueOf(((Map<?, ?>) raw).get("file_id")));
+    }
+    Set<String> actual = new LinkedHashSet<>();
+    for (Object raw : steps) {
+      Map<?, ?> step = (Map<?, ?>) raw;
+      if ("implement".equals(step.get("phase"))) {
+        for (Object ref : (List<?>) step.get("file_refs")) actual.add(String.valueOf(ref));
+      }
+    }
+    assertEquals(expected, actual);
   }
 
   @Test
@@ -554,7 +1396,7 @@ public final class CodeAgentPresetTest {
     roles.put("browser_test", CodeToolRole.VERIFY);
     roles.put("quality_review", CodeToolRole.QUALITY);
     ManagedCodePlanCoordinator coordinator =
-        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles);
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
     coordinator.onRunStarted(new AgentRunContext(31L, "s", "w", "task"));
     long generation = coordinator.generation();
     coordinator.acceptPlan(
@@ -563,8 +1405,10 @@ public final class CodeAgentPresetTest {
             "quality_mode", "interface_product",
             "verification_plan", Arrays.asList("syntax_check", "browser_test"),
             "steps", Collections.emptyList()));
-    ToolResult read = ToolResult.success(map("operation", "read_file", "content", "source"));
-    ToolResult edit = ToolResult.success(map("operation", "search_replace", "changed", true));
+    ToolResult read =
+        ToolResult.success(map("operation", "read_file", "path", "main.txt", "content", "source"));
+    ToolResult edit =
+        ToolResult.success(map("operation", "search_replace", "path", "main.txt", "changed", true));
     ToolResult syntax = ToolResult.success(map("operation", "syntax_check", "passed", true));
     ToolResult browser = ToolResult.success(map("operation", "browser_test", "passed", true));
     ToolResult quality = ToolResult.success(
@@ -574,8 +1418,9 @@ public final class CodeAgentPresetTest {
             "blocking_gaps", Collections.emptyList(),
             "claimed_but_unsupported", Collections.emptyList(),
             "minimal_version_risk", false));
-    coordinator.recordAndDecorate(generation, "read_file", read);
-    coordinator.recordAndDecorate(generation, "search_replace", edit);
+    ToolArguments mainPath = new ToolArguments(map("path", "main.txt"));
+    coordinator.recordAndDecorate(generation, "read_file", mainPath, read);
+    coordinator.recordAndDecorate(generation, "search_replace", mainPath, edit);
     coordinator.recordAndDecorate(generation, "syntax_check", syntax);
     coordinator.recordAndDecorate(generation, "browser_test", browser);
     coordinator.recordAndDecorate(generation, "quality_review", quality);
@@ -584,7 +1429,7 @@ public final class CodeAgentPresetTest {
         read, edit, syntax, browser, quality, finalizeEvidence("completed", "ui_product")));
     assertTrue(validate(validator, evidence).passed());
 
-    coordinator.recordAndDecorate(generation, "search_replace", edit);
+    coordinator.recordAndDecorate(generation, "search_replace", mainPath, edit);
     evidence.add(evidence.size() - 1, edit);
     ValidationResult stale = validate(validator, evidence);
     assertFalse(stale.passed());
@@ -751,6 +1596,70 @@ public final class CodeAgentPresetTest {
         .contribute(new PromptContext("workspace", "task", Collections.emptyMap()))
         .get(0)
         .content();
+  }
+
+  private ManagedCodePlanCoordinator managedPlan(
+      String action, long runId, boolean qualityRequired) {
+    CodeValidationContract contract =
+        CodeValidationContract.builder().defaultRequiredEvidence("syntax_check").build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("list_dir", CodeToolRole.DISCOVER);
+    roles.put("create_file", CodeToolRole.CREATE);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("rewrite", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(runId, "session", "workspace", "task"));
+    List<Map<String, Object>> steps =
+        new ArrayList<>(
+            Arrays.asList(
+                step("discover", "确认工作区", "discover", "list_dir"),
+                step("implement", "完成文件实现", "implement", "create_file", "search_replace"),
+                step("verify", "执行验证", "verify", "syntax_check")));
+    if (qualityRequired) {
+      steps.add(step("quality", "质量审查", "quality", "quality_review"));
+    }
+    coordinator.acceptPlan(
+        map(
+            "goal", "完成受管文件任务",
+            "quality_mode", qualityRequired ? "interface_product" : "standard",
+            "planned_files", Collections.singletonList(map("path", "main.txt", "action", action)),
+            "steps", steps));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "list_dir",
+        ToolArguments.empty(),
+        ToolResult.success(map("path", ".", "items", Collections.singletonList("main.txt"))));
+    return coordinator;
+  }
+
+  private static void completeManagedPlan(
+      ManagedCodePlanCoordinator coordinator, String writeTool, boolean qualityRequired) {
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        writeTool,
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "syntax_check",
+        ToolArguments.empty(),
+        ToolResult.success(map("passed", true)));
+    if (qualityRequired) {
+      coordinator.recordAndDecorate(
+          coordinator.generation(), "quality_review", ToolArguments.empty(), passingQuality());
+    }
+  }
+
+  private static ToolResult passingQuality() {
+    return ToolResult.success(
+        map(
+            "passed", true,
+            "blocking_gaps", Collections.emptyList(),
+            "claimed_but_unsupported", Collections.emptyList(),
+            "minimal_version_risk", false));
   }
 
   private WorkbenchDefinition definition(CodeAgentPreset preset) {

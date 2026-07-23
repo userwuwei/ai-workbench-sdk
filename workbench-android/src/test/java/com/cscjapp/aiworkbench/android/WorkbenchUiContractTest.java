@@ -1,6 +1,7 @@
 package com.cscjapp.aiworkbench.android;
 
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
 
 import java.io.File;
 import java.nio.charset.StandardCharsets;
@@ -93,17 +94,42 @@ public final class WorkbenchUiContractTest {
     assertTrue(activity.contains("Choreographer.FrameCallback"));
     assertTrue(activity.contains("STREAM_TEXT_FRAME_INTERVAL_NANOS = 33_000_000L"));
     assertTrue(activity.contains("viewModel.streamUiUpdates().observe"));
-    assertTrue(activity.contains("adapter.notifyItemChanged(position, new WorkbenchStreamPayload(mask))"));
-    assertTrue(activity.contains("if (isNearBottom(true)) pendingStreamAutoScroll = true"));
+    assertTrue(activity.contains("new WorkbenchStreamPayload(mask, snapshot)"));
+    assertTrue(activity.contains("STREAM_STATE_MIN_VISIBLE_MS = 220L"));
+    assertTrue(activity.contains("STREAM_IDLE_THRESHOLD_MS = 10_000L"));
+    assertTrue(activity.contains("模型仍在处理 · 已等待 "));
+    assertTrue(activity.contains("if (isNearBottom(true)) scrollToBottom()"));
     assertTrue(activity.contains("else showNewUpdates()"));
     String targetedRefresh = methodBody(activity, "private void requestStreamUiRefresh");
-    assertTrue(targetedRefresh.contains("scheduleStreamUiFrame()"));
+    assertTrue(targetedRefresh.contains("drainStreamUiMailbox()"));
     assertTrue(!targetedRefresh.contains("setNewData"));
+    String enqueue = methodBody(activity, "private void enqueueStreamUiUpdate");
+    assertTrue(enqueue.contains("if (update.terminal)"));
+    assertTrue(enqueue.contains("stopStreamIdleTicker()"));
+    String flush = methodBody(activity, "private void flushStreamUiFrame");
+    assertTrue(flush.contains("visibleFor < STREAM_STATE_MIN_VISIBLE_MS"));
+    assertTrue(flush.contains("pendingStreamUiEvents.removeFirst()"));
+    String destroy = methodBody(activity, "protected void onDestroy");
+    assertTrue(destroy.contains("clearPendingStreamUiUpdates()"));
     assertTrue(adapter.contains("public void onBindViewHolder"));
     assertTrue(adapter.contains("STREAMING_COLLAPSED_PREVIEW_MAX_CHARS = 4096"));
+    assertTrue(viewModel.contains("WorkbenchStreamUiMailbox streamUiMailbox"));
+    assertTrue(viewModel.contains("WorkbenchStreamUiSnapshot.capture"));
     assertTrue(viewModel.contains("if (same) return;"));
+    String codeLock = methodBody(adapter, "public void setCodeAreaLocked");
+    assertTrue(codeLock.contains("PAYLOAD_CODE_AREA_LOCK"));
+    assertTrue(!codeLock.contains("notifyDataSetChanged"));
+    String avatar = methodBody(adapter, "void setUserAvatarUrl");
+    assertTrue(!avatar.contains("notifyDataSetChanged"));
     assertTrue(layout.contains("app:aiw_animatedNumber_duration=\"220\""));
     assertTrue(layout.contains("app:aiw_animatedNumber_perDigitDelay=\"35\""));
+  }
+
+  @Test
+  public void delayedDeltaUsesItsOriginalTimestampForIdleFeedback() {
+    assertEquals(10_000L, AIWorkbenchActivity.streamIdleDelayMs(20_000L, 20_000L));
+    assertEquals(5_000L, AIWorkbenchActivity.streamIdleDelayMs(25_000L, 20_000L));
+    assertEquals(0L, AIWorkbenchActivity.streamIdleDelayMs(35_000L, 20_000L));
   }
 
   @Test

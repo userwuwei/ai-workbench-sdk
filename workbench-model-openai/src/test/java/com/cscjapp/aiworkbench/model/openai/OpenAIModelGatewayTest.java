@@ -211,16 +211,94 @@ public class OpenAIModelGatewayTest {
             });
 
     assertTrue(latch.await(3, TimeUnit.SECONDS));
-    assertEquals(4, events.size());
-    assertTrue(events.get(0).startsWith("model_request"));
-    assertTrue(events.get(0).contains("[模型请求][request=1][stage=initial][model=test]"));
-    assertTrue(events.get(0).contains("[message=1][role=user]\nu"));
-    assertFalse(events.get(0).contains("body="));
-    assertFalse(events.get(0).contains("Bearer secret"));
-    assertTrue(events.get(1).startsWith("model_response"));
-    assertTrue(events.get(1).contains("[模型响应][request=1][model=test][finish_reason=stop]"));
-    assertTrue(events.get(2).contains("[本轮模型返回][request=1][content]done"));
-    assertTrue(events.get(3).contains("[本轮模型返回][request=1][reasoning]think"));
+    String requestEvent = firstEvent(events, "model_request");
+    assertTrue(requestEvent.contains("[模型请求][request=1][stage=initial][model=test]"));
+    assertTrue(requestEvent.contains("[message=1][role=user]\nu"));
+    assertFalse(requestEvent.contains("body="));
+    assertFalse(requestEvent.contains("Bearer secret"));
+    assertTrue(firstContaining(events, "[event=headers]").contains("content_type=text/event-stream"));
+    String firstDelta = firstContaining(events, "[event=first_delta]");
+    assertTrue(firstDelta.contains("type=mixed"));
+    assertTrue(firstDelta.contains("content_chars=4"));
+    assertTrue(firstDelta.contains("reasoning_chars=5"));
+    assertTrue(firstContaining(events, "[event=finish_reason]").contains("value=stop"));
+    String doneEvent = firstContaining(events, "[event=done]");
+    assertTrue(doneEvent.contains("finish_to_done_ms="));
+    assertTrue(doneEvent.contains("last_delta_to_done_ms="));
+    String responseEvent = firstContaining(events, "[模型响应][request=1]");
+    assertTrue(responseEvent.contains("[finish_reason=stop]"));
+    assertTrue(firstContaining(events, "[content]done").contains("[本轮模型返回]"));
+    assertTrue(firstContaining(events, "[reasoning]think").contains("[本轮模型返回]"));
+    for (String event : events) {
+      if (!event.startsWith("model_stream")) continue;
+      assertFalse(event.contains("[本轮模型返回]"));
+      assertFalse(event.contains("content=done"));
+      assertFalse(event.contains("think"));
+    }
+  }
+
+  @Test
+  public void logsEofWhenCompatibleStreamOmitsDoneSentinel() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"));
+    List<String> events = new ArrayList<>();
+    OpenAIModelGateway gateway =
+        new OpenAIModelGateway((event, message) -> events.add(event + "\n" + message));
+
+    await(gateway, request());
+
+    String eofEvent = firstContaining(events, "[event=eof]");
+    assertTrue(eofEvent.contains("finish_to_eof_ms="));
+    assertTrue(eofEvent.contains("last_delta_to_eof_ms="));
+    assertFalse(join(events).contains("[event=done]"));
+  }
+
+  @Test
+  public void ignoresEmptyCommentAndNonJsonHeartbeatsWithoutReportingProgress() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                ": heartbeat\n\n"
+                    + "data: \n\n"
+                    + "data: ping\n\n"
+                    + "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    + "data: [DONE]\n\n"));
+    List<String> events = new ArrayList<>();
+    List<ModelStreamDelta> deltas = new ArrayList<>();
+    List<Throwable> errors = new ArrayList<>();
+    CountDownLatch latch = new CountDownLatch(1);
+    OpenAIModelGateway gateway =
+        new OpenAIModelGateway((event, message) -> events.add(event + "\n" + message));
+
+    gateway.stream(
+        request(),
+        new ModelStreamObserver() {
+          public void onDelta(String content, String reasoning) {}
+
+          public void onStreamDelta(ModelStreamDelta delta) {
+            deltas.add(delta);
+          }
+
+          public void onComplete(ModelResponse response) {
+            latch.countDown();
+          }
+
+          public void onError(Throwable error) {
+            errors.add(error);
+            latch.countDown();
+          }
+        });
+
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertTrue(errors.toString(), errors.isEmpty());
+    assertEquals(1, deltas.size());
+    assertEquals("ok", deltas.get(0).content());
+    assertTrue(firstContaining(events, "[event=first_delta]").contains("content_chars=2"));
+    assertTrue(firstContaining(events, "[event=done]").contains("ignored_heartbeat_count=1"));
   }
 
   @Test
@@ -244,7 +322,7 @@ public class OpenAIModelGatewayTest {
             false);
     await(gateway, continuation);
 
-    String secondRequest = events.get(3);
+    String secondRequest = firstContaining(events, "[模型请求][request=2]");
     assertTrue(secondRequest.contains("[模型请求][request=2][stage=continue][model=test]"));
     assertTrue(secondRequest.contains("new_messages=2"));
     assertFalse(secondRequest.contains("[message=0]"));
@@ -260,6 +338,28 @@ public class OpenAIModelGatewayTest {
             "{\"choices\":[{\"message\":{\"content\":\""
                 + content
                 + "\"},\"finish_reason\":\"stop\"}]}");
+  }
+
+  private static String firstEvent(List<String> events, String eventName) {
+    for (String event : events) {
+      if (event.startsWith(eventName + "\n")) return event;
+    }
+    fail("missing event " + eventName + " in " + events);
+    return "";
+  }
+
+  private static String firstContaining(List<String> events, String needle) {
+    for (String event : events) {
+      if (event.contains(needle)) return event;
+    }
+    fail("missing log " + needle + " in " + events);
+    return "";
+  }
+
+  private static String join(List<String> events) {
+    StringBuilder result = new StringBuilder();
+    for (String event : events) result.append(event).append('\n');
+    return result.toString();
   }
 
   private static void await(OpenAIModelGateway gateway, ModelRequest request) throws Exception {

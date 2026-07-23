@@ -1,5 +1,6 @@
 package com.cscjapp.aiworkbench.core;
 
+import com.google.gson.Gson;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -8,6 +9,7 @@ import java.util.Set;
 
 /** Keeps persisted/request history protocol-valid and bounded. */
 public final class AgentHistory {
+  private static final Gson GSON = new Gson();
   static final String COMPLETED_TASK_HISTORY_PREFIX =
       "已完成项目任务摘要（仅用于连续性，不代表当前工具证据；修改前仍需读取真实文件）：";
 
@@ -53,34 +55,140 @@ public final class AgentHistory {
     List<AgentMessage> safe = sanitize(source);
     if (safe.isEmpty()) return safe;
     AgentMessage system = safe.get(0).role() == AgentMessage.Role.SYSTEM ? safe.get(0) : null;
-    int startFloor = system == null ? 0 : 1;
-    int start = safe.size();
-    int chars = system == null ? 0 : system.content().length();
-    int count = system == null ? 0 : 1;
-    while (start > startFloor) {
-      AgentMessage candidate = safe.get(start - 1);
-      int nextChars = chars + candidate.content().length();
-      if (count >= Math.max(2, maxMessages) || nextChars > Math.max(4096, maxChars)) break;
-      chars = nextChars;
-      count++;
-      start--;
-    }
-    // Avoid beginning the retained conversation with an orphan tool response.
-    while (start < safe.size() && safe.get(start).role() == AgentMessage.Role.TOOL) start++;
+    int floor = system == null ? 0 : 1;
+    int messageLimit = Math.max(2, maxMessages);
+    int charLimit = Math.max(4096, maxChars);
+    List<HistoryGroup> groups = groups(safe, floor);
     int lastUser = -1;
-    for (int i = safe.size() - 1; i >= startFloor; i--) {
+    for (int i = safe.size() - 1; i >= floor; i--) {
       if (safe.get(i).role() == AgentMessage.Role.USER) {
         lastUser = i;
         break;
       }
     }
-    // The current demand is non-negotiable even if one tool result is larger
-    // than the advisory character budget.
-    if (lastUser >= 0 && start > lastUser) start = lastUser;
+    int baseChars = system == null ? 0 : estimatedChars(system);
+    int baseCount = system == null ? 0 : 1;
+    int startGroup = suffixStart(groups, baseChars, baseCount, messageLimit, charLimit, 0);
+    boolean includesLastUser = contains(groups, startGroup, lastUser);
     List<AgentMessage> out = new ArrayList<>();
     if (system != null) out.add(system);
-    out.addAll(safe.subList(start, safe.size()));
+    if (lastUser >= floor && !includesLastUser) {
+      // The current demand is non-negotiable, but it must not pull an oversized
+      // tool protocol body back into the request after budgeting excluded it.
+      AgentMessage demand = safe.get(lastUser);
+      out.add(demand);
+      int mandatoryChars = baseChars + estimatedChars(demand);
+      int mandatoryCount = baseCount + 1;
+      int suffixFloor = firstGroupAfter(groups, lastUser);
+      int suffixStart =
+          suffixStart(
+              groups, mandatoryChars, mandatoryCount, messageLimit, charLimit, suffixFloor);
+      appendGroups(out, safe, groups, suffixStart);
+    } else {
+      appendGroups(out, safe, groups, startGroup);
+    }
     return Collections.unmodifiableList(out);
+  }
+
+  /** Creates the bounded, lossy request view without mutating persisted or observable history. */
+  static List<AgentMessage> forModelRequest(
+      List<AgentMessage> source, int maxMessages, int maxChars) {
+    return bounded(AgentHistoryRequestProjection.project(source), maxMessages, maxChars);
+  }
+
+  static int estimatedChars(List<AgentMessage> messages) {
+    int total = 0;
+    if (messages != null) for (AgentMessage message : messages) total += estimatedChars(message);
+    return total;
+  }
+
+  private static int estimatedChars(AgentMessage message) {
+    if (message == null) return 0;
+    int chars = message.content().length() + message.name().length() + message.toolCallId().length();
+    for (AgentToolCall call : message.toolCalls()) {
+      chars += call.id().length() + call.name().length();
+      if (call.arguments() != null) chars += GSON.toJson(call.arguments().asMap()).length();
+    }
+    return chars;
+  }
+
+  private static List<HistoryGroup> groups(List<AgentMessage> messages, int start) {
+    List<HistoryGroup> groups = new ArrayList<>();
+    for (int index = start; index < messages.size(); ) {
+      int end = index + 1;
+      AgentMessage message = messages.get(index);
+      if (message.role() == AgentMessage.Role.ASSISTANT && !message.toolCalls().isEmpty()) {
+        while (end < messages.size() && messages.get(end).role() == AgentMessage.Role.TOOL) end++;
+      }
+      int chars = 0;
+      for (int cursor = index; cursor < end; cursor++) chars += estimatedChars(messages.get(cursor));
+      groups.add(new HistoryGroup(index, end, chars));
+      index = end;
+    }
+    return groups;
+  }
+
+  private static int suffixStart(
+      List<HistoryGroup> groups,
+      int baseChars,
+      int baseCount,
+      int messageLimit,
+      int charLimit,
+      int minimumGroup) {
+    int start = groups.size();
+    int chars = baseChars;
+    int count = baseCount;
+    for (int index = groups.size() - 1; index >= minimumGroup; index--) {
+      HistoryGroup group = groups.get(index);
+      if (count + group.messageCount() > messageLimit || chars + group.chars > charLimit) break;
+      chars += group.chars;
+      count += group.messageCount();
+      start = index;
+    }
+    return start;
+  }
+
+  private static boolean contains(List<HistoryGroup> groups, int startGroup, int messageIndex) {
+    if (messageIndex < 0) return false;
+    for (int index = Math.max(0, startGroup); index < groups.size(); index++) {
+      HistoryGroup group = groups.get(index);
+      if (messageIndex >= group.start && messageIndex < group.end) return true;
+    }
+    return false;
+  }
+
+  private static int firstGroupAfter(List<HistoryGroup> groups, int messageIndex) {
+    for (int index = 0; index < groups.size(); index++) {
+      if (groups.get(index).start > messageIndex) return index;
+    }
+    return groups.size();
+  }
+
+  private static void appendGroups(
+      List<AgentMessage> output,
+      List<AgentMessage> source,
+      List<HistoryGroup> groups,
+      int startGroup) {
+    for (int index = Math.max(0, startGroup); index < groups.size(); index++) {
+      HistoryGroup group = groups.get(index);
+      output.addAll(source.subList(group.start, group.end));
+    }
+  }
+
+  private static final class HistoryGroup {
+    final int start;
+    final int end;
+    final int chars;
+
+    HistoryGroup(int start, int end, int chars) {
+      this.start = start;
+      this.end = end;
+      this.chars = chars;
+    }
+
+    int messageCount() {
+      return end - start;
+    }
   }
 
   /** Removes completed tool protocol bodies before a new user task while retaining short outcomes. */

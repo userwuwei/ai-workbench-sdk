@@ -122,7 +122,10 @@ public final class AgentEngine implements Cancellable {
     synchronized (this) {
       req =
           new ModelRequest(
-              endpoint, AgentHistory.bounded(messages, 80, 120000), registry.specs(), deepThinking);
+              endpoint,
+              AgentHistory.forModelRequest(messages, 80, 120000),
+              registry.specs(),
+              deepThinking);
     }
     active =
         gateway.stream(

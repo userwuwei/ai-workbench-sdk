@@ -33,7 +33,11 @@ public final class CodeAgentPreset {
     Map<String, CodeToolRole> roles = defaultRoles();
     roles.putAll(builder.roles);
     ManagedCodePlanCoordinator planCoordinator =
-        new ManagedCodePlanCoordinator(builder.planningMode, builder.profile.verificationContract(), roles);
+        new ManagedCodePlanCoordinator(
+            builder.planningMode,
+            builder.profile.verificationContract(),
+            roles,
+            builder.workspace);
 
     List<PromptContributor> prompts = new ArrayList<>();
     prompts.add(commonPrompt(builder.planningMode));
@@ -262,7 +266,7 @@ public final class CodeAgentPreset {
                 }
               }
               callback.onComplete(planCoordinator.recordAndDecorate(
-                  runGeneration, spec().name(), normalized));
+                  runGeneration, spec().name(), arguments, normalized));
             }
           });
     }

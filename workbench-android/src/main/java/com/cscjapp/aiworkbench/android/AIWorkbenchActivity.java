@@ -36,6 +36,7 @@ import com.google.android.flexbox.FlexDirection;
 import com.google.android.flexbox.FlexboxLayoutManager;
 import com.google.android.flexbox.JustifyContent;
 import java.io.File;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -47,6 +48,8 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
   private static final String EXTRA_PREFIX = "com.cscjapp.aiworkbench.";
   private static final int AUTO_SCROLL_BOTTOM_THRESHOLD = 1;
   private static final long STREAM_TEXT_FRAME_INTERVAL_NANOS = 33_000_000L;
+  private static final long STREAM_STATE_MIN_VISIBLE_MS = 220L;
+  private static final long STREAM_IDLE_THRESHOLD_MS = 10_000L;
 
   private final Handler uiHandler = new Handler(Looper.getMainLooper());
   private final Runnable toolTicker =
@@ -66,7 +69,11 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
           uiHandler.postDelayed(this, 450L);
         }
       };
+  private final Runnable streamUiWakeup = this::scheduleStreamUiFrame;
+  private final Runnable streamIdleTicker = this::renderStreamIdleState;
   private final Choreographer.FrameCallback streamUiFrameCallback = this::flushStreamUiFrame;
+  private final ArrayDeque<WorkbenchViewModel.StreamUiUpdate> pendingStreamUiEvents =
+      new ArrayDeque<>();
 
   private AiwActivityWorkbenchBinding binding;
   private WorkbenchViewModel viewModel;
@@ -83,13 +90,15 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
   private boolean submitAuthorizationPending;
   private boolean deepToggleAuthorizationPending;
   private boolean firstItemsEmission = true;
-  private WorkbenchUiItem pendingThoughtItem;
-  private int pendingThoughtMask;
-  private WorkbenchUiItem pendingReasonItem;
-  private int pendingReasonMask;
-  private boolean pendingStreamAutoScroll;
   private boolean streamUiFrameScheduled;
   private long lastStreamTextFrameNanos;
+  private int visibleStreamRoundId;
+  private String visibleStreamKind = "";
+  private long visibleStreamSinceMs;
+  private long lastValidStreamDeltaMs;
+  private WorkbenchViewModel.StreamUiUpdate lastValidStreamUpdate;
+  private List<WorkbenchUiItem> pendingFullItems;
+  private boolean pendingFullItemsShouldScroll;
   private Cancellable uiStateSubscription = Cancellable.NONE;
 
   public static void putRequest(Intent intent, WorkbenchLaunchRequest request) {
@@ -220,10 +229,15 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
             list -> {
               boolean shouldScroll = firstItemsEmission || isNearBottom(true);
               firstItemsEmission = false;
-              clearPendingStreamUiUpdates();
-              adapter.setNewData(list == null ? new ArrayList<>() : new ArrayList<>(list));
-              if (shouldScroll) scrollToBottom();
-              else if (list != null && !list.isEmpty()) showNewUpdates();
+              drainStreamUiMailbox();
+              List<WorkbenchUiItem> copied =
+                  list == null ? new ArrayList<>() : new ArrayList<>(list);
+              if (hasActiveStreamPresentation() && streamTargetsPresentInAdapter()) {
+                pendingFullItems = copied;
+                pendingFullItemsShouldScroll |= shouldScroll;
+              } else {
+                applyFullItems(copied, shouldScroll);
+              }
             });
     viewModel
         .planItems()
@@ -261,18 +275,42 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
   }
 
   private void requestStreamUiRefresh(WorkbenchViewModel.StreamUiUpdate update) {
-    if (update == null || adapter == null) return;
-    if (update.thoughtItem != null) {
-      pendingThoughtItem = update.thoughtItem;
-      pendingThoughtMask |= update.thoughtMask;
+    if (adapter == null || viewModel == null) return;
+    drainStreamUiMailbox();
+  }
+
+  private void drainStreamUiMailbox() {
+    if (viewModel == null) return;
+    for (WorkbenchViewModel.StreamUiUpdate update : viewModel.drainStreamUiUpdates()) {
+      enqueueStreamUiUpdate(update);
     }
-    if (update.reasonItem != null) {
-      pendingReasonItem = update.reasonItem;
-      pendingReasonMask |= update.reasonMask;
+  }
+
+  private void enqueueStreamUiUpdate(WorkbenchViewModel.StreamUiUpdate update) {
+    if (update == null) return;
+    if (update.terminal) {
+      stopStreamIdleTicker();
+      pendingStreamUiEvents.addLast(update);
+      scheduleStreamUiFrame();
+      return;
     }
-    if (update.autoScroll) {
-      if (isNearBottom(true)) pendingStreamAutoScroll = true;
-      else showNewUpdates();
+    if (update.validDelta) {
+      long now = SystemClock.elapsedRealtime();
+      lastValidStreamDeltaMs = update.timestampMs > 0L ? update.timestampMs : now;
+      lastValidStreamUpdate = update;
+      uiHandler.removeCallbacks(streamIdleTicker);
+      long remaining = streamIdleDelayMs(now, lastValidStreamDeltaMs);
+      if (remaining == 0L) uiHandler.post(streamIdleTicker);
+      else uiHandler.postDelayed(streamIdleTicker, remaining);
+    }
+    WorkbenchViewModel.StreamUiUpdate last = pendingStreamUiEvents.peekLast();
+    if (last != null
+        && last.roundId == update.roundId
+        && last.kind.equals(update.kind)) {
+      pendingStreamUiEvents.removeLast();
+      pendingStreamUiEvents.addLast(mergeStreamUiUpdates(last, update));
+    } else {
+      pendingStreamUiEvents.addLast(update);
     }
     scheduleStreamUiFrame();
   }
@@ -285,45 +323,83 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
 
   private void flushStreamUiFrame(long frameTimeNanos) {
     streamUiFrameScheduled = false;
-    boolean textFrameDue =
-        lastStreamTextFrameNanos == 0L
-            || frameTimeNanos - lastStreamTextFrameNanos >= STREAM_TEXT_FRAME_INTERVAL_NANOS;
+    WorkbenchViewModel.StreamUiUpdate update = pendingStreamUiEvents.peekFirst();
+    if (update == null) return;
 
-    int thoughtMask = pendingThoughtMask;
-    int reasonMask = pendingReasonMask;
-    int thoughtFlushMask =
-        (thoughtMask & WorkbenchStreamPayload.FRAME_MASK)
-            | (textFrameDue ? thoughtMask & WorkbenchStreamPayload.TEXT_MASK : 0);
-    int reasonFlushMask =
-        (reasonMask & WorkbenchStreamPayload.FRAME_MASK)
-            | (textFrameDue ? reasonMask & WorkbenchStreamPayload.TEXT_MASK : 0);
+    long now = SystemClock.elapsedRealtime();
+    if (update.terminal) {
+      long visibleFor = now - visibleStreamSinceMs;
+      if (visibleStreamRoundId == update.roundId
+          && !visibleStreamKind.isEmpty()
+          && visibleFor < STREAM_STATE_MIN_VISIBLE_MS) {
+        scheduleStreamUiWakeup(STREAM_STATE_MIN_VISIBLE_MS - visibleFor);
+        return;
+      }
+      pendingStreamUiEvents.removeFirst();
+      if (visibleStreamRoundId == update.roundId) {
+        visibleStreamRoundId = 0;
+        visibleStreamKind = "";
+        visibleStreamSinceMs = 0L;
+      }
+      if (pendingFullItems != null) applyPendingFullItems();
+      else if (adapter != null) adapter.notifyDataSetChanged();
+      if (!pendingStreamUiEvents.isEmpty()) scheduleStreamUiFrame();
+      return;
+    }
+    boolean progressTransition = isProgressKind(update.kind);
+    boolean changingKind =
+        progressTransition
+            && visibleStreamRoundId == update.roundId
+            && !visibleStreamKind.isEmpty()
+            && !visibleStreamKind.equals(update.kind);
+    long visibleFor = now - visibleStreamSinceMs;
+    if (changingKind && visibleFor < STREAM_STATE_MIN_VISIBLE_MS) {
+      scheduleStreamUiWakeup(STREAM_STATE_MIN_VISIBLE_MS - visibleFor);
+      return;
+    }
+    int combinedMask = update.thoughtMask | update.reasonMask;
+    long textFrameGapNanos = frameTimeNanos - lastStreamTextFrameNanos;
+    if (!changingKind
+        && (combinedMask & WorkbenchStreamPayload.TEXT_MASK) != 0
+        && lastStreamTextFrameNanos != 0L
+        && textFrameGapNanos < STREAM_TEXT_FRAME_INTERVAL_NANOS) {
+      long waitNanos = STREAM_TEXT_FRAME_INTERVAL_NANOS - textFrameGapNanos;
+      scheduleStreamUiWakeup(Math.max(1L, (waitNanos + 999_999L) / 1_000_000L));
+      return;
+    }
 
-    if (thoughtFlushMask != 0) {
-      notifyWorkbenchItemChanged(pendingThoughtItem, thoughtFlushMask);
-      pendingThoughtMask &= ~thoughtFlushMask;
+    pendingStreamUiEvents.removeFirst();
+    if (progressTransition
+        && (visibleStreamRoundId != update.roundId || !visibleStreamKind.equals(update.kind))) {
+      visibleStreamRoundId = update.roundId;
+      visibleStreamKind = update.kind;
+      visibleStreamSinceMs = now;
     }
-    if (reasonFlushMask != 0) {
-      notifyWorkbenchItemChanged(pendingReasonItem, reasonFlushMask);
-      pendingReasonMask &= ~reasonFlushMask;
+    if (update.thoughtMask != WorkbenchStreamPayload.NONE) {
+      notifyWorkbenchItemChanged(
+          update.thoughtItem, update.thoughtMask, update.thoughtSnapshot);
     }
-    if (textFrameDue
-        && ((thoughtFlushMask | reasonFlushMask) & WorkbenchStreamPayload.TEXT_MASK) != 0) {
+    if (update.reasonMask != WorkbenchStreamPayload.NONE) {
+      notifyWorkbenchItemChanged(
+          update.reasonItem, update.reasonMask, update.reasonSnapshot);
+    }
+    if ((combinedMask & WorkbenchStreamPayload.TEXT_MASK) != 0) {
       lastStreamTextFrameNanos = frameTimeNanos;
     }
-
-    if (pendingStreamAutoScroll && (thoughtFlushMask != 0 || reasonFlushMask != 0)) {
-      pendingStreamAutoScroll = false;
-      scrollToBottom();
+    if (update.autoScroll) {
+      if (isNearBottom(true)) scrollToBottom();
+      else showNewUpdates();
     }
-    if (pendingThoughtMask == 0) pendingThoughtItem = null;
-    if (pendingReasonMask == 0) pendingReasonItem = null;
-    if (pendingThoughtMask != 0 || pendingReasonMask != 0) scheduleStreamUiFrame();
+    if (!pendingStreamUiEvents.isEmpty()) scheduleStreamUiFrame();
   }
 
-  private void notifyWorkbenchItemChanged(WorkbenchUiItem item, int mask) {
+  private void notifyWorkbenchItemChanged(
+      WorkbenchUiItem item, int mask, WorkbenchStreamUiSnapshot snapshot) {
     if (item == null || adapter == null || mask == 0) return;
     int position = adapter.getData().indexOf(item);
-    if (position >= 0) adapter.notifyItemChanged(position, new WorkbenchStreamPayload(mask));
+    if (position >= 0) {
+      adapter.notifyItemChanged(position, new WorkbenchStreamPayload(mask, snapshot));
+    }
   }
 
   private void clearPendingStreamUiUpdates() {
@@ -331,12 +407,119 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
       Choreographer.getInstance().removeFrameCallback(streamUiFrameCallback);
       streamUiFrameScheduled = false;
     }
-    pendingThoughtItem = null;
-    pendingThoughtMask = 0;
-    pendingReasonItem = null;
-    pendingReasonMask = 0;
-    pendingStreamAutoScroll = false;
+    uiHandler.removeCallbacks(streamUiWakeup);
+    stopStreamIdleTicker();
+    pendingStreamUiEvents.clear();
+    pendingFullItems = null;
+    pendingFullItemsShouldScroll = false;
+    visibleStreamRoundId = 0;
+    visibleStreamKind = "";
+    visibleStreamSinceMs = 0L;
     lastStreamTextFrameNanos = 0L;
+  }
+
+  private WorkbenchViewModel.StreamUiUpdate mergeStreamUiUpdates(
+      WorkbenchViewModel.StreamUiUpdate older,
+      WorkbenchViewModel.StreamUiUpdate newer) {
+    return new WorkbenchViewModel.StreamUiUpdate(
+        newer.roundId,
+        newer.sequence,
+        newer.kind,
+        newer.timestampMs,
+        newer.thoughtItem == null ? older.thoughtItem : newer.thoughtItem,
+        newer.thoughtSnapshot == null ? older.thoughtSnapshot : newer.thoughtSnapshot,
+        older.thoughtMask | newer.thoughtMask,
+        newer.reasonItem == null ? older.reasonItem : newer.reasonItem,
+        newer.reasonSnapshot == null ? older.reasonSnapshot : newer.reasonSnapshot,
+        older.reasonMask | newer.reasonMask,
+        older.autoScroll || newer.autoScroll,
+        older.validDelta || newer.validDelta,
+        false);
+  }
+
+  private void renderStreamIdleState() {
+    if (lastValidStreamUpdate == null) return;
+    long idleMs = SystemClock.elapsedRealtime() - lastValidStreamDeltaMs;
+    if (idleMs < STREAM_IDLE_THRESHOLD_MS) {
+      uiHandler.postDelayed(streamIdleTicker, STREAM_IDLE_THRESHOLD_MS - idleMs);
+      return;
+    }
+    WorkbenchStreamUiSnapshot reason = lastValidStreamUpdate.reasonSnapshot;
+    if (reason != null) {
+      long seconds = Math.max(10L, idleMs / 1000L);
+      WorkbenchViewModel.StreamUiUpdate waiting =
+          new WorkbenchViewModel.StreamUiUpdate(
+              lastValidStreamUpdate.roundId,
+              lastValidStreamUpdate.sequence,
+              "WAITING",
+              SystemClock.elapsedRealtime(),
+              null,
+              null,
+              WorkbenchStreamPayload.NONE,
+              lastValidStreamUpdate.reasonItem,
+              reason.withContent("模型仍在处理 · 已等待 " + seconds + " 秒"),
+              WorkbenchStreamPayload.CONTENT
+                  | WorkbenchStreamPayload.COUNTER
+                  | WorkbenchStreamPayload.AURA,
+              false,
+              false,
+              false);
+      enqueueStreamUiUpdate(waiting);
+    }
+    uiHandler.postDelayed(streamIdleTicker, 1000L);
+  }
+
+  static long streamIdleDelayMs(long nowMs, long lastDeltaMs) {
+    long elapsed = Math.max(0L, nowMs - Math.max(0L, lastDeltaMs));
+    return Math.max(0L, STREAM_IDLE_THRESHOLD_MS - elapsed);
+  }
+
+  private void stopStreamIdleTicker() {
+    uiHandler.removeCallbacks(streamIdleTicker);
+    lastValidStreamDeltaMs = 0L;
+    lastValidStreamUpdate = null;
+  }
+
+  private boolean isProgressKind(String kind) {
+    return "REASONING".equals(kind)
+        || "INPUT".equals(kind)
+        || "WRITE".equals(kind)
+        || "RECEIVE".equals(kind)
+        || "WAITING".equals(kind);
+  }
+
+  private boolean hasActiveStreamPresentation() {
+    return !pendingStreamUiEvents.isEmpty() || !visibleStreamKind.isEmpty();
+  }
+
+  private boolean streamTargetsPresentInAdapter() {
+    if (adapter == null) return false;
+    List<WorkbenchUiItem> data = adapter.getData();
+    for (WorkbenchViewModel.StreamUiUpdate update : pendingStreamUiEvents) {
+      if (update.thoughtItem != null && !data.contains(update.thoughtItem)) return false;
+      if (update.reasonItem != null && !data.contains(update.reasonItem)) return false;
+    }
+    return true;
+  }
+
+  private void scheduleStreamUiWakeup(long delayMs) {
+    uiHandler.removeCallbacks(streamUiWakeup);
+    uiHandler.postDelayed(streamUiWakeup, Math.max(1L, delayMs));
+  }
+
+  private void applyPendingFullItems() {
+    if (pendingFullItems == null) return;
+    List<WorkbenchUiItem> value = pendingFullItems;
+    boolean shouldScroll = pendingFullItemsShouldScroll;
+    pendingFullItems = null;
+    pendingFullItemsShouldScroll = false;
+    applyFullItems(value, shouldScroll);
+  }
+
+  private void applyFullItems(List<WorkbenchUiItem> value, boolean shouldScroll) {
+    adapter.setNewData(value == null ? new ArrayList<>() : value);
+    if (shouldScroll) scrollToBottom();
+    else if (value != null && !value.isEmpty()) showNewUpdates();
   }
 
   private void authorizeOpen(boolean maySubmitInitialDemand) {

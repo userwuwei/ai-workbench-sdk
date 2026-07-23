@@ -43,6 +43,7 @@ import okhttp3.Response;
 /** OpenAI-compatible streaming transport. No OkHttp type leaks into the public SDK API. */
 public final class OpenAIModelGateway implements ModelGateway {
   private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+  private static final long STREAM_GAP_LOG_THRESHOLD_MS = 1000L;
   private final OkHttpClient client;
   private final Gson gson = new Gson();
   private final Gson prettyGson = new GsonBuilder().setPrettyPrinting().create();
@@ -116,6 +117,15 @@ public final class OpenAIModelGateway implements ModelGateway {
                 throw new IOException("模型请求失败 HTTP " + response.code() + safeDetail(detail));
               }
               String contentType = response.header("Content-Type", "");
+              logStream(
+                  requestIndex,
+                  "headers",
+                  "elapsed_ms="
+                      + (System.currentTimeMillis() - startedAt)
+                      + ",http="
+                      + response.code()
+                      + ",content_type="
+                      + compactContentType(contentType));
               if (contentType.toLowerCase().contains("text/event-stream")) {
                 parseSse(
                     response,
@@ -209,6 +219,15 @@ public final class OpenAIModelGateway implements ModelGateway {
     StringBuilder reasoning = new StringBuilder();
     Map<Integer, ToolCallBuilder> callBuilders = new LinkedHashMap<>();
     String finishReason = "";
+    String loggedFinishReason = "";
+    long finishReasonAt = 0L;
+    long lastValidDeltaAt = 0L;
+    long contentChars = 0L;
+    long reasoningChars = 0L;
+    long toolArgumentChars = 0L;
+    boolean firstDeltaLogged = false;
+    boolean doneReceived = false;
+    int ignoredHeartbeatCount = 0;
     BufferedReader reader =
         new BufferedReader(
             new InputStreamReader(response.body().byteStream(), StandardCharsets.UTF_8));
@@ -217,9 +236,35 @@ public final class OpenAIModelGateway implements ModelGateway {
       if (!line.startsWith("data:")) continue;
       String data = line.substring(5).trim();
       if (data.isEmpty()) continue;
-      if ("[DONE]".equals(data)) break;
-      JsonElement parsed = JsonParser.parseString(data);
-      if (!parsed.isJsonObject()) continue;
+      if ("[DONE]".equals(data)) {
+        doneReceived = true;
+        long now = System.currentTimeMillis();
+        logStream(
+            requestIndex,
+            "done",
+            "elapsed_ms="
+                + (now - startedAt)
+                + ",finish_to_done_ms="
+                + (finishReasonAt == 0L ? -1L : now - finishReasonAt)
+                + ",last_delta_to_done_ms="
+                + (lastValidDeltaAt == 0L ? -1L : now - lastValidDeltaAt)
+                + ",ignored_heartbeat_count="
+                + ignoredHeartbeatCount);
+        break;
+      }
+      JsonElement parsed;
+      try {
+        parsed = JsonParser.parseString(data);
+      } catch (RuntimeException ignored) {
+        // Some compatible gateways send non-JSON data heartbeats. They are transport liveness,
+        // not model progress, and must neither reset UI idle time nor fail the request.
+        ignoredHeartbeatCount++;
+        continue;
+      }
+      if (!parsed.isJsonObject()) {
+        ignoredHeartbeatCount++;
+        continue;
+      }
       JsonArray choices = parsed.getAsJsonObject().getAsJsonArray("choices");
       if (choices == null || choices.size() == 0) continue;
       JsonObject choice = choices.get(0).getAsJsonObject();
@@ -259,7 +304,63 @@ public final class OpenAIModelGateway implements ModelGateway {
       }
       ModelStreamDelta streamDelta =
           new ModelStreamDelta(contentDelta, reasoningDelta, streamCalls);
-      if (!streamDelta.isEmpty()) observer.onStreamDelta(streamDelta);
+      if (!streamDelta.isEmpty()) {
+        long now = System.currentTimeMillis();
+        contentChars += contentDelta.length();
+        reasoningChars += reasoningDelta.length();
+        for (ToolCallStreamDelta call : streamCalls) {
+          toolArgumentChars += call.arguments().length();
+        }
+        String detail =
+            "type="
+                + streamDeltaType(streamDelta)
+                + ",content_chars="
+                + contentChars
+                + ",reasoning_chars="
+                + reasoningChars
+                + ",tool_arg_chars="
+                + toolArgumentChars;
+        if (!firstDeltaLogged) {
+          firstDeltaLogged = true;
+          logStream(
+              requestIndex, "first_delta", "elapsed_ms=" + (now - startedAt) + "," + detail);
+        } else if (lastValidDeltaAt > 0L
+            && now - lastValidDeltaAt >= STREAM_GAP_LOG_THRESHOLD_MS) {
+          logStream(
+              requestIndex,
+              "delta_gap",
+              "gap_ms=" + (now - lastValidDeltaAt) + "," + detail);
+        }
+        lastValidDeltaAt = now;
+        observer.onStreamDelta(streamDelta);
+      }
+      if (!finishReason.isEmpty() && !finishReason.equals(loggedFinishReason)) {
+        loggedFinishReason = finishReason;
+        finishReasonAt = System.currentTimeMillis();
+        logStream(
+            requestIndex,
+            "finish_reason",
+            "value="
+                + compactLogValue(finishReason)
+                + ",elapsed_ms="
+                + (finishReasonAt - startedAt)
+                + ",last_delta_to_finish_ms="
+                + (lastValidDeltaAt == 0L ? -1L : finishReasonAt - lastValidDeltaAt));
+      }
+    }
+    if (!doneReceived) {
+      long now = System.currentTimeMillis();
+      logStream(
+          requestIndex,
+          "eof",
+          "elapsed_ms="
+              + (now - startedAt)
+              + ",finish_to_eof_ms="
+              + (finishReasonAt == 0L ? -1L : now - finishReasonAt)
+              + ",last_delta_to_eof_ms="
+              + (lastValidDeltaAt == 0L ? -1L : now - lastValidDeltaAt)
+              + ",ignored_heartbeat_count="
+              + ignoredHeartbeatCount);
     }
     if (terminal.compareAndSet(false, true)) {
       List<AgentToolCall> calls = buildCalls(callBuilders);
@@ -388,6 +489,46 @@ public final class OpenAIModelGateway implements ModelGateway {
             + type
             + "] message="
             + message);
+  }
+
+  private void logStream(int requestIndex, String event, String detail) {
+    log(
+        "model_stream",
+        "[模型流][request="
+            + requestIndex
+            + "][event="
+            + event
+            + "]"
+            + (blank(detail) ? "" : " " + detail));
+  }
+
+  private static String streamDeltaType(ModelStreamDelta delta) {
+    int types = 0;
+    String value = "";
+    if (delta != null && !delta.reasoning().isEmpty()) {
+      types++;
+      value = "reasoning";
+    }
+    if (delta != null && !delta.content().isEmpty()) {
+      types++;
+      value = "content";
+    }
+    if (delta != null && !delta.toolCalls().isEmpty()) {
+      types++;
+      value = "tool_args";
+    }
+    return types > 1 ? "mixed" : value.isEmpty() ? "empty" : value;
+  }
+
+  private static String compactContentType(String contentType) {
+    if (contentType == null) return "";
+    int separator = contentType.indexOf(';');
+    return (separator < 0 ? contentType : contentType.substring(0, separator)).trim();
+  }
+
+  private static String compactLogValue(String value) {
+    String safe = value == null ? "" : value.replace('\n', ' ').replace('\r', ' ').trim();
+    return safe.length() <= 64 ? safe : safe.substring(0, 64);
   }
 
   private synchronized void logRequest(

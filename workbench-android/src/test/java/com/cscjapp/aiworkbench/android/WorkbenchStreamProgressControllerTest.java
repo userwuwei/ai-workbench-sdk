@@ -32,6 +32,87 @@ public final class WorkbenchStreamProgressControllerTest {
   }
 
   @Test
+  public void classificationUsesCurrentDeltaWhileCountersRemainAccumulated() {
+    WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
+
+    WorkbenchStreamProgressController.Snapshot input =
+        controller.append(ModelStreamDelta.text("hello", ""), true);
+    WorkbenchStreamProgressController.Snapshot reasoning =
+        controller.append(ModelStreamDelta.text("", "think"), true);
+    WorkbenchStreamProgressController.Snapshot moreInput =
+        controller.append(ModelStreamDelta.text("!", ""), true);
+
+    assertEquals(WorkbenchStreamProgressController.Kind.INPUT, input.kind);
+    assertEquals(5L, input.value);
+    assertEquals(WorkbenchStreamProgressController.Kind.REASONING, reasoning.kind);
+    assertEquals("已思考", reasoning.label);
+    assertEquals(5L, reasoning.value);
+    assertEquals(WorkbenchStreamProgressController.Kind.INPUT, moreInput.kind);
+    assertEquals(6L, moreInput.value);
+  }
+
+  @Test
+  public void completedToolDeltaDoesNotPinLaterTextOrReasoningState() {
+    WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
+
+    WorkbenchStreamProgressController.Snapshot received =
+        controller.append(
+            delta(
+                new ToolCallStreamDelta(
+                    0, "call_4", "syntax_check", "{\"path\":\"a.html\"}")),
+            true);
+    WorkbenchStreamProgressController.Snapshot input =
+        controller.append(ModelStreamDelta.text("继续说明", ""), true);
+    WorkbenchStreamProgressController.Snapshot reasoning =
+        controller.append(ModelStreamDelta.text("", "继续思考"), true);
+
+    assertEquals(WorkbenchStreamProgressController.Kind.RECEIVE, received.kind);
+    assertEquals(WorkbenchStreamProgressController.Kind.INPUT, input.kind);
+    assertEquals("已输入", input.label);
+    assertEquals(WorkbenchStreamProgressController.Kind.REASONING, reasoning.kind);
+    assertEquals("已思考", reasoning.label);
+
+    WorkbenchStreamProgressController.Snapshot empty =
+        controller.append(ModelStreamDelta.text("", ""), true);
+    assertEquals(WorkbenchStreamProgressController.Kind.NONE, empty.kind);
+  }
+
+  @Test
+  public void completedWriteDeltaDoesNotPinLaterReasoningState() {
+    WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
+
+    WorkbenchStreamProgressController.Snapshot write =
+        controller.append(
+            delta(
+                new ToolCallStreamDelta(
+                    0, "call_5", "rewrite", "{\"path\":\"a.js\",\"content\":\"x\"}")),
+            true);
+    WorkbenchStreamProgressController.Snapshot reasoning =
+        controller.append(ModelStreamDelta.text("", "核对结果"), true);
+
+    assertEquals(WorkbenchStreamProgressController.Kind.WRITE, write.kind);
+    assertEquals(WorkbenchStreamProgressController.Kind.REASONING, reasoning.kind);
+    assertEquals("已思考", reasoning.label);
+  }
+
+  @Test
+  public void mixedDeltaKeepsToolCallPriority() {
+    WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
+    ModelStreamDelta mixed =
+        new ModelStreamDelta(
+            "说明",
+            "思考",
+            Collections.singletonList(
+                new ToolCallStreamDelta(
+                    0, "call_6", "create_file", "{\"path\":\"new.html\"}")));
+
+    WorkbenchStreamProgressController.Snapshot snapshot = controller.append(mixed, true);
+
+    assertEquals(WorkbenchStreamProgressController.Kind.WRITE, snapshot.kind);
+    assertEquals("已写入", snapshot.label);
+  }
+
+  @Test
   public void assemblesFragmentedNativeWriteCallAndUsesArgumentsLength() {
     WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
     controller.append(
@@ -51,6 +132,23 @@ public final class WorkbenchStreamProgressControllerTest {
     assertEquals("接收中", snapshot.runningVerb);
     assertTrue(snapshot.toolCallVisible);
     assertFalse(snapshot.autoScroll);
+  }
+
+  @Test
+  public void fragmentedToolNameCanTransitionFromReceivedToWriteState() {
+    WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
+
+    WorkbenchStreamProgressController.Snapshot received =
+        controller.append(
+            delta(new ToolCallStreamDelta(0, "call_3", "search_", "{\"path\":")), true);
+    WorkbenchStreamProgressController.Snapshot write =
+        controller.append(
+            delta(new ToolCallStreamDelta(0, "", "replace", "\"a.html\"}")), true);
+
+    assertEquals(WorkbenchStreamProgressController.Kind.RECEIVE, received.kind);
+    assertEquals("已接收", received.label);
+    assertEquals(WorkbenchStreamProgressController.Kind.WRITE, write.kind);
+    assertEquals("已写入", write.label);
   }
 
   @Test
@@ -94,6 +192,24 @@ public final class WorkbenchStreamProgressControllerTest {
             false);
     assertEquals(WorkbenchStreamProgressController.Kind.WRITE, replace.kind);
     assertEquals(5L, replace.value);
+  }
+
+  @Test
+  public void completedLegacyWriteDoesNotPinLaterNarrativeContent() {
+    WorkbenchStreamProgressController controller = new WorkbenchStreamProgressController();
+    WorkbenchStreamProgressController.Snapshot write =
+        controller.append(
+            ModelStreamDelta.text(
+                "{\"next_action\":{\"tool\":\"rewrite\",\"args\":{"
+                    + "\"path\":\"a.js\",\"content\":\"x\"}}}",
+                ""),
+            false);
+    WorkbenchStreamProgressController.Snapshot narrative =
+        controller.append(ModelStreamDelta.text("修改完成，准备验证。", ""), false);
+
+    assertEquals(WorkbenchStreamProgressController.Kind.WRITE, write.kind);
+    assertEquals(WorkbenchStreamProgressController.Kind.INPUT, narrative.kind);
+    assertEquals("已输入", narrative.label);
   }
 
   @Test

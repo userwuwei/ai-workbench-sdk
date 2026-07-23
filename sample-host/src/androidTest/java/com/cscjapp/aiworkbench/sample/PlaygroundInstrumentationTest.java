@@ -142,10 +142,12 @@ public final class PlaygroundInstrumentationTest {
     PlaygroundHost host = new PlaygroundHost(runtime);
     try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
       scenario.onActivity(activity -> activity.findViewById(R.id.buttonSettings).performClick());
+      // Keep the dashboard task alive until its child Activity has reached RESUMED. Closing the
+      // scenario immediately after the click can finish the whole task on some OEM systems.
+      ModelSettingsActivity settings = waitFor(ModelSettingsActivity.class);
+      assertNotNull(settings);
+      InstrumentationRegistry.getInstrumentation().runOnMainSync(settings::finish);
     }
-    ModelSettingsActivity settings = waitFor(ModelSettingsActivity.class);
-    assertNotNull(settings);
-    InstrumentationRegistry.getInstrumentation().runOnMainSync(settings::finish);
 
     host.openArtifact("README.md");
     ArtifactPreviewActivity preview = waitFor(ArtifactPreviewActivity.class);

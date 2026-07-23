@@ -45,12 +45,38 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
       AgentRunContext context, ToolInvocation invocation, ToolResult result) {
     if (context == null
         || context.runId() != activeRunId
-        || result == null
-        || !result.isSuccess()
-        || role(invocation) != CodeToolRole.READ) {
+        || result == null) {
       return;
     }
-    collectResultPaths(result.data(), readPaths);
+    CodeToolRole completedRole = role(invocation);
+    if (completedRole == CodeToolRole.READ && result.isSuccess()) {
+      collectResultPaths(result.data(), readPaths);
+    } else if ((completedRole == CodeToolRole.CREATE || completedRole == CodeToolRole.EDIT)
+        && writeMayHaveChanged(result)) {
+      Set<String> changedPaths = new LinkedHashSet<>();
+      collectWritePaths(invocation, result.data(), changedPaths);
+      readPaths.removeAll(changedPaths);
+    }
+  }
+
+  private static boolean writeMayHaveChanged(ToolResult result) {
+    Map<String, Object> data = result.data();
+    if (Boolean.TRUE.equals(data.get("changed"))
+        || Boolean.TRUE.equals(data.get("current_file_changed"))
+        || Boolean.TRUE.equals(data.get("created"))
+        || Boolean.TRUE.equals(data.get("overwritten"))
+        || Boolean.TRUE.equals(data.get("partial_apply"))
+        || positive(data.get("applied_count"))) return true;
+    return result.isSuccess() && !Boolean.FALSE.equals(data.get("changed"));
+  }
+
+  private static boolean positive(Object value) {
+    if (value instanceof Number) return ((Number) value).longValue() > 0L;
+    try {
+      return Long.parseLong(String.valueOf(value)) > 0L;
+    } catch (Exception ignored) {
+      return false;
+    }
   }
 
   @Override
@@ -142,6 +168,14 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
         addResultPath((Map<?, ?>) result, "path", output);
       }
     }
+  }
+
+  private void collectWritePaths(
+      ToolInvocation invocation, Map<String, Object> data, Set<String> output) {
+    Object resolved = data == null ? null : data.get("resolved_path");
+    if (resolved == null && data != null) resolved = data.get("path");
+    if (resolved == null && invocation != null) resolved = invocation.arguments().get("path");
+    if (resolved != null) add(String.valueOf(resolved), output);
   }
 
   private void addResultPath(Map<?, ?> result, String key, Set<String> output) {

@@ -108,6 +108,7 @@ final class CodeMetaToolSchemas {
     properties.put("phase", enumeration("步骤阶段。", "discover", "implement", "verify", "quality"));
     properties.put("required_tools", limitedStringArray("完成步骤需要的真实工具。", 4, 64));
     properties.put("acceptance", limitedStringArray("步骤验收条件。", 2, 120));
+    properties.put("file_refs", limitedStringArray("关联 planned_files 的 file_id 或路径。", 8, 300));
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", "array");
     schema.put("description", "复杂任务的 3 至 5 个核心步骤。");

@@ -73,23 +73,81 @@ final class WorkbenchViewModel extends ViewModel {
   }
 
   static final class StreamUiUpdate {
+    final int roundId;
+    final long sequence;
+    final String kind;
+    final long timestampMs;
     final WorkbenchUiItem thoughtItem;
+    final WorkbenchStreamUiSnapshot thoughtSnapshot;
     final int thoughtMask;
     final WorkbenchUiItem reasonItem;
+    final WorkbenchStreamUiSnapshot reasonSnapshot;
     final int reasonMask;
     final boolean autoScroll;
+    final boolean validDelta;
+    final boolean terminal;
 
     StreamUiUpdate(
+        int roundId,
+        long sequence,
+        String kind,
+        long timestampMs,
         WorkbenchUiItem thoughtItem,
+        WorkbenchStreamUiSnapshot thoughtSnapshot,
         int thoughtMask,
         WorkbenchUiItem reasonItem,
+        WorkbenchStreamUiSnapshot reasonSnapshot,
         int reasonMask,
-        boolean autoScroll) {
+        boolean autoScroll,
+        boolean validDelta,
+        boolean terminal) {
+      this.roundId = roundId;
+      this.sequence = sequence;
+      this.kind = kind == null ? "NONE" : kind;
+      this.timestampMs = Math.max(0L, timestampMs);
       this.thoughtItem = thoughtItem;
+      this.thoughtSnapshot = thoughtSnapshot;
       this.thoughtMask = thoughtMask;
       this.reasonItem = reasonItem;
+      this.reasonSnapshot = reasonSnapshot;
       this.reasonMask = reasonMask;
       this.autoScroll = autoScroll;
+      this.validDelta = validDelta;
+      this.terminal = terminal;
+    }
+
+    static StreamUiUpdate terminal(int roundId, long sequence) {
+      return new StreamUiUpdate(
+          roundId,
+          sequence,
+          "TERMINAL",
+          SystemClock.elapsedRealtime(),
+          null,
+          null,
+          WorkbenchStreamPayload.NONE,
+          null,
+          null,
+          WorkbenchStreamPayload.NONE,
+          false,
+          false,
+          true);
+    }
+
+    StreamUiUpdate mergeSameKind(StreamUiUpdate newer) {
+      return new StreamUiUpdate(
+          newer.roundId,
+          newer.sequence,
+          newer.kind,
+          newer.timestampMs,
+          newer.thoughtItem == null ? thoughtItem : newer.thoughtItem,
+          newer.thoughtSnapshot == null ? thoughtSnapshot : newer.thoughtSnapshot,
+          thoughtMask | newer.thoughtMask,
+          newer.reasonItem == null ? reasonItem : newer.reasonItem,
+          newer.reasonSnapshot == null ? reasonSnapshot : newer.reasonSnapshot,
+          reasonMask | newer.reasonMask,
+          autoScroll || newer.autoScroll,
+          validDelta || newer.validDelta,
+          false);
     }
   }
 
@@ -103,6 +161,7 @@ final class WorkbenchViewModel extends ViewModel {
       new MutableLiveData<>(ToolRunningState.hidden());
   private final MutableLiveData<ContextUsageState> contextUsage = new MutableLiveData<>();
   private final MutableLiveData<StreamUiUpdate> streamUiUpdates = new MutableLiveData<>();
+  private final WorkbenchStreamUiMailbox streamUiMailbox = new WorkbenchStreamUiMailbox();
   final DecisionBroker decisions = new DecisionBroker();
 
   private final ExecutorService executor = Executors.newSingleThreadExecutor();
@@ -128,12 +187,14 @@ final class WorkbenchViewModel extends ViewModel {
   private boolean initialSubmitted;
   private boolean restoredSession;
   private int modelRoundIndex;
+  private int streamRunGeneration;
   private WorkbenchUiItem currentThought;
   private WorkbenchUiItem currentReason;
   private WorkbenchUiItem currentSummary;
   private WorkbenchUiItem currentPlan;
   private boolean managedPlanActive;
   private ToolRunningState currentToolRunningState = ToolRunningState.hidden();
+  private long streamUiSequence;
 
   LiveData<List<WorkbenchUiItem>> items() {
     return items;
@@ -161,6 +222,10 @@ final class WorkbenchViewModel extends ViewModel {
 
   LiveData<StreamUiUpdate> streamUiUpdates() {
     return streamUiUpdates;
+  }
+
+  synchronized List<StreamUiUpdate> drainStreamUiUpdates() {
+    return streamUiMailbox.drain();
   }
 
   synchronized void initialize(
@@ -231,6 +296,7 @@ final class WorkbenchViewModel extends ViewModel {
     currentReason = null;
     currentSummary = null;
     modelRoundIndex = 0;
+    streamRunGeneration++;
     engine.submit(demand.trim(), observer());
   }
 
@@ -250,12 +316,18 @@ final class WorkbenchViewModel extends ViewModel {
             : "正在思考中");
     for (int i = 0; i < nextDots; i++) animated.append('.');
     currentThought.content = animated.toString();
-    postStreamUiUpdate(WorkbenchStreamPayload.THOUGHT, WorkbenchStreamPayload.NONE, false);
+    postStreamUiUpdate(
+        WorkbenchStreamProgressController.Kind.NONE,
+        WorkbenchStreamPayload.THOUGHT,
+        WorkbenchStreamPayload.NONE,
+        false,
+        false);
     return true;
   }
 
   synchronized void cancel() {
     if (engine != null) engine.cancel();
+    postStreamTerminalUpdate();
     if (Boolean.TRUE.equals(running.getValue())) {
       if (currentReason != null) {
         currentReason.title = roundTitle("已停止");
@@ -288,6 +360,7 @@ final class WorkbenchViewModel extends ViewModel {
     planStepStates.clear();
     planMetadata.clear();
     streamProgress.reset();
+    clearStreamUiEvents();
     currentThought = null;
     currentReason = null;
     currentSummary = null;
@@ -328,6 +401,7 @@ final class WorkbenchViewModel extends ViewModel {
             beginRound();
             refreshContextUsage();
           } else if ("validating".equals(value)) {
+            postStreamTerminalUpdate();
             showToolRunning("验证任务结果", "审核中");
             if (currentReason != null) {
               clearReasonStreamingState();
@@ -337,6 +411,7 @@ final class WorkbenchViewModel extends ViewModel {
               postItems(false);
             }
           } else if ("completed".equals(value) || "cancelled".equals(value)) {
+            postStreamTerminalUpdate();
             hideToolRunning();
             if (currentReason != null) {
               clearReasonStreamingState();
@@ -366,6 +441,7 @@ final class WorkbenchViewModel extends ViewModel {
       public void onToolStarted(String callId, String name, ToolArguments arguments) {
         synchronized (WorkbenchViewModel.this) {
           ensureRound();
+          postStreamTerminalUpdate();
           toolArguments.put(callId, arguments == null ? ToolArguments.empty() : arguments);
           markThoughtCompleted();
           currentReason.title = roundTitle("工具结果");
@@ -460,6 +536,7 @@ final class WorkbenchViewModel extends ViewModel {
       @Override
       public void onFinal(String finalContent) {
         synchronized (WorkbenchViewModel.this) {
+          postStreamTerminalUpdate();
           hideToolRunning();
           running.postValue(false);
           markThoughtCompleted();
@@ -479,6 +556,7 @@ final class WorkbenchViewModel extends ViewModel {
       @Override
       public void onError(Throwable error) {
         synchronized (WorkbenchViewModel.this) {
+          postStreamTerminalUpdate();
           hideToolRunning();
           running.postValue(false);
           markThoughtCompleted();
@@ -532,7 +610,12 @@ final class WorkbenchViewModel extends ViewModel {
     }
     if (snapshot.kind == WorkbenchStreamProgressController.Kind.NONE) {
       if (thoughtMask != WorkbenchStreamPayload.NONE) {
-        postStreamUiUpdate(thoughtMask, WorkbenchStreamPayload.NONE, false);
+        postStreamUiUpdate(
+            snapshot.kind,
+            thoughtMask,
+            WorkbenchStreamPayload.NONE,
+            false,
+            !delta.isEmpty());
       }
       return;
     }
@@ -572,7 +655,8 @@ final class WorkbenchViewModel extends ViewModel {
     if (activateReasonAura(currentReason)) reasonMask |= WorkbenchStreamPayload.AURA;
     showToolRunning(snapshot.runningName, snapshot.runningVerb);
     if (thoughtMask != WorkbenchStreamPayload.NONE || reasonMask != WorkbenchStreamPayload.NONE) {
-      postStreamUiUpdate(thoughtMask, reasonMask, snapshot.autoScroll);
+      postStreamUiUpdate(
+          snapshot.kind, thoughtMask, reasonMask, snapshot.autoScroll, !delta.isEmpty());
     }
   }
 
@@ -589,25 +673,56 @@ final class WorkbenchViewModel extends ViewModel {
     currentReason.content = content == null ? "" : content;
   }
 
-  private void postStreamUiUpdate(int thoughtMask, int reasonMask, boolean autoScroll) {
-    // LiveData may coalesce background postValue calls. Every retained stream event therefore
-    // carries the complete current text/counter payload, while aura remains transition-only.
-    if (thoughtMask != WorkbenchStreamPayload.NONE) {
-      thoughtMask |= WorkbenchStreamPayload.TITLE | WorkbenchStreamPayload.THOUGHT;
-    }
-    if (reasonMask != WorkbenchStreamPayload.NONE) {
-      reasonMask |=
-          WorkbenchStreamPayload.TITLE
-              | WorkbenchStreamPayload.CONTENT
-              | WorkbenchStreamPayload.COUNTER;
-    }
-    streamUiUpdates.postValue(
+  private void postStreamUiUpdate(
+      WorkbenchStreamProgressController.Kind kind,
+      int thoughtMask,
+      int reasonMask,
+      boolean autoScroll,
+      boolean validDelta) {
+    StreamUiUpdate update =
         new StreamUiUpdate(
+            streamPresentationRoundId(),
+            ++streamUiSequence,
+            kind == null ? WorkbenchStreamProgressController.Kind.NONE.name() : kind.name(),
+            SystemClock.elapsedRealtime(),
             thoughtMask == WorkbenchStreamPayload.NONE ? null : currentThought,
+            thoughtMask == WorkbenchStreamPayload.NONE
+                ? null
+                : WorkbenchStreamUiSnapshot.capture(currentThought),
             thoughtMask,
             reasonMask == WorkbenchStreamPayload.NONE ? null : currentReason,
+            reasonMask == WorkbenchStreamPayload.NONE
+                ? null
+                : WorkbenchStreamUiSnapshot.capture(currentReason),
             reasonMask,
-            autoScroll));
+            autoScroll,
+            validDelta,
+            false);
+    enqueueStreamUiEvent(update);
+    // LiveData postValue may coalesce signals, but the immutable mailbox above retains every
+    // state transition and is drained by the Activity on each delivered signal.
+    streamUiUpdates.postValue(update);
+  }
+
+  private void postStreamTerminalUpdate() {
+    if (modelRoundIndex <= 0) return;
+    StreamUiUpdate update =
+        StreamUiUpdate.terminal(streamPresentationRoundId(), ++streamUiSequence);
+    enqueueStreamUiEvent(update);
+    streamUiUpdates.postValue(update);
+  }
+
+  private void enqueueStreamUiEvent(StreamUiUpdate update) {
+    streamUiMailbox.offer(update);
+  }
+
+  private void clearStreamUiEvents() {
+    streamUiMailbox.clear();
+    streamUiUpdates.postValue(null);
+  }
+
+  private int streamPresentationRoundId() {
+    return (streamRunGeneration << 16) ^ (modelRoundIndex & 0xFFFF);
   }
 
   private void beginRound() {

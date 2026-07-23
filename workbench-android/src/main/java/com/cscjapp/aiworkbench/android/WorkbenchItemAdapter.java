@@ -32,6 +32,8 @@ import java.util.List;
 
 final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiItem, BaseViewHolder> {
 
+    private static final Object PAYLOAD_CODE_AREA_LOCK = new Object();
+
     public static final int TYPE_PLAN = 1;
     public static final int TYPE_THOUGHT = 2;
     public static final int TYPE_SUMMARY = 3;
@@ -135,10 +137,27 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
                                  int position,
                                  @NonNull List<Object> payloads) {
         int mask = WorkbenchStreamPayload.NONE;
+        WorkbenchStreamUiSnapshot snapshot = null;
+        boolean codeAreaLockChanged = false;
         for (Object payload : payloads) {
-            if (payload instanceof WorkbenchStreamPayload) {
-                mask |= ((WorkbenchStreamPayload) payload).mask;
+            if (payload == PAYLOAD_CODE_AREA_LOCK) {
+                codeAreaLockChanged = true;
+                continue;
             }
+            if (payload instanceof WorkbenchStreamPayload) {
+                WorkbenchStreamPayload streamPayload = (WorkbenchStreamPayload) payload;
+                mask |= streamPayload.mask;
+                if (streamPayload.snapshot != null) {
+                    snapshot = streamPayload.snapshot;
+                }
+            }
+        }
+        if (codeAreaLockChanged
+                && position >= 0
+                && position < getData().size()
+                && getData().get(position).type == TYPE_THOUGHT) {
+            bindCodeAreaInteraction(holder.getView(R.id.aiw_tvCodeArea));
+            if (mask == WorkbenchStreamPayload.NONE) return;
         }
         if (mask == WorkbenchStreamPayload.NONE
                 || position < 0
@@ -148,11 +167,11 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         }
         WorkbenchUiItem item = getData().get(position);
         if (item.type == TYPE_THOUGHT) {
-            bindThoughtPayload(holder, item, mask);
+            bindThoughtPayload(holder, item, mask, snapshot);
             return;
         }
         if (item.type == TYPE_REASON) {
-            bindReasonPayload(holder, item, mask);
+            bindReasonPayload(holder, item, mask, snapshot);
             return;
         }
         super.onBindViewHolder(holder, position, payloads);
@@ -494,6 +513,20 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         tvCodeArea.setTypeface(Typeface.MONOSPACE);
         tvCodeArea.setText(sanitizeWorkbenchText(resolvedCodeBlock));
         tvCodeArea.setMovementMethod(new ScrollingMovementMethod());
+        bindCodeAreaInteraction(tvCodeArea);
+        tvCodeArea.setVisibility(item.codeExpanded ? View.VISIBLE : View.GONE);
+        if (item.codeExpanded && !TextUtils.isEmpty(resolvedCodeBlock)) {
+            tvCodeArea.post(() -> {
+                if (tvCodeArea.getLayout() == null) {
+                    return;
+                }
+                int scrollAmount = tvCodeArea.getLayout().getLineTop(tvCodeArea.getLineCount()) - tvCodeArea.getHeight();
+                tvCodeArea.scrollTo(0, Math.max(scrollAmount, 0));
+            });
+        }
+    }
+
+    private void bindCodeAreaInteraction(TextView tvCodeArea) {
         tvCodeArea.setEnabled(!codeAreaLocked);
         tvCodeArea.setOnTouchListener((v, event) -> {
             if (codeAreaLocked) {
@@ -508,54 +541,54 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
             }
             return false;
         });
-        tvCodeArea.setVisibility(item.codeExpanded ? View.VISIBLE : View.GONE);
-        if (item.codeExpanded && !TextUtils.isEmpty(resolvedCodeBlock)) {
-            tvCodeArea.post(() -> {
-                if (tvCodeArea.getLayout() == null) {
-                    return;
-                }
-                int scrollAmount = tvCodeArea.getLayout().getLineTop(tvCodeArea.getLineCount()) - tvCodeArea.getHeight();
-                tvCodeArea.scrollTo(0, Math.max(scrollAmount, 0));
-            });
-        }
     }
 
-    private void bindThoughtPayload(BaseViewHolder helper, WorkbenchUiItem item, int mask) {
+    private void bindThoughtPayload(
+            BaseViewHolder helper,
+      WorkbenchUiItem item,
+      int mask,
+      WorkbenchStreamUiSnapshot snapshot) {
+        if (snapshot == null) snapshot = WorkbenchStreamUiSnapshot.capture(item);
         if ((mask & (WorkbenchStreamPayload.TITLE | WorkbenchStreamPayload.THOUGHT)) != 0) {
             TextView title = helper.getView(R.id.aiw_tvThoughtTitle);
-            boolean trivial = isTrivialCompletedThought(item);
+            boolean trivial = isTrivialCompletedThought(snapshot.content);
             title.setText(trivial
-                    ? displayCompletedThoughtTitle(item.title)
-                    : item.thoughtContentExpanded ? item.title + " · 收起" : item.title + " · 展开");
+                    ? displayCompletedThoughtTitle(snapshot.title)
+                    : snapshot.thoughtContentExpanded
+                            ? snapshot.title + " · 收起"
+                            : snapshot.title + " · 展开");
             title.setTextColor(Color.parseColor(trivial ? "#7F8EA8" : "#AAB9D4"));
         }
         if ((mask & WorkbenchStreamPayload.THOUGHT) == 0) {
             return;
         }
-        boolean trivial = isTrivialCompletedThought(item);
-        boolean hasCode = !TextUtils.isEmpty(item.codeBlock);
-        boolean hideBody = trivial && (!hasCode || !item.codeExpanded);
+        boolean trivial = isTrivialCompletedThought(snapshot.content);
+        boolean hasCode = !TextUtils.isEmpty(snapshot.codeBlock);
+        boolean hideBody = trivial && (!hasCode || !snapshot.codeExpanded);
         helper.getView(R.id.aiw_cardThoughtBody).setVisibility(hideBody ? View.GONE : View.VISIBLE);
         TextView codeToggle = helper.getView(R.id.aiw_tvThoughtCodeToggle);
         codeToggle.setVisibility(hasCode ? View.VISIBLE : View.GONE);
-        codeToggle.setText(item.codeExpanded ? "收起深度思考" : "查看深度思考");
+        codeToggle.setText(snapshot.codeExpanded ? "收起深度思考" : "查看深度思考");
         if (hideBody) {
             return;
         }
         TextView content = helper.getView(R.id.aiw_tvThoughtContent);
-        content.setText(sanitizeWorkbenchText(item.content));
+        content.setText(sanitizeWorkbenchText(snapshot.content));
         content.setVisibility(trivial ? View.GONE : View.VISIBLE);
         TextView code = helper.getView(R.id.aiw_tvCodeArea);
-        code.setText(sanitizeWorkbenchText(item.codeBlock));
-        code.setVisibility(item.codeExpanded ? View.VISIBLE : View.GONE);
+        code.setText(sanitizeWorkbenchText(snapshot.codeBlock));
+        code.setVisibility(snapshot.codeExpanded ? View.VISIBLE : View.GONE);
     }
 
     private boolean isTrivialCompletedThought(WorkbenchUiItem item) {
         if (item == null) {
             return false;
         }
-        String content = sanitizeWorkbenchText(item.content).trim();
-        return "本轮思考完成".equals(content);
+        return isTrivialCompletedThought(item.content);
+    }
+
+    private boolean isTrivialCompletedThought(String value) {
+        return "本轮思考完成".equals(sanitizeWorkbenchText(value).trim());
     }
 
     private String displayCompletedThoughtTitle(String title) {
@@ -607,22 +640,73 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
         tvDetail.setVisibility(hasDetail && item.detailExpanded ? View.VISIBLE : View.GONE);
     }
 
-    private void bindReasonPayload(BaseViewHolder helper, WorkbenchUiItem item, int mask) {
+    private void bindReasonPayload(
+            BaseViewHolder helper,
+      WorkbenchUiItem item,
+      int mask,
+      WorkbenchStreamUiSnapshot snapshot) {
+        if (snapshot == null) snapshot = WorkbenchStreamUiSnapshot.capture(item);
         if ((mask & WorkbenchStreamPayload.TITLE) != 0) {
-            helper.setText(R.id.aiw_tvSummaryTitle, displaySummaryTitle(item.title));
+            helper.setText(R.id.aiw_tvSummaryTitle, displaySummaryTitle(snapshot.title));
         }
         if ((mask & WorkbenchStreamPayload.CONTENT) != 0) {
-            bindSummaryContent(helper, item, true);
+            bindSummaryContentSnapshot(helper, snapshot);
         }
         if ((mask & WorkbenchStreamPayload.COUNTER) != 0) {
             bindReasonCounter(
                     helper.getView(R.id.aiw_tvSummaryMeta),
                     helper.getView(R.id.aiw_anvSummaryCounter),
-                    item);
+                    snapshot);
         }
         if ((mask & WorkbenchStreamPayload.AURA) != 0) {
-            bindWaitingEffect(helper, item);
+            bindWaitingEffect(helper, snapshot.auraActive, snapshot.auraStartedAtMs);
         }
+    }
+
+    private void bindSummaryContentSnapshot(
+            BaseViewHolder helper, WorkbenchStreamUiSnapshot snapshot) {
+        TextView contentView = helper.getView(R.id.aiw_tvSummaryContent);
+        TextView toggleView = helper.getView(R.id.aiw_tvSummaryContentToggle);
+        String safeContent = sanitizeWorkbenchText(snapshot.content);
+        String displayContent = safeContent;
+        if (!snapshot.contentExpanded
+                && snapshot.showProgressCounter
+                && safeContent.length() > STREAMING_COLLAPSED_PREVIEW_MAX_CHARS) {
+            displayContent = safeContent.substring(0, STREAMING_COLLAPSED_PREVIEW_MAX_CHARS) + "…";
+        }
+        contentView.setText(displayContent);
+        boolean expandable = shouldCollapseSummaryContent(safeContent);
+        toggleView.setVisibility(expandable ? View.VISIBLE : View.GONE);
+        if (expandable) {
+            contentView.setMaxLines(
+                    snapshot.contentExpanded
+                            ? Integer.MAX_VALUE
+                            : SUMMARY_CONTENT_COLLAPSED_MAX_LINES);
+            contentView.setEllipsize(
+                    snapshot.contentExpanded ? null : TextUtils.TruncateAt.END);
+            toggleView.setText(snapshot.contentExpanded ? "收起" : "展开");
+        } else {
+            contentView.setMaxLines(Integer.MAX_VALUE);
+            contentView.setEllipsize(null);
+        }
+    }
+
+    private void bindReasonCounter(
+            TextView label, AnimatedNumberView counter, WorkbenchStreamUiSnapshot snapshot) {
+        if (snapshot.showProgressCounter) {
+            label.setVisibility(View.VISIBLE);
+            label.setText(
+                    TextUtils.isEmpty(snapshot.progressCounterLabel)
+                            ? "已写入"
+                            : snapshot.progressCounterLabel);
+            counter.setVisibility(View.VISIBLE);
+            counter.setNumber(snapshot.progressCounterValue);
+            return;
+        }
+        label.setVisibility(View.GONE);
+        counter.cancelAnimations();
+        counter.setNumber(0L, false);
+        counter.setVisibility(View.GONE);
     }
 
     private void bindReasonCounter(TextView label, AnimatedNumberView counter, WorkbenchUiItem item) {
@@ -933,11 +1017,15 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
     }
 
     private void bindWaitingEffect(BaseViewHolder helper, WorkbenchUiItem item) {
-        WorkbenchWaitingAuraView auraView = helper.getView(R.id.aiw_vSummaryWaitingAura);
         boolean active = item != null
                 && WorkbenchUiItem.WAITING_EFFECT_TOOL_AURA.equals(item.waitingEffect);
+        bindWaitingEffect(helper, active, item == null ? 0L : item.waitingEffectStartedAtMs);
+    }
+
+    private void bindWaitingEffect(BaseViewHolder helper, boolean active, long startedAtMs) {
+        WorkbenchWaitingAuraView auraView = helper.getView(R.id.aiw_vSummaryWaitingAura);
         auraView.setVisibility(active ? View.VISIBLE : View.GONE);
-        auraView.setActive(active, item == null ? 0L : item.waitingEffectStartedAtMs);
+        auraView.setActive(active, startedAtMs);
     }
 
     private void clearWaitingEffect(BaseViewHolder helper) {
@@ -1092,14 +1180,20 @@ final class WorkbenchItemAdapter extends BaseMultiItemQuickAdapter<WorkbenchUiIt
             return;
         }
         codeAreaLocked = locked;
-        notifyDataSetChanged();
+        for (int index = 0; index < getData().size(); index++) {
+            if (getData().get(index).type == TYPE_THOUGHT) {
+                notifyItemChanged(index, PAYLOAD_CODE_AREA_LOCK);
+            }
+        }
     }
 
     void setUserAvatarUrl(String value) {
         String next = value == null ? "" : value;
         if (next.equals(userAvatarUrl)) return;
         userAvatarUrl = next;
-        notifyDataSetChanged();
+        for (int index = 0; index < getData().size(); index++) {
+            if (getData().get(index).type == TYPE_USER_DEMAND) notifyItemChanged(index);
+        }
     }
 
     private static int dp(Context context, float value) {

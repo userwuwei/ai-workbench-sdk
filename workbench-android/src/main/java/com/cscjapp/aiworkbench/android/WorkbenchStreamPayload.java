@@ -13,8 +13,14 @@ final class WorkbenchStreamPayload {
   static final int FRAME_MASK = COUNTER | AURA;
 
   final int mask;
+  final WorkbenchStreamUiSnapshot snapshot;
 
   WorkbenchStreamPayload(int mask) {
+    this(mask, null);
+  }
+
+  WorkbenchStreamPayload(int mask, WorkbenchStreamUiSnapshot snapshot) {
     this.mask = mask;
+    this.snapshot = snapshot;
   }
 }

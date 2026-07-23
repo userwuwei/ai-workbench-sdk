@@ -85,11 +85,14 @@ final class WorkbenchStreamProgressController {
 
   Snapshot append(ModelStreamDelta delta, boolean nativeToolsEnabled) {
     if (delta == null) return Snapshot.empty(reasoningTextCache);
-    if (!delta.content().isEmpty()) {
+    boolean hasContentDelta = !delta.content().isEmpty();
+    boolean hasReasoningDelta = !delta.reasoning().isEmpty();
+    boolean hasToolDelta = !delta.toolCalls().isEmpty();
+    if (hasContentDelta) {
       content.append(delta.content());
       legacyInspector.append(delta.content());
     }
-    if (!delta.reasoning().isEmpty()) reasoning.append(delta.reasoning());
+    if (hasReasoningDelta) reasoning.append(delta.reasoning());
     for (ToolCallStreamDelta call : delta.toolCalls()) append(call);
     long now = System.nanoTime();
     String reasoningText =
@@ -99,16 +102,19 @@ final class WorkbenchStreamProgressController {
                 && (reasoningTextCache.isEmpty()
                     || delta.reasoning().indexOf('\n') >= 0));
 
-    if (!calls.isEmpty()) {
+    // Classification follows this delta, not the accumulated round. Accumulators remain useful
+    // for exact counters and fragmented tool-call assembly, but must not pin later reasoning or
+    // visible content to a stale RECEIVE/WRITE state.
+    if (hasToolDelta) {
       if (content.length() > 0) {
         snapshotVisibleContent(
-            now, visibleContentCache.isEmpty() || !delta.content().isEmpty());
+            now, visibleContentCache.isEmpty() || hasContentDelta);
       }
       return nativeToolSnapshot(reasoningText);
     }
 
     LegacyWriteProgress write = legacyInspector.snapshot();
-    if (content.length() > 0 && write != null) {
+    if (hasContentDelta && write != null && legacyInspector.wasWriteProtocolInLastAppend()) {
       boolean autoScroll = !legacyWriteAutoScrollSent;
       legacyWriteAutoScrollSent = true;
       return new Snapshot(
@@ -124,7 +130,7 @@ final class WorkbenchStreamProgressController {
           "接收中");
     }
 
-    if (content.length() > 0) {
+    if (hasContentDelta) {
       String visibleContent =
           snapshotVisibleContent(
               now,
@@ -144,7 +150,7 @@ final class WorkbenchStreamProgressController {
           "处理中");
     }
 
-    if (reasoning.length() > 0) {
+    if (hasReasoningDelta) {
       return new Snapshot(
           Kind.REASONING,
           "模型输出",
@@ -287,6 +293,9 @@ final class WorkbenchStreamProgressController {
     private int unicodeValue;
     private long contentChars;
     private long newChars;
+    private int containerDepth;
+    private boolean targetValueActivity;
+    private boolean lastAppendWriteProtocol;
 
     void reset() {
       token.setLength(0);
@@ -304,11 +313,28 @@ final class WorkbenchStreamProgressController {
       unicodeValue = 0;
       contentChars = 0L;
       newChars = 0L;
+      containerDepth = 0;
+      targetValueActivity = false;
+      lastAppendWriteProtocol = false;
     }
 
     void append(String delta) {
       if (delta == null || delta.isEmpty()) return;
+      boolean writeBefore = hasNextAction && isWriteTool(tool);
+      int depthBefore = containerDepth;
+      targetValueActivity = false;
       for (int index = 0; index < delta.length(); index++) accept(delta.charAt(index));
+      boolean writeAfter = hasNextAction && isWriteTool(tool);
+      lastAppendWriteProtocol =
+          writeAfter
+              && (!writeBefore
+                  || targetValueActivity
+                  || depthBefore > 0
+                  || containerDepth > 0);
+    }
+
+    boolean wasWriteProtocolInLastAppend() {
+      return lastAppendWriteProtocol;
     }
 
     LegacyWriteProgress snapshot() {
@@ -373,6 +399,7 @@ final class WorkbenchStreamProgressController {
         return;
       }
       if (value == '{' || value == '[') {
+        containerDepth++;
         if (expectingValue) {
           expectingValue = false;
           pendingKey = "";
@@ -381,6 +408,7 @@ final class WorkbenchStreamProgressController {
         return;
       }
       if (value == ',' || value == '}' || value == ']') {
+        if ((value == '}' || value == ']') && containerDepth > 0) containerDepth--;
         completedToken = "";
         expectingValue = false;
         pendingKey = "";
@@ -417,8 +445,13 @@ final class WorkbenchStreamProgressController {
 
     private void incrementTargetCount() {
       if (!valueString) return;
-      if ("content".equals(valueKey)) contentChars++;
-      else if ("new".equals(valueKey)) newChars++;
+      if ("content".equals(valueKey)) {
+        contentChars++;
+        targetValueActivity = true;
+      } else if ("new".equals(valueKey)) {
+        newChars++;
+        targetValueActivity = true;
+      }
     }
 
     private static char unescape(char value) {

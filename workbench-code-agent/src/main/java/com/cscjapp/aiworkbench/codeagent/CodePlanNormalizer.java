@@ -1,6 +1,8 @@
 package com.cscjapp.aiworkbench.codeagent;
 
 import com.cscjapp.aiworkbench.api.ToolArguments;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.*;
 
 /** Normalizes legacy plan shapes without causing a model repair round. */
@@ -33,13 +35,26 @@ final class CodePlanNormalizer {
       quality.put("verification", "使用真实工具验证，不以文字声明代替");
       out.put("quality_bar", quality);
     }
-    out.put("planned_files", normalizeFiles(out.get("planned_files")));
+    List<Map<String, Object>> files = normalizeFiles(out.get("planned_files"));
+    out.put("planned_files", files);
     List<String> verification = strings(out.get("verification_plan"), 6, 160);
     if (verification.isEmpty()) verification.addAll(contract.requiredEvidence("code_generation"));
     out.put("verification_plan", verification);
     List<Map<String, Object>> steps = normalizeSteps(out.get("steps"));
     addDefaults(steps, qualityMode, verificationTools(verification));
+    mapImplementationFiles(steps, files);
+    while (steps.size() > MAX_STEPS) mergeDuplicatePhase(steps);
     out.put("steps", steps);
+    if (out.containsKey("interaction_checks") || bool(out.get("interaction_required"))) {
+      List<Map<String, Object>> checks = normalizeInteractionChecks(out.get("interaction_checks"));
+      if (checks.isEmpty() && bool(out.get("interaction_required"))) {
+        Map<String, Object> check = new LinkedHashMap<>();
+        check.put("check_id", "interaction-required");
+        check.put("description", "执行真实操作并验证操作前后可观察状态发生变化");
+        checks.add(check);
+      }
+      out.put("interaction_checks", checks);
+    }
     String reason = limit(text(out.get("replan_reason")), 200);
     if (reason.isEmpty()) out.remove("replan_reason");
     else out.put("replan_reason", reason);
@@ -67,6 +82,7 @@ final class CodePlanNormalizer {
         if (path.isEmpty()) continue;
         file.put("path", path);
       }
+      file.put("file_id", fileId(text(file.get("path"))));
       out.add(file);
     }
     return out;
@@ -98,7 +114,136 @@ final class CodePlanNormalizer {
       step.put("phase", phase);
       step.put("required_tools", tools);
       step.put("acceptance", strings(firstValue(map, "acceptance", "acceptance_criteria", "criteria"), 2, 120));
+      step.put("file_refs", strings(firstValue(map, "file_refs", "files", "file_ids"), 8, 300));
       out.add(step);
+    }
+    return out;
+  }
+
+  private static void mapImplementationFiles(
+      List<Map<String, Object>> steps, List<Map<String, Object>> files) {
+    if (files.isEmpty()) return;
+    Map<String, String> refs = new LinkedHashMap<>();
+    for (Map<String, Object> file : files) {
+      String id = text(file.get("file_id"));
+      String path = normalizedPath(text(file.get("path")));
+      refs.put(id, id);
+      refs.put(path, id);
+    }
+    List<Map<String, Object>> implementation = new ArrayList<>();
+    for (Map<String, Object> step : steps) {
+      if (!"implement".equals(text(step.get("phase")))) continue;
+      implementation.add(step);
+      List<String> mapped = new ArrayList<>();
+      for (String raw : strings(step.get("file_refs"), 8, 300)) {
+        String id = refs.get(raw);
+        if (id == null) id = refs.get(normalizedPath(raw));
+        if (id != null && !mapped.contains(id)) mapped.add(id);
+      }
+      step.put("file_refs", mapped);
+    }
+    if (implementation.size() == 1) {
+      Map<String, Object> step = implementation.get(0);
+      if (((List<?>) step.get("file_refs")).isEmpty()) step.put("file_refs", fileIds(files));
+      ensureAllFilesMapped(implementation, files);
+      return;
+    }
+    if (implementation.size() == files.size()) {
+      for (int index = 0; index < implementation.size(); index++) {
+        Map<String, Object> step = implementation.get(index);
+        if (((List<?>) step.get("file_refs")).isEmpty()) {
+          step.put("file_refs", Collections.singletonList(files.get(index).get("file_id")));
+        }
+      }
+      ensureAllFilesMapped(implementation, files);
+      return;
+    }
+    boolean allExplicit = !implementation.isEmpty();
+    for (Map<String, Object> step : implementation) {
+      if (((List<?>) step.get("file_refs")).isEmpty()) allExplicit = false;
+    }
+    if (allExplicit) {
+      ensureAllFilesMapped(implementation, files);
+      return;
+    }
+
+    steps.removeIf(step -> "implement".equals(text(step.get("phase"))));
+    int insertAt = 0;
+    while (insertAt < steps.size() && "discover".equals(text(steps.get(insertAt).get("phase")))) {
+      insertAt++;
+    }
+    Map<String, List<String>> groups = new LinkedHashMap<>();
+    for (Map<String, Object> file : files) {
+      String action = text(file.get("action"));
+      if (!"create".equals(action) && !"edit".equals(action)) action = "write";
+      groups.computeIfAbsent(action, ignored -> new ArrayList<>()).add(text(file.get("file_id")));
+    }
+    List<Map<String, Object>> generated = new ArrayList<>();
+    for (Map.Entry<String, List<String>> group : groups.entrySet()) {
+      String action = group.getKey();
+      String title = "create".equals(action) ? "创建计划文件"
+          : "edit".equals(action) ? "修改计划文件" : "完成计划文件实现";
+      List<String> tools = "create".equals(action)
+          ? Collections.singletonList("create_file")
+          : "edit".equals(action)
+              ? Arrays.asList("search_replace", "rewrite")
+              : Collections.emptyList();
+      Map<String, Object> step = step("implement-" + action, title, "implement", tools);
+      step.put("file_refs", group.getValue());
+      generated.add(step);
+    }
+    steps.addAll(insertAt, generated);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void ensureAllFilesMapped(
+      List<Map<String, Object>> implementation, List<Map<String, Object>> files) {
+    if (implementation.isEmpty()) return;
+    Set<String> assigned = new LinkedHashSet<>();
+    for (Map<String, Object> step : implementation) {
+      assigned.addAll((List<String>) step.get("file_refs"));
+    }
+    for (Map<String, Object> file : files) {
+      String id = text(file.get("file_id"));
+      if (assigned.contains(id)) continue;
+      Map<String, Object> target = implementation.get(0);
+      for (Map<String, Object> candidate : implementation) {
+        if (((List<?>) candidate.get("file_refs")).size()
+            < ((List<?>) target.get("file_refs")).size()) target = candidate;
+      }
+      ((List<String>) target.get("file_refs")).add(id);
+      assigned.add(id);
+    }
+  }
+
+  private static List<String> fileIds(List<Map<String, Object>> files) {
+    List<String> out = new ArrayList<>();
+    for (Map<String, Object> file : files) out.add(text(file.get("file_id")));
+    return out;
+  }
+
+  private static List<Map<String, Object>> normalizeInteractionChecks(Object raw) {
+    List<Map<String, Object>> out = new ArrayList<>();
+    List<?> values = raw instanceof List ? (List<?>) raw
+        : text(raw).isEmpty() ? Collections.emptyList() : Collections.singletonList(raw);
+    Set<String> ids = new LinkedHashSet<>();
+    int index = 0;
+    for (Object value : values) {
+      if (out.size() >= 6) break;
+      index++;
+      Map<?, ?> map = value instanceof Map ? (Map<?, ?>) value : Collections.emptyMap();
+      String description = value instanceof Map
+          ? first(map, "description", "title", "name", "action", "check", "assertion", "expected")
+          : text(value);
+      description = limit(description, 160);
+      if (description.isEmpty()) continue;
+      String requested = limit(first(map, "check_id", "id"), 64);
+      String id = validIdentifier(requested) ? requested : "interaction-" + index;
+      id = uniqueId(id, ids);
+      Map<String, Object> check = new LinkedHashMap<>();
+      check.put("check_id", id);
+      check.put("description", description);
+      out.add(check);
     }
     return out;
   }
@@ -111,20 +256,40 @@ final class CodePlanNormalizer {
         step("verify", "执行真实验证", "verify", verificationTools),
         step("quality", "提交结构化质量自查", "quality", Collections.singletonList("quality_review")));
     if (steps.isEmpty()) {
-      steps.addAll(defaults);
+      steps.addAll(defaults.subList(0, "interface_product".equals(qualityMode) ? 4 : 3));
       return;
     }
     Set<String> phases = phases(steps);
     for (Map<String, Object> candidate : defaults) {
-      if (steps.size() >= 3) break;
       String phase = text(candidate.get("phase"));
+      if ("quality".equals(phase) && !"interface_product".equals(qualityMode)) continue;
       if (phases.add(phase)) steps.add(candidate);
     }
-    if ("interface_product".equals(qualityMode) && !phases.contains("quality")) {
-      if (steps.size() >= MAX_STEPS) steps.remove(steps.size() - 1);
-      steps.add(defaults.get(3));
+    while (steps.size() > MAX_STEPS) mergeDuplicatePhase(steps);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void mergeDuplicatePhase(List<Map<String, Object>> steps) {
+    for (int right = steps.size() - 1; right > 0; right--) {
+      String phase = text(steps.get(right).get("phase"));
+      for (int left = 0; left < right; left++) {
+        if (!phase.equals(text(steps.get(left).get("phase")))) continue;
+        Map<String, Object> target = steps.get(left);
+        Map<String, Object> source = steps.remove(right);
+        mergeList((List<String>) target.get("file_refs"), source.get("file_refs"), 8);
+        mergeList((List<String>) target.get("required_tools"), source.get("required_tools"), 4);
+        return;
+      }
     }
-    while (steps.size() < 3) steps.add(defaults.get(steps.size()));
+    steps.remove(steps.size() - 1);
+  }
+
+  private static void mergeList(List<String> target, Object raw, int max) {
+    if (target == null || !(raw instanceof List)) return;
+    for (Object value : (List<?>) raw) {
+      String item = text(value);
+      if (!item.isEmpty() && !target.contains(item) && target.size() < max) target.add(item);
+    }
   }
 
   private static Set<String> phases(List<Map<String, Object>> steps) {
@@ -140,6 +305,7 @@ final class CodePlanNormalizer {
     out.put("phase", phase);
     out.put("required_tools", new ArrayList<>(tools));
     out.put("acceptance", Collections.singletonList(title));
+    out.put("file_refs", new ArrayList<>());
     return out;
   }
 
@@ -218,5 +384,37 @@ final class CodePlanNormalizer {
 
   private static boolean numeric(String value) {
     return !value.isEmpty() && value.matches("[0-9]+[.)、]?");
+  }
+
+  private static boolean bool(Object value) {
+    return value instanceof Boolean ? (Boolean) value : Boolean.parseBoolean(text(value));
+  }
+
+  private static boolean validIdentifier(String value) {
+    return !value.isEmpty() && value.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+  }
+
+  private static String fileId(String path) {
+    String normalized = normalizedPath(path);
+    try {
+      byte[] digest = MessageDigest.getInstance("SHA-256")
+          .digest(normalized.getBytes(StandardCharsets.UTF_8));
+      StringBuilder hex = new StringBuilder();
+      for (int index = 0; index < 6; index++) {
+        int value = digest[index] & 0xff;
+        if (value < 16) hex.append('0');
+        hex.append(Integer.toHexString(value));
+      }
+      return "file-" + hex;
+    } catch (Exception ignored) {
+      return "file-" + Integer.toHexString(normalized.hashCode());
+    }
+  }
+
+  private static String normalizedPath(String value) {
+    String out = text(value).replace('\\', '/');
+    while (out.startsWith("./")) out = out.substring(2);
+    while (out.contains("//")) out = out.replace("//", "/");
+    return out;
   }
 }
