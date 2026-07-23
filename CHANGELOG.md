@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.0
+
+- Agent Core 新增轮次级动态工具面，Code Agent 按计划、读取、编辑、语法、浏览器和质量阶段主动收窄模型可见工具；常规源码收集只暴露目标驱动 `read_plan`。
+- 读取后编辑门禁只认可当前 revision 且 `ready_for_edit=true` 的 `read_plan`；`read_file` 仅在 `search_replace` 精确失败后用于同路径、最多 80 行的真实锚点恢复。
+- 浏览器验证结果按 `failure_kind` 路由：测试计划问题继续浏览器计划，产品代码问题进入一次 `read_plan`，环境问题留在浏览器验证阶段。
+- 模型请求历史压缩目标驱动 `browser_test` 的场景明细，仅保留 source revision、plan hash、覆盖和失败分类。
+
 ## 1.2.4
 
 - Code Agent 在宿主注册新版 `read_plan` 时启用目标驱动证据阅读协议，引导模型一次声明目的、证据类型和定位信号，并依据 `ready_for_edit` 收敛到编辑。

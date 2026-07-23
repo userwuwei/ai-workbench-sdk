@@ -95,6 +95,46 @@ public class FileToolsTest {
   }
 
   @Test
+  public void readFileSupportsBoundedWindowAndSymbolRecovery() throws Exception {
+    StringBuilder content = new StringBuilder();
+    for (int index = 1; index <= 120; index++) {
+      content.append(index == 70 ? "function resizeCanvas() {}" : "line-" + index).append('\n');
+    }
+    ws.writeAtomic("main.txt", content.toString(), false);
+    ReadFileTool tool = new ReadFileTool(ws);
+
+    ToolResult window =
+        tool.run(
+            new ToolArguments()
+                .with("path", "main.txt")
+                .with("start_line", 10)
+                .with("end_line", 20));
+    assertEquals(10, window.data().get("start_line"));
+    assertEquals(20, window.data().get("end_line"));
+    assertEquals(11, String.valueOf(window.data().get("content")).split("\\n", -1).length);
+
+    ToolResult symbol =
+        tool.run(
+            new ToolArguments()
+                .with("path", "main.txt")
+                .with("target_function", "resizeCanvas"));
+    assertTrue(String.valueOf(symbol.data().get("content")).contains("resizeCanvas"));
+    assertTrue(
+        String.valueOf(symbol.data().get("content")).split("\\n", -1).length <= 80);
+
+    try {
+      tool.run(
+          new ToolArguments()
+              .with("path", "main.txt")
+              .with("start_line", 1)
+              .with("end_line", 81));
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertEquals("invalid_read_window", expected.getMessage());
+    }
+  }
+
+  @Test
   public void rejectsTraversal() throws Exception {
     try {
       ws.resolveSafely("../escape.txt");

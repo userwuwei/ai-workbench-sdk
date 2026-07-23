@@ -74,6 +74,7 @@ final class AgentHistoryRequestProjection {
   private static Projection create(AgentToolCall call, AgentMessage resultMessage) {
     if (call == null || call.arguments() == null || resultMessage == null) return null;
     if ("read_plan".equals(call.name())) return compactReadPlan(call, resultMessage);
+    if ("browser_test".equals(call.name())) return compactBrowserTest(call, resultMessage);
     if (!isWriteTool(call.name())) return null;
     String rawArguments = GSON.toJson(call.arguments().asMap());
     if (rawArguments.length() <= LARGE_WRITE_ARGUMENT_CHARS) return null;
@@ -182,6 +183,75 @@ final class AgentHistoryRequestProjection {
     compactData.addProperty("history_projection", "goal_driven_read_compacted");
     compactResult.add("data", compactData);
     return new Projection(call.arguments(), GSON.toJson(compactResult));
+  }
+
+  private static Projection compactBrowserTest(AgentToolCall call, AgentMessage resultMessage) {
+    JsonObject result = parseObject(resultMessage.content());
+    if (result == null) return null;
+    JsonObject data = object(result.get("data"));
+    if (data == null) return null;
+
+    Map<String, Object> arguments = new LinkedHashMap<>();
+    Map<String, Object> source = call.arguments().asMap();
+    copyFirst(source, arguments, "entry_path", "entry_path");
+    copyFirst(source, arguments, "goal", "goal");
+    copyFirst(source, arguments, "timeout_ms", "timeout_ms");
+    List<Map<String, Object>> scenarioSummaries = new ArrayList<>();
+    Object rawScenarios = source.get("scenarios");
+    if (rawScenarios instanceof List) {
+      for (Object raw : (List<?>) rawScenarios) {
+        if (!(raw instanceof Map)) continue;
+        Map<?, ?> scenario = (Map<?, ?>) raw;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        if (scenario.get("id") != null) summary.put("id", scenario.get("id"));
+        if (scenario.get("description") != null) {
+          summary.put("description", truncate(String.valueOf(scenario.get("description")), 240));
+        }
+        scenarioSummaries.add(summary);
+      }
+    }
+    if (!scenarioSummaries.isEmpty()) arguments.put("scenarios", scenarioSummaries);
+    arguments.put("request_projection", "browser_verification_compacted");
+
+    JsonObject compactResult = new JsonObject();
+    copyJson(result, compactResult, "status", "error_code", "message", "retryable");
+    JsonObject compactData = new JsonObject();
+    copyJson(
+        data,
+        compactData,
+        "operation",
+        "mode",
+        "source_revision",
+        "test_plan_hash",
+        "viewport_signature",
+        "passed",
+        "failure_kind",
+        "reused",
+        "coverage_summary",
+        "reading_brief",
+        "test_retry_brief",
+        "environment_diagnostic",
+        "recommended_next_action",
+        "plan_state");
+    JsonElement rawResults = data.get("scenario_results");
+    if (rawResults != null && rawResults.isJsonArray()) {
+      List<Map<String, Object>> summaries = new ArrayList<>();
+      for (JsonElement raw : rawResults.getAsJsonArray()) {
+        JsonObject scenario = object(raw);
+        if (scenario == null) continue;
+        Map<String, Object> summary = new LinkedHashMap<>();
+        for (String key : new String[] {
+          "id", "scenario_id", "passed", "failure_kind", "failed_expectations", "actual_state"
+        }) {
+          if (scenario.has(key)) summary.put(key, GSON.fromJson(scenario.get(key), Object.class));
+        }
+        summaries.add(summary);
+      }
+      compactData.add("scenario_results", GSON.toJsonTree(summaries));
+    }
+    compactData.addProperty("history_projection", "browser_verification_compacted");
+    compactResult.add("data", compactData);
+    return new Projection(new ToolArguments(arguments), GSON.toJson(compactResult));
   }
 
   private static Map<String, Object> compactArguments(

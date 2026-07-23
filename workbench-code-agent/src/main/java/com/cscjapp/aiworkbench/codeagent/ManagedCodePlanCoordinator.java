@@ -27,6 +27,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private final Set<String> unresolvedWritePaths = new LinkedHashSet<>();
   private Map<String, Object> currentState = Collections.emptyMap();
   private boolean stateChanged;
+  private String verificationFailureTool = "";
+  private String verificationFailureKind = "";
+  private String recoverableEditPath = "";
+  private boolean recoveryReadReady;
 
   ManagedCodePlanCoordinator(
       CodePlanningMode mode,
@@ -63,6 +67,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
     stateChanged = false;
+    verificationFailureTool = "";
+    verificationFailureKind = "";
+    recoverableEditPath = "";
+    recoveryReadReady = false;
   }
 
   @Override
@@ -82,18 +90,105 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
     stateChanged = false;
+    verificationFailureTool = "";
+    verificationFailureKind = "";
+    recoverableEditPath = "";
+    recoveryReadReady = false;
+  }
+
+  @Override
+  public synchronized ToolSelection selectTools(
+      AgentRoundContext context, List<ToolSpec> registeredTools) {
+    LinkedHashSet<String> allowed = new LinkedHashSet<>();
+    allowed.add(CodeAgentToolNames.FINALIZE_TASK);
+
+    if (!recoverableEditPath.isEmpty()) {
+      if (recoveryReadReady) addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+      else allowed.add("read_file");
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
+    if (!verificationFailureTool.isEmpty()) {
+      if (retryBrowserPlanWithoutCodeRead()) {
+        allowed.add("browser_test");
+      } else if (hasReadyReadCoverage()) {
+        addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+      } else {
+        allowed.add("read_plan");
+      }
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
+    if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
+      String missingVerification = nextMissingVerificationTool();
+      if (!missingVerification.isEmpty()) allowed.add(missingVerification);
+      else if (qualityRequired()) allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
+    PlanStep current = currentStep();
+    if (current != null) {
+      if ("discover".equals(current.phase)) {
+        allowed.add(CodeAgentToolNames.PLAN_TASK);
+        allowed.add("list_dir");
+        allowed.add("read_plan");
+      } else if ("implement".equals(current.phase)) {
+        if (requiresReadCoverage(current) && !hasReadyReadCoverage()) allowed.add("read_plan");
+        else addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+      } else if ("verify".equals(current.phase)) {
+        String missingVerification = nextMissingVerificationTool();
+        if (!missingVerification.isEmpty()) allowed.add(missingVerification);
+      } else if ("quality".equals(current.phase)) {
+        allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
+      }
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
+    if (hasReadyReadCoverage()) {
+      addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+    } else {
+      allowed.add(CodeAgentToolNames.PLAN_TASK);
+      allowed.add("list_dir");
+      allowed.add("read_plan");
+    }
+    return ToolSelection.onlyNames(registeredTools, allowed);
   }
 
   @Override
   public synchronized boolean supports(ToolInvocation invocation) {
-    if (invocation == null || mode != CodePlanningMode.FORCE || hasPlan()) return false;
-    CodeToolRole role = role(invocation.tool().spec().name());
-    return role == CodeToolRole.CREATE || role == CodeToolRole.EDIT;
+    if (invocation == null) return false;
+    String toolName = invocation.tool().spec().name();
+    CodeToolRole role = role(toolName);
+    if (role == CodeToolRole.READ && !"read_plan".equals(toolName)) return true;
+    return mode == CodePlanningMode.FORCE
+        && !hasPlan()
+        && (role == CodeToolRole.CREATE || role == CodeToolRole.EDIT);
   }
 
   @Override
   public Cancellable evaluate(
       ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+    if (role(invocation.tool().spec().name()) == CodeToolRole.READ) {
+      String toolName = invocation.tool().spec().name();
+      String requested = canonicalEvidenceFile(text(invocation.arguments().get("path")));
+      synchronized (this) {
+        if ("read_file".equals(toolName)
+            && !recoverableEditPath.isEmpty()
+            && recoverableEditPath.equals(requested)
+            && boundedRecoveryRead(invocation.arguments())) {
+          callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
+        } else {
+          callback.resolve(
+              ToolPolicyDecision.error(
+                  "goal_driven_read_required",
+                  "常规代码收集必须使用 read_plan。read_file 仅在 search_replace 精确匹配失败后，"
+                      + "用于刷新同一路径的真实编辑锚点，并且必须指定函数/类/方法符号，"
+                      + "或不超过 80 行的 start_line/end_line 窗口。",
+                  true));
+        }
+      }
+      return Cancellable.NONE;
+    }
     callback.resolve(ToolPolicyDecision.error(
         "managed_plan_required",
         "当前任务要求在首次写入前调用 plan_task 建立短计划。",
@@ -180,6 +275,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (role == CodeToolRole.VERIFY || role == CodeToolRole.QUALITY) {
       boolean valid = validEvidence(toolName, role, result);
+      if (role == CodeToolRole.VERIFY) recordVerificationRouting(toolName, result, valid);
       boolean removed = evidence.removeIf(item ->
           item.generation == generation
               && item.revision == revision
@@ -191,6 +287,20 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (!validEvidence(toolName, role, result)) return;
     if (role == CodeToolRole.READ) {
+      if (!"read_plan".equals(toolName)) {
+        boolean recoveryAccepted = false;
+        if ("read_file".equals(toolName) && result.isSuccess()) {
+          String path = canonicalEvidenceFile(text(firstValue(result.data(), "resolved_path", "path")));
+          if (path.isEmpty()) path = canonicalEvidenceFile(text(arguments.get("path")));
+          if (!recoverableEditPath.isEmpty()
+              && recoverableEditPath.equals(path)
+              && result.data().containsKey("content")) {
+            recoveryReadReady = true;
+            recoveryAccepted = true;
+          }
+        }
+        if (recoveryAccepted) return;
+      }
       List<String> paths = evidencePaths(role, arguments, result.data());
       if (paths.isEmpty()) return;
       for (String path : paths) {
@@ -225,13 +335,23 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       // A failed or partially-applied write is not completion evidence. If it did mutate the
       // file, however, it creates a new revision: previous verification/quality evidence is
       // stale and the file remains unresolved until a later complete write succeeds.
-      if (!mutated) return;
+      if (!mutated) {
+        if (recoverableSearchReplaceFailure(toolName, result)) {
+          recoverableEditPath = write.path;
+          recoveryReadReady = false;
+        }
+        return;
+      }
       advanceRevision(write.path);
       unresolvedWritePaths.add(write.path);
       recompute();
       return;
     }
     advanceRevision(write.path);
+    recoverableEditPath = "";
+    recoveryReadReady = false;
+    verificationFailureTool = "";
+    verificationFailureKind = "";
     unresolvedWritePaths.remove(write.path);
     evidence.removeIf(item -> item.role == role && write.path.equals(item.path));
     evidence.add(
@@ -251,6 +371,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     evidence.removeIf(item -> item.role == CodeToolRole.VERIFY || item.role == CodeToolRole.QUALITY);
     pathRevisions.put(path, revision);
     readCoverageByPath.remove(path);
+    verificationFailureTool = "";
+    verificationFailureKind = "";
+    recoverableEditPath = "";
+    recoveryReadReady = false;
   }
 
   private boolean validEvidence(String toolName, CodeToolRole role, ToolResult result) {
@@ -298,6 +422,113 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     String sourceRevision = text(data.get("revision"));
     for (String path : paths) {
       readCoverageByPath.put(path, new ReadCoverage(sourceRevision, evidenceIds));
+    }
+  }
+
+  private void recordVerificationRouting(String toolName, ToolResult result, boolean valid) {
+    if (valid) {
+      if (toolName.equals(verificationFailureTool)) {
+        verificationFailureTool = "";
+        verificationFailureKind = "";
+      }
+      return;
+    }
+    verificationFailureTool = toolName;
+    String kind = text(result.data().get("failure_kind"));
+    if (kind.isEmpty()) kind = "product_code_failure";
+    verificationFailureKind = kind;
+  }
+
+  private boolean retryBrowserPlanWithoutCodeRead() {
+    if (!"browser_test".equals(verificationFailureTool)) return false;
+    return "test_plan_invalid".equals(verificationFailureKind)
+        || "test_expectation_mismatch".equals(verificationFailureKind)
+        || "environment_failure".equals(verificationFailureKind);
+  }
+
+  private boolean hasReadyReadCoverage() {
+    return !readCoverageByPath.isEmpty();
+  }
+
+  private PlanStep currentStep() {
+    for (PlanStep step : steps) if (!step.done) return step;
+    return null;
+  }
+
+  private boolean requiresReadCoverage(PlanStep step) {
+    if (step == null || step.fileRefs.isEmpty()) return true;
+    for (String ref : step.fileRefs) {
+      PlanFile file = file(ref);
+      if (file == null || !"create".equals(file.action)) return true;
+      if (!file.canonicalPath.isEmpty()) {
+        try {
+          File target = workspace == null ? new File(file.canonicalPath) : workspace.resolveSafely(file.displayPath);
+          if (target.exists()) return true;
+        } catch (Exception ignored) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  private String nextMissingVerificationTool() {
+    PlanStep current = currentStep();
+    List<String> required = new ArrayList<>();
+    boolean hasWrite = hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT);
+    if (!hasWrite && current != null && "verify".equals(current.phase)) {
+      required.addAll(current.requiredTools);
+    }
+    if (required.isEmpty()) required.addAll(contract.requiredEvidence("code_generation"));
+    if (required.isEmpty()) {
+      if (current != null && "verify".equals(current.phase)) required.addAll(current.requiredTools);
+    }
+    for (String tool : required) {
+      String canonical = canonicalToolName(tool);
+      if (role(canonical) == CodeToolRole.VERIFY && !hasCurrentTool(canonical)) return canonical;
+    }
+    return "";
+  }
+
+  private boolean qualityRequired() {
+    PlanStep current = currentStep();
+    return current != null && "quality".equals(current.phase);
+  }
+
+  private void addRoles(Set<String> output, CodeToolRole... accepted) {
+    Set<CodeToolRole> rolesToAdd = new LinkedHashSet<>(Arrays.asList(accepted));
+    for (Map.Entry<String, CodeToolRole> entry : roles.entrySet()) {
+      if (rolesToAdd.contains(entry.getValue())) output.add(entry.getKey());
+    }
+  }
+
+  private static boolean recoverableSearchReplaceFailure(String toolName, ToolResult result) {
+    if (!"search_replace".equals(toolName) || result == null || result.isSuccess()) return false;
+    String detail = (text(result.errorCode()) + " " + text(result.message())).toLowerCase(Locale.US);
+    return detail.contains("search_match_count")
+        || detail.contains("no_match")
+        || detail.contains("multiple")
+        || detail.contains("overlap")
+        || detail.contains("brace")
+        || detail.contains("batch conflict")
+        || detail.contains("batch_conflict");
+  }
+
+  private static boolean boundedRecoveryRead(ToolArguments arguments) {
+    if (!text(arguments.get("target_function")).isEmpty()
+        || !text(arguments.get("target_class")).isEmpty()
+        || !text(arguments.get("target_method")).isEmpty()) return true;
+    int start = positiveInt(arguments.get("start_line"));
+    int end = positiveInt(arguments.get("end_line"));
+    return start > 0 && end >= start && end - start + 1 <= 80;
+  }
+
+  private static int positiveInt(Object value) {
+    if (value instanceof Number) return ((Number) value).intValue();
+    try {
+      return Integer.parseInt(text(value));
+    } catch (Exception ignored) {
+      return -1;
     }
   }
 

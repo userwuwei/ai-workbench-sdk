@@ -10,6 +10,7 @@ public final class AgentEngine implements Cancellable {
   private final ModelGateway gateway;
   private volatile ModelEndpoint endpoint;
   private final ToolRegistry registry;
+  private final List<ToolPolicy> toolPolicies;
   private final ToolDispatcher dispatcher;
   private final ValidationRunner validation;
   private final PromptComposer prompts = new PromptComposer();
@@ -44,10 +45,15 @@ public final class AgentEngine implements Cancellable {
     this.deepThinking = deepThinking;
     this.maxRounds = Math.max(1, maxRounds);
     registry = new ToolRegistry(d.tools());
+    List<ToolPolicy> configuredPolicies = d.toolPolicies();
+    toolPolicies =
+        configuredPolicies == null
+            ? Collections.emptyList()
+            : Collections.unmodifiableList(new ArrayList<>(configuredPolicies));
     dispatcher =
         new ToolDispatcher(
             registry,
-            d.toolPolicies(),
+            toolPolicies,
             new DefaultToolContext(sessionId, workspaceId, executor, decisions, d.host()));
     validation = new ValidationRunner(d.validators());
   }
@@ -124,7 +130,7 @@ public final class AgentEngine implements Cancellable {
           new ModelRequest(
               endpoint,
               AgentHistory.forModelRequest(messages, 80, 120000),
-              registry.specs(),
+              selectTools(n, runId),
               deepThinking);
     }
     active =
@@ -178,6 +184,29 @@ public final class AgentEngine implements Cancellable {
                 validateAndFinish(demand, o, n, response.content(), "task_completed", runId);
               }
             });
+  }
+
+  private List<ToolSpec> selectTools(int round, long runId) {
+    AgentRunContext run = activeRunContext;
+    if (run == null || run.runId() != runId) {
+      run = new AgentRunContext(runId, sessionId, workspaceId, "");
+    }
+    AgentRoundContext context = new AgentRoundContext(run, round);
+    List<ToolSpec> selected = registry.specs();
+    for (ToolPolicy policy : toolPolicies) {
+      ToolSelection next = policy.selectTools(context, selected);
+      selected = retainSelected(selected, next == null ? Collections.emptyList() : next.tools());
+    }
+    return selected;
+  }
+
+  private static List<ToolSpec> retainSelected(
+      List<ToolSpec> current, List<ToolSpec> requested) {
+    Set<String> names = new LinkedHashSet<>();
+    for (ToolSpec tool : requested) if (tool != null) names.add(tool.name());
+    List<ToolSpec> retained = new ArrayList<>();
+    for (ToolSpec tool : current) if (names.contains(tool.name())) retained.add(tool);
+    return Collections.unmodifiableList(retained);
   }
 
   private void executeCalls(

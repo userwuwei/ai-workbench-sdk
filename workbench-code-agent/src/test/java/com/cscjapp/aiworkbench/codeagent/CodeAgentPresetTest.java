@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import com.cscjapp.aiworkbench.api.AgentRunContext;
+import com.cscjapp.aiworkbench.api.AgentRoundContext;
 import com.cscjapp.aiworkbench.api.AgentTool;
 import com.cscjapp.aiworkbench.api.Cancellable;
 import com.cscjapp.aiworkbench.api.ContextProvider;
@@ -21,6 +22,7 @@ import com.cscjapp.aiworkbench.api.ToolPolicy;
 import com.cscjapp.aiworkbench.api.ToolPolicyDecision;
 import com.cscjapp.aiworkbench.api.ToolResult;
 import com.cscjapp.aiworkbench.api.ToolSpec;
+import com.cscjapp.aiworkbench.api.ToolSelection;
 import com.cscjapp.aiworkbench.api.ValidationContext;
 import com.cscjapp.aiworkbench.api.ValidationResult;
 import com.cscjapp.aiworkbench.api.WorkbenchDefinition;
@@ -395,7 +397,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void editRequiresCurrentRunReadButCreateDoesNot() throws Exception {
+  public void ordinaryReadNeverAuthorizesEditAndCreateDoesNotNeedRead() throws Exception {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("read_file", CodeToolRole.READ);
     roles.put("search_replace", CodeToolRole.EDIT);
@@ -426,7 +428,7 @@ public final class CodeAgentPresetTest {
         new ToolInvocation("r-content", read, path),
         ToolResult.success(map("path", "main.txt", "content", "before")));
     assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
+        ToolPolicyDecision.Kind.ERROR,
         decision(policy, new ToolInvocation("e2", edit, path)).kind());
 
     policy.onRunStarted(new AgentRunContext(2L, "s", "workspace", "next"));
@@ -436,7 +438,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void batchReadEvidenceAuthorizesOnlyFilesActuallyReturned() throws Exception {
+  public void batchAndOrdinaryReadsDoNotAuthorizeEdits() throws Exception {
     for (String name : Arrays.asList("index.html", "style.css", "game.js")) {
       Files.write(
           new File(root, name).toPath(),
@@ -478,10 +480,10 @@ public final class CodeAgentPresetTest {
                 true)));
 
     assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
+        ToolPolicyDecision.Kind.ERROR,
         decision(policy, editInvocation("index.html", edit)).kind());
     assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
+        ToolPolicyDecision.Kind.ERROR,
         decision(policy, editInvocation("style.css", edit)).kind());
     ToolPolicyDecision missing = decision(policy, editInvocation("game.js", edit));
     assertEquals(ToolPolicyDecision.Kind.ERROR, missing.kind());
@@ -496,7 +498,7 @@ public final class CodeAgentPresetTest {
             new ToolArguments(Collections.singletonMap("path", "game.js"))),
         ToolResult.success(map("path", "game.js", "content", "game.js")));
     assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
+        ToolPolicyDecision.Kind.ERROR,
         decision(policy, editInvocation("game.js", edit)).kind());
   }
 
@@ -504,12 +506,12 @@ public final class CodeAgentPresetTest {
   public void successfulWriteInvalidatesReadEvidenceButFailedOrUnchangedWriteDoesNot()
       throws Exception {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
-    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
     roles.put("search_replace", CodeToolRole.EDIT);
     roles.put("create_file", CodeToolRole.CREATE);
     ReadBeforeEditPolicy policy = new ReadBeforeEditPolicy(workspace, roles);
     AgentRunContext run = new AgentRunContext(9L, "s", "workspace", "task");
-    AgentTool read = tool("read_file");
+    AgentTool read = tool("read_plan");
     AgentTool edit = tool("search_replace");
     ToolInvocation readMain =
         new ToolInvocation(
@@ -517,7 +519,14 @@ public final class CodeAgentPresetTest {
     ToolInvocation editMain = editInvocation("main.txt", edit);
     policy.onRunStarted(run);
     policy.onToolCompleted(
-        run, readMain, ToolResult.success(map("path", "main.txt", "content", "before")));
+        run,
+        readMain,
+        ToolResult.success(
+            map(
+                "path", "main.txt",
+                "revision", sha256(new File(root, "main.txt")),
+                "coverage_summary", map("ready_for_edit", true),
+                "evidence", Collections.singletonList(map("evidence_id", "ev", "content", "before")))));
     assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, editMain).kind());
 
     policy.onToolCompleted(
@@ -527,7 +536,14 @@ public final class CodeAgentPresetTest {
     assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, editMain).kind());
 
     policy.onToolCompleted(
-        run, readMain, ToolResult.success(map("path", "main.txt", "content", "after")));
+        run,
+        readMain,
+        ToolResult.success(
+            map(
+                "path", "main.txt",
+                "revision", sha256(new File(root, "main.txt")),
+                "coverage_summary", map("ready_for_edit", true),
+                "evidence", Collections.singletonList(map("evidence_id", "ev2", "content", "after")))));
     policy.onToolCompleted(
         run,
         editMain,
@@ -820,6 +836,212 @@ public final class CodeAgentPresetTest {
     ToolResult accepted = coordinator.recordAndDecorate(
         generation, "read_plan", arguments, ToolResult.success(ready));
     assertEquals("implement", currentStepId(accepted.data().get("plan_state")));
+  }
+
+  @Test
+  public void dynamicToolSurfaceRoutesReadEditVerifyAndBrowserFailures() throws Exception {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .requireQualityReview("ui_product")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("list_dir", CodeToolRole.DISCOVER);
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_file_batch", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("create_file", CodeToolRole.CREATE);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("rewrite", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.PLAN_TASK, CodeToolRole.PLAN);
+    roles.put(CodeAgentToolNames.QUALITY_REVIEW, CodeToolRole.QUALITY);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    AgentRunContext run = new AgentRunContext(90L, "s", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 0);
+    List<ToolSpec> registered = new ArrayList<>();
+    for (String name : roles.keySet()) registered.add(tool(name).spec());
+    coordinator.onRunStarted(run);
+
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("list_dir", "read_plan", "plan_task", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
+    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file_batch"));
+    ToolInvocation hiddenBatch =
+        new ToolInvocation(
+            "hidden-batch",
+            tool("read_file_batch"),
+            new ToolArguments(map("path", root.getAbsolutePath())));
+    assertTrue(coordinator.supports(hiddenBatch));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(coordinator, hiddenBatch).kind());
+
+    long generation = coordinator.generation();
+    coordinator.acceptPlan(
+        map(
+            "goal", "修复交互",
+            "quality_mode", "ui_product",
+            "planned_files", Collections.singletonList(map("path", "main.txt", "action", "edit")),
+            "steps",
+            Arrays.asList(
+                step("discover", "收集证据", "discover", "read_plan"),
+                step("implement", "修复", "implement", "search_replace"),
+                step("verify", "验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "审查", "quality", "quality_review"))));
+    Map<String, Object> ready =
+        map(
+            "path", "main.txt",
+            "revision", sha256(new File(root, "main.txt")),
+            "coverage_summary", map("ready_for_edit", true),
+            "evidence", Collections.singletonList(map("evidence_id", "ev", "content", "before")));
+    coordinator.recordAndDecorate(
+        generation,
+        "read_plan",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(ready));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("create_file", "search_replace", "rewrite", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("syntax_check", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+    coordinator.recordAndDecorate(
+        generation, "syntax_check", ToolResult.success(map("passed", true)));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("browser_test", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        ToolResult.success(map("passed", false, "failure_kind", "test_plan_invalid")));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("browser_test", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+    coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        ToolResult.success(map("passed", false, "failure_kind", "product_code_failure")));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("read_plan", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "read_plan",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(ready));
+    assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("search_replace"));
+    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_plan"));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt", "old", "stale", "new", "after")),
+        ToolResult.error(
+            "file_tool_error", "search_match_count:0:expected=1:actual=0", false));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList("read_file", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
+    AgentTool recoveryRead = tool("read_file");
+    assertEquals(
+        ToolPolicyDecision.Kind.ERROR,
+        decision(
+                coordinator,
+                new ToolInvocation(
+                    "full-read",
+                    recoveryRead,
+                    new ToolArguments(map("path", "main.txt"))))
+            .kind());
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(
+                coordinator,
+                new ToolInvocation(
+                    "bounded-read",
+                    recoveryRead,
+                    new ToolArguments(
+                        map("path", "main.txt", "start_line", 1, "end_line", 1))))
+            .kind());
+    coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "main.txt", "start_line", 1, "end_line", 1)),
+        ToolResult.success(map("path", "main.txt", "content", "before")));
+    assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("search_replace"));
+    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
+  }
+
+  @Test
+  public void exactSearchReplaceFailureAllowsOnlySamePathAnchorRecovery() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ReadBeforeEditPolicy policy = new ReadBeforeEditPolicy(workspace, roles);
+    AgentRunContext run = new AgentRunContext(91L, "s", "workspace", "task");
+    AgentTool readPlan = tool("read_plan");
+    AgentTool readFile = tool("read_file");
+    AgentTool edit = tool("search_replace");
+    policy.onRunStarted(run);
+    policy.onToolCompleted(
+        run,
+        new ToolInvocation(
+            "plan", readPlan, new ToolArguments(Collections.singletonMap("path", "main.txt"))),
+        ToolResult.success(
+            map(
+                "path", "main.txt",
+                "revision", sha256(new File(root, "main.txt")),
+                "coverage_summary", map("ready_for_edit", true),
+                "evidence", Collections.singletonList(map("evidence_id", "ev", "content", "before")))));
+    ToolInvocation failedEdit =
+        new ToolInvocation(
+            "failed",
+            edit,
+            new ToolArguments(map("path", "main.txt", "old", "stale", "new", "after")));
+    policy.onToolCompleted(
+        run,
+        failedEdit,
+        ToolResult.error("file_tool_error", "search_match_count:0:expected=1:actual=0", false));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, failedEdit).kind());
+
+    policy.onToolCompleted(
+        run,
+        new ToolInvocation(
+            "refresh", readFile, new ToolArguments(Collections.singletonMap("path", "main.txt"))),
+        ToolResult.success(map("path", "main.txt", "content", "before")));
+    ToolInvocation exact =
+        new ToolInvocation(
+            "retry",
+            edit,
+            new ToolArguments(map("path", "main.txt", "old", "before", "new", "after")));
+    ToolInvocation invented =
+        new ToolInvocation(
+            "invented",
+            edit,
+            new ToolArguments(map("path", "main.txt", "old", "not-in-read", "new", "after")));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, decision(policy, exact).kind());
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, invented).kind());
+
+    policy.onToolCompleted(
+        run,
+        exact,
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+    policy.onToolCompleted(
+        run,
+        new ToolInvocation(
+            "late-refresh", readFile, new ToolArguments(Collections.singletonMap("path", "main.txt"))),
+        ToolResult.success(map("path", "main.txt", "content", "before")));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, decision(policy, exact).kind());
   }
 
   @Test
@@ -1829,6 +2051,12 @@ public final class CodeAgentPresetTest {
     return null;
   }
 
+  private static Set<String> selectedNames(ToolSelection selection) {
+    Set<String> names = new LinkedHashSet<>();
+    for (ToolSpec spec : selection.tools()) names.add(spec.name());
+    return names;
+  }
+
   private static AgentTool tool(String name) {
     return new AgentTool() {
       @Override
@@ -1846,7 +2074,7 @@ public final class CodeAgentPresetTest {
   }
 
   private static ToolPolicyDecision decision(
-      ReadBeforeEditPolicy policy, ToolInvocation invocation) {
+      ToolPolicy policy, ToolInvocation invocation) {
     AtomicReference<ToolPolicyDecision> result = new AtomicReference<>();
     policy.evaluate(null, invocation, result::set);
     return result.get();

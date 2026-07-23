@@ -64,6 +64,71 @@ public class AgentCoreTest {
   }
 
   @Test
+  public void modelRequestUsesRoundToolSelectionPolicy() {
+    AtomicReference<List<String>> visible = new AtomicReference<>();
+    ToolPolicy selectionPolicy =
+        new ToolPolicy() {
+          @Override
+          public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
+            assertEquals(0, context.round());
+            assertEquals("task", context.runContext().demand());
+            return ToolSelection.onlyNames(tools, Arrays.asList("read_plan", "finalize_task"));
+          }
+
+          public boolean supports(ToolInvocation invocation) {
+            return false;
+          }
+
+          public Cancellable evaluate(
+              ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+            throw new AssertionError("selection-only policy must not evaluate invocations");
+          }
+        };
+    ModelGateway gateway =
+        (request, observer) -> {
+          List<String> names = new ArrayList<>();
+          for (ToolSpec spec : request.tools()) names.add(spec.name());
+          visible.set(names);
+          observer.onComplete(new ModelResponse("done", "stop", Collections.emptyList()));
+          return Cancellable.NONE;
+        };
+    WorkbenchDefinition base =
+        definition(
+            Arrays.asList(
+                tool("read_file", false),
+                tool("read_file_batch", false),
+                tool("read_plan", false),
+                tool("finalize_task", false)),
+            Collections.emptyList());
+    WorkbenchDefinition routed =
+        new WorkbenchDefinition() {
+          public String id() { return base.id(); }
+          public String displayName() { return base.displayName(); }
+          public List<PromptContributor> promptContributors() { return base.promptContributors(); }
+          public List<ContextProvider> contextProviders() { return base.contextProviders(); }
+          public List<AgentTool> tools() { return base.tools(); }
+          public List<ToolPolicy> toolPolicies() { return Collections.singletonList(selectionPolicy); }
+          public List<TaskValidator> validators() { return base.validators(); }
+          public WorkbenchHost host() { return base.host(); }
+        };
+    AgentEngine engine =
+        new AgentEngine(
+            routed,
+            gateway,
+            new ModelEndpoint("http://localhost", "", "m", 0, false, false),
+            noopDecisions(),
+            Runnable::run,
+            "s",
+            "w",
+            false,
+            2);
+
+    engine.submit("task", observer(new AtomicReference<>()));
+
+    assertEquals(Arrays.asList("read_plan", "finalize_task"), visible.get());
+  }
+
+  @Test
   public void refreshesSystemPromptForEveryUserDemand() {
     List<String> systems = new ArrayList<>();
     ModelGateway gateway =

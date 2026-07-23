@@ -420,6 +420,62 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
+  public void browserHistoryKeepsFailureRoutingAndDropsLowLevelScenarioProtocol() {
+    Map<String, Object> arguments =
+        map(
+            "entry_path", "index.html",
+            "goal", "验证启动",
+            "scenarios",
+            Collections.singletonList(
+                map(
+                    "id", "start",
+                    "description", "点击后启动",
+                    "actions", Collections.singletonList(map("type", "click", "selector", "#start")),
+                    "expectations",
+                    Collections.singletonList(
+                        map("type", "js_boolean", "expression", "window.secretProtocol === true")))));
+    Map<String, Object> data =
+        map(
+            "operation", "browser_test",
+            "mode", "goal_driven_verification_transaction",
+            "source_revision", "rev-1",
+            "test_plan_hash", "plan-1",
+            "passed", false,
+            "failure_kind", "product_code_failure",
+            "scenario_results",
+            Collections.singletonList(
+                map(
+                    "id", "start",
+                    "passed", false,
+                    "failure_kind", "product_code_failure",
+                    "failed_expectations", Collections.singletonList("game did not start"),
+                    "compiled_steps", String.join("", Collections.nCopies(100, "internal-step")))),
+            "reading_brief", map("path", "index.html", "signals", Collections.singletonList("#start")),
+            "recommended_next_action", "read_plan");
+    List<AgentMessage> projected =
+        AgentHistoryRequestProjection.project(
+            Arrays.asList(
+                AgentMessage.assistant(
+                    "",
+                    Collections.singletonList(
+                        new AgentToolCall("browser", "browser_test", new ToolArguments(arguments)))),
+                AgentMessage.tool(
+                    "browser", "browser_test", ToolResultCodec.toJson(ToolResult.success(data)))));
+
+    ToolArguments compact = projected.get(0).toolCalls().get(0).arguments();
+    assertEquals("browser_verification_compacted", compact.getString("request_projection", ""));
+    assertFalse(compact.asMap().toString().contains("window.secretProtocol"));
+    JsonObject compactData =
+        JsonParser.parseString(projected.get(1).content())
+            .getAsJsonObject()
+            .getAsJsonObject("data");
+    assertEquals("product_code_failure", compactData.get("failure_kind").getAsString());
+    assertEquals("read_plan", compactData.get("recommended_next_action").getAsString());
+    assertTrue(compactData.has("reading_brief"));
+    assertFalse(projected.get(1).content().contains("internal-step"));
+  }
+
+  @Test
   public void characterBudgetCountsToolArgumentsAndToolResults() {
     String large = String.join("", Collections.nCopies(6000, "x"));
     Map<String, Object> arguments = new LinkedHashMap<>();

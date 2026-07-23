@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.2.4'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.0'
 }
 ```
 
@@ -83,7 +83,7 @@ Code Agent 通用层提供：
 - `ADAPTIVE / FORCE / SKIP` 三种规划模式；宿主也可通过 `code_agent_planning_mode` 启动参数选择。
 - 新写入会使旧验证和质量证据失效；只有 Validator 通过后计划才会完成。
 
-READ 工具必须返回真实源码内容和可校验的文件路径；仅返回 `path/read_paths` 不再构成编辑授权。普通单文件读取使用 `content + path/resolved_path`，批量读取使用 `items[].result.content + path/resolved_path`。目标驱动 `read_plan` 还必须返回文件 `revision`、非空 `evidence[]`，并以 `coverage_summary.ready_for_edit=true` 表示当前 revision 已具备编辑证据；成功写入或磁盘内容变化会使旧证据失效。
+Code Agent 的常规源码收集只向模型暴露目标驱动 `read_plan`。它必须返回文件 `revision`、非空 `evidence[]`，并以 `coverage_summary.ready_for_edit=true` 表示当前 revision 已具备编辑证据；成功写入或磁盘内容变化会使旧证据失效。`read_file` 仅在 `search_replace` 精确失败后临时开放，用于同路径的函数/类/方法或最多 80 行短锚点恢复，普通 `read_file/read_file_batch` 不再授权跨区域编辑。
 
 语言 Profile 只保留语言规则、编译/运行工具、验证合同和语言专属验证器。
 
