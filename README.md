@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.2.1'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.2.3'
 }
 ```
 
@@ -138,11 +138,11 @@ Logcat 使用可直接阅读的中文分段输出：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.2.1
+  publishToMavenLocal -PAIW_VERSION=1.2.3
 
-git tag 1.2.1
+git tag 1.2.3
 git push origin main
-git push origin 1.2.1
+git push origin 1.2.3
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
