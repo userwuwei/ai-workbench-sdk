@@ -300,28 +300,6 @@ final class AgentHistoryRequestProjection {
     JsonObject data = object(result.get("data"));
     if (data == null) return null;
 
-    Map<String, Object> arguments = new LinkedHashMap<>();
-    Map<String, Object> source = call.arguments().asMap();
-    copyFirst(source, arguments, "entry_path", "entry_path");
-    copyFirst(source, arguments, "goal", "goal");
-    copyFirst(source, arguments, "timeout_ms", "timeout_ms");
-    List<Map<String, Object>> scenarioSummaries = new ArrayList<>();
-    Object rawScenarios = source.get("scenarios");
-    if (rawScenarios instanceof List) {
-      for (Object raw : (List<?>) rawScenarios) {
-        if (!(raw instanceof Map)) continue;
-        Map<?, ?> scenario = (Map<?, ?>) raw;
-        Map<String, Object> summary = new LinkedHashMap<>();
-        if (scenario.get("id") != null) summary.put("id", scenario.get("id"));
-        if (scenario.get("description") != null) {
-          summary.put("description", truncate(String.valueOf(scenario.get("description")), 240));
-        }
-        scenarioSummaries.add(summary);
-      }
-    }
-    if (!scenarioSummaries.isEmpty()) arguments.put("scenarios", scenarioSummaries);
-    arguments.put("request_projection", "browser_verification_compacted");
-
     JsonObject compactResult = new JsonObject();
     copyJson(result, compactResult, "status", "error_code", "message", "retryable");
     JsonObject compactData = new JsonObject();
@@ -333,9 +311,14 @@ final class AgentHistoryRequestProjection {
         "source_revision",
         "test_plan_hash",
         "viewport_signature",
+        "plan_id",
         "passed",
         "failure_kind",
         "reused",
+        "webview_launch_count",
+        "required_interaction_check_ids",
+        "covered_interaction_check_ids",
+        "missing_interaction_check_ids",
         "coverage_summary",
         "reading_brief",
         "test_retry_brief",
@@ -360,7 +343,9 @@ final class AgentHistoryRequestProjection {
     }
     compactData.addProperty("history_projection", "browser_verification_compacted");
     compactResult.add("data", compactData);
-    return new Projection(new ToolArguments(arguments), GSON.toJson(compactResult));
+    // Browser calls remain valid model-facing transactions. Only their results are compacted;
+    // never replace actions/expectations/transition with internal projection metadata.
+    return new Projection(call.arguments(), GSON.toJson(compactResult));
   }
 
   private static Map<String, Object> compactArguments(

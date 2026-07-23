@@ -1,5 +1,7 @@
 package com.cscjapp.aiworkbench.api;
 
+import java.util.Map;
+
 public final class ToolPolicyDecision {
   public enum Kind {
     PROCEED,
@@ -32,6 +34,12 @@ public final class ToolPolicyDecision {
   public static ToolPolicyDecision error(String code, String message, boolean retryable) {
     return new ToolPolicyDecision(
         Kind.ERROR, null, ToolResult.error(code, message, retryable));
+  }
+
+  public static ToolPolicyDecision error(
+      String code, String message, boolean retryable, Map<String, ?> data) {
+    return new ToolPolicyDecision(
+        Kind.ERROR, null, ToolResult.error(code, message, retryable, data));
   }
 
   public Kind kind() {

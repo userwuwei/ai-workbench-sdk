@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.2
+
+- `plan_task.interaction_checks[]` 保留显式稳定 `check_id`，并通过 `plan_state.required_interaction_check_ids` 持续暴露给模型。
+- `browser_test` 在宿主启动前校验场景 ID 是否一次性完整覆盖当前计划；不匹配时返回结构化差异且 WebView 启动次数为零。
+- 最新浏览器事务按同一 plan、源码 revision 和完整覆盖登记，`quality_review` 自动绑定真实覆盖 ID；写入或重新规划立即使旧浏览器与质量证据失效。
+- `finalize_task(completed)` 的浏览器/质量前置条件改在工具执行前返回明确下一阶段，宿主终态验证器不再重复注入笼统交互 blocker。
+- 浏览器历史只压缩结果，完整保留合法 `actions`、`expectations` 和 `transition` 参数，不再向工具参数写入 `request_projection`。
+
 ## 2.0.1
 
 - `read_file` 与 `read_plan` 在代码任务各阶段保持可见，移除普通读取的策略失败；首次接触当前 revision 时默认建议完整读取，跨区域证据读取由模型自主判断。

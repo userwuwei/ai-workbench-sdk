@@ -363,6 +363,256 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void interactionVerificationContractIsCheckedBeforeBrowserAndFinalize() {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .requireQualityReview("ui_product")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.QUALITY_REVIEW, CodeToolRole.QUALITY);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(31L, "s", "workspace", "task"));
+    long generation = coordinator.generation();
+    Map<String, Object> accepted = coordinator.acceptPlan(
+        map(
+            "goal", "验证游戏交互",
+            "quality_mode", "interface_product",
+            "interaction_required", true,
+            "interaction_checks",
+            Arrays.asList(
+                map("check_id", "start-game", "description", "启动游戏"),
+                map("check_id", "restart-game", "description", "重新开始")),
+            "steps",
+            Arrays.asList(
+                step("verify", "执行验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "质量审查", "quality", "quality_review"))));
+    Map<?, ?> planState = (Map<?, ?>) accepted.get("plan_state");
+    assertEquals(
+        Arrays.asList("start-game", "restart-game"),
+        planState.get("required_interaction_check_ids"));
+
+    AgentTool browser = tool("browser_test");
+    ToolPolicyDecision mismatch = decision(
+        coordinator,
+        new ToolInvocation(
+            "browser-mismatch",
+            browser,
+            new ToolArguments(
+                map(
+                    "scenarios",
+                    Arrays.asList(
+                        map("id", "start-game"),
+                        map("id", "extra"),
+                        map("id", "extra"))))));
+    assertEquals(ToolPolicyDecision.Kind.ERROR, mismatch.kind());
+    assertEquals("browser_interaction_contract_mismatch", mismatch.result().errorCode());
+    assertEquals(Collections.singletonList("restart-game"), mismatch.result().data().get("missing_ids"));
+    assertEquals(Collections.singletonList("extra"), mismatch.result().data().get("unexpected_ids"));
+    assertEquals(Collections.singletonList("extra"), mismatch.result().data().get("duplicate_ids"));
+    assertEquals(0, mismatch.result().data().get("webview_launch_count"));
+
+    ToolArguments browserArguments = new ToolArguments(
+        map(
+            "scenarios",
+            Arrays.asList(map("id", "start-game"), map("id", "restart-game"))));
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(coordinator, new ToolInvocation("browser-ok", browser, browserArguments)).kind());
+
+    ToolResult verified = coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        browserArguments,
+        ToolResult.success(
+            map(
+                "operation", "browser_test",
+                "passed", true,
+                "source_revision", "source-1",
+                "test_plan_hash", "test-plan-1",
+                "coverage_summary",
+                map(
+                    "complete", true,
+                    "covered_interaction_check_ids",
+                    Arrays.asList("start-game", "restart-game"),
+                    "missing_interaction_check_ids", Collections.emptyList()))));
+    assertEquals("plan-31-1", verified.data().get("plan_id"));
+    assertEquals(
+        Arrays.asList("start-game", "restart-game"),
+        verified.data().get("covered_interaction_check_ids"));
+
+    AgentTool finalize = tool(CodeAgentToolNames.FINALIZE_TASK);
+    ToolArguments completed = new ToolArguments(map("status", "completed", "summary", "done"));
+    assertFalse(coordinator.supports(new ToolInvocation(
+        "blocked", finalize, new ToolArguments(map("status", "blocked", "summary", "blocked")))));
+    assertFalse(coordinator.supports(new ToolInvocation(
+        "needs-user",
+        finalize,
+        new ToolArguments(map("status", "needs_user_input", "summary", "question")))));
+    ToolPolicyDecision beforeQuality = decision(
+        coordinator, new ToolInvocation("finalize-before-quality", finalize, completed));
+    assertEquals("finalize_precondition_failed", beforeQuality.result().errorCode());
+    assertEquals("quality_review", beforeQuality.result().data().get("missing_stage"));
+
+    AgentTool quality = tool(CodeAgentToolNames.QUALITY_REVIEW);
+    ToolPolicyDecision qualityDecision = decision(
+        coordinator,
+        new ToolInvocation(
+            "quality",
+            quality,
+            new ToolArguments(
+                map(
+                    "passed", true,
+                    "blocking_gaps", Collections.emptyList(),
+                    "minimal_version_risk", false))));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, qualityDecision.kind());
+    assertEquals(
+        Arrays.asList("start-game", "restart-game"),
+        qualityDecision.arguments().get("covered_interaction_check_ids"));
+    coordinator.recordAndDecorate(
+        generation,
+        CodeAgentToolNames.QUALITY_REVIEW,
+        qualityDecision.arguments(),
+        ToolResult.success(qualityDecision.arguments().asMap()));
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(coordinator, new ToolInvocation("finalize", finalize, completed)).kind());
+
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+    ToolPolicyDecision stale = decision(
+        coordinator, new ToolInvocation("finalize-stale", finalize, completed));
+    assertEquals("browser_test", stale.result().data().get("missing_stage"));
+  }
+
+  @Test
+  public void latestBrowserTransactionDoesNotUnionInteractionCoverage() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(
+            CodePlanningMode.ADAPTIVE,
+            CodeValidationContract.builder().defaultRequiredEvidence("browser_test").build(),
+            roles,
+            workspace);
+    coordinator.onRunStarted(new AgentRunContext(32L, "s", "workspace", "task"));
+    coordinator.acceptPlan(
+        map(
+            "goal", "验证交互",
+            "interaction_checks",
+            Arrays.asList(
+                map("check_id", "start-game", "description", "启动"),
+                map("check_id", "restart-game", "description", "重开")),
+            "steps", Collections.singletonList(
+                step("verify", "验证", "verify", "browser_test"))));
+    long generation = coordinator.generation();
+    for (String id : Arrays.asList("start-game", "restart-game")) {
+      coordinator.recordAndDecorate(
+          generation,
+          "browser_test",
+          ToolArguments.empty(),
+          ToolResult.success(
+              map(
+                  "passed", true,
+                  "source_revision", "source-1",
+                  "coverage_summary",
+                  map(
+                      "complete", true,
+                      "covered_interaction_check_ids", Collections.singletonList(id),
+                      "missing_interaction_check_ids", Collections.singletonList(
+                          "start-game".equals(id) ? "restart-game" : "start-game")))));
+    }
+    assertFalse(coordinator.hasCurrentEvidence("browser_test"));
+    ToolPolicyDecision finalize = decision(
+        coordinator,
+        new ToolInvocation(
+            "finalize",
+            tool("finalize_task"),
+            new ToolArguments(map("status", "completed", "summary", "done"))));
+    assertEquals("browser_test", finalize.result().data().get("missing_stage"));
+  }
+
+  @Test
+  public void replanInvalidatesBrowserAndQualityInteractionEvidence() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(
+            CodePlanningMode.ADAPTIVE,
+            CodeValidationContract.builder().defaultRequiredEvidence("browser_test").build(),
+            roles,
+            workspace);
+    coordinator.onRunStarted(new AgentRunContext(33L, "s", "workspace", "task"));
+    Map<String, Object> plan = map(
+        "goal", "验证启动",
+        "interaction_checks",
+        Collections.singletonList(map("check_id", "start-game", "description", "启动")),
+        "steps",
+        Arrays.asList(
+            step("verify", "验证", "verify", "browser_test"),
+            step("quality", "审查", "quality", "quality_review")));
+    coordinator.acceptPlan(plan);
+    long generation = coordinator.generation();
+    ToolArguments browserArguments = new ToolArguments(
+        map("scenarios", Collections.singletonList(map("id", "start-game"))));
+    coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        browserArguments,
+        ToolResult.success(
+            map(
+                "passed", true,
+                "source_revision", "source-1",
+                "coverage_summary",
+                map(
+                    "complete", true,
+                    "covered_interaction_check_ids", Collections.singletonList("start-game"),
+                    "missing_interaction_check_ids", Collections.emptyList()))));
+    ToolPolicyDecision injected = decision(
+        coordinator,
+        new ToolInvocation(
+            "quality",
+            tool("quality_review"),
+            new ToolArguments(
+                map(
+                    "passed", true,
+                    "minimal_version_risk", false,
+                    "blocking_gaps", Collections.emptyList()))));
+    coordinator.recordAndDecorate(
+        generation,
+        "quality_review",
+        injected.arguments(),
+        ToolResult.success(injected.arguments().asMap()));
+    ToolArguments completed = new ToolArguments(map("status", "completed", "summary", "done"));
+    assertEquals(
+        ToolPolicyDecision.Kind.PROCEED,
+        decision(
+            coordinator,
+            new ToolInvocation("finalize-before-replan", tool("finalize_task"), completed)).kind());
+
+    Map<String, Object> replanned = new LinkedHashMap<>(plan);
+    replanned.put("replan_reason", "调整后重新确认");
+    coordinator.acceptPlan(replanned);
+    ToolPolicyDecision stale = decision(
+        coordinator,
+        new ToolInvocation("finalize-after-replan", tool("finalize_task"), completed));
+    assertEquals("finalize_precondition_failed", stale.result().errorCode());
+    assertEquals("browser_test", stale.result().data().get("missing_stage"));
+  }
+
+  @Test
   public void metaSchemaExtensionMergesWithoutReplacingBaseProperties() {
     Map<String, Object> extraProperty = new LinkedHashMap<>();
     extraProperty.put("type", "string");

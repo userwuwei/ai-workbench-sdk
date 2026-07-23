@@ -500,7 +500,7 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
-  public void browserHistoryKeepsFailureRoutingAndDropsLowLevelScenarioProtocol() {
+  public void browserHistoryKeepsFormalScenarioArgumentsAndCompactsOnlyResults() {
     Map<String, Object> arguments =
         map(
             "entry_path", "index.html",
@@ -543,8 +543,10 @@ public class AgentHistoryRequestProjectionTest {
                     "browser", "browser_test", ToolResultCodec.toJson(ToolResult.success(data)))));
 
     ToolArguments compact = projected.get(0).toolCalls().get(0).arguments();
-    assertEquals("browser_verification_compacted", compact.getString("request_projection", ""));
-    assertFalse(compact.asMap().toString().contains("window.secretProtocol"));
+    assertFalse(compact.has("request_projection"));
+    assertTrue(compact.asMap().toString().contains("actions"));
+    assertTrue(compact.asMap().toString().contains("expectations"));
+    assertTrue(compact.asMap().toString().contains("window.secretProtocol"));
     JsonObject compactData =
         JsonParser.parseString(projected.get(1).content())
             .getAsJsonObject()
