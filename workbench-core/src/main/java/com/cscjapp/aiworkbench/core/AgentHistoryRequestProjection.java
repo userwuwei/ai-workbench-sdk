@@ -32,8 +32,6 @@ final class AgentHistoryRequestProjection {
     List<AgentMessage> safe = AgentHistory.sanitize(source);
     if (safe.isEmpty()) return safe;
     List<AgentMessage> out = new ArrayList<>(safe.size());
-    Map<String, Integer> latestSuccessfulWrites = latestSuccessfulWriteIndexes(safe);
-    int latestBrowserFailure = latestBrowserFailureIndex(safe);
     boolean anyChanged = false;
     for (int index = 0; index < safe.size(); ) {
       AgentMessage message = safe.get(index);
@@ -52,11 +50,7 @@ final class AgentHistoryRequestProjection {
       Map<String, Projection> projections = new LinkedHashMap<>();
       List<AgentToolCall> calls = new ArrayList<>(message.toolCalls().size());
       for (AgentToolCall call : message.toolCalls()) {
-        Projection projection = create(
-            call,
-            resultsByCallId.get(call.id()),
-            staleReadPaths(call, latestSuccessfulWrites, index),
-            index == latestBrowserFailure);
+        Projection projection = create(call, resultsByCallId.get(call.id()));
         if (projection == null) calls.add(call);
         else {
           calls.add(new AgentToolCall(call.id(), call.name(), projection.arguments));
@@ -77,43 +71,11 @@ final class AgentHistoryRequestProjection {
     return anyChanged ? Collections.unmodifiableList(out) : safe;
   }
 
-  static String latestManagedPlanSummary(List<AgentMessage> source) {
-    List<AgentMessage> safe = AgentHistory.sanitize(source);
-    JsonObject latestPlan = null;
-    JsonObject latestState = null;
-    for (AgentMessage message : safe) {
-      if (message.role() != AgentMessage.Role.TOOL) continue;
-      JsonObject root = parseObject(message.content());
-      JsonObject data = root == null ? null : object(root.get("data"));
-      if (data == null) continue;
-      JsonObject state = object(data.get("plan_state"));
-      if (state != null) latestState = state;
-      if ("plan_task".equals(string(data.get("operation")))) latestPlan = data;
-    }
-    if (latestPlan == null) return "";
-    JsonObject normalized = object(latestPlan.get("normalized_plan"));
-    if (normalized == null) return "";
-    JsonObject summary = new JsonObject();
-    copyJson(normalized, summary,
-        "goal", "quality_mode", "writing_mode", "planned_files", "verification_plan",
-        "interaction_required", "interaction_checks", "waived_checks",
-        "interaction_check_warnings");
-    if (latestState != null) summary.add("plan_state", latestState.deepCopy());
-    String value = GSON.toJson(summary);
-    return truncate(value, 6000);
-  }
-
-  private static Projection create(
-      AgentToolCall call,
-      AgentMessage resultMessage,
-      Set<String> staleReadPaths,
-      boolean keepBrowserFailureDetails) {
-    if (call == null || call.arguments() == null || resultMessage == null) return null;
-    if (isReadTool(call.name())) return createRead(call, resultMessage, staleReadPaths);
-    if ("browser_test".equals(call.name())) {
-      return createBrowser(call, resultMessage, keepBrowserFailureDetails);
-    }
-    if (!isWriteTool(call.name())) return null;
+  private static Projection create(AgentToolCall call, AgentMessage resultMessage) {
+    if (call == null
+        || call.arguments() == null
+        || resultMessage == null
+        || !isWriteTool(call.name())) return null;
     String rawArguments = GSON.toJson(call.arguments().asMap());
     if (rawArguments.length() <= LARGE_WRITE_ARGUMENT_CHARS) return null;
     JsonObject result = parseObject(resultMessage.content());
@@ -166,7 +128,6 @@ final class AgentHistoryRequestProjection {
         "no_change_count",
         "total_lines",
         "content_hash",
-        "artifact_manifest",
         "plan_state");
     if (repair) {
       copyJson(
@@ -187,232 +148,6 @@ final class AgentHistoryRequestProjection {
     compactResult.add("data", compactData);
     compactResult.addProperty("retryable", booleanValue(result.get("retryable")));
     return new Projection(new ToolArguments(compactArguments), GSON.toJson(compactResult));
-  }
-
-  private static Projection createRead(
-      AgentToolCall call, AgentMessage resultMessage, Set<String> staleReadPaths) {
-    JsonObject result = parseObject(resultMessage.content());
-    if (result == null || !"success".equalsIgnoreCase(string(result.get("status")))) return null;
-    JsonObject data = object(result.get("data"));
-    if (data == null || GSON.toJson(data).length() < 2048) return null;
-    JsonObject compactData = data.deepCopy();
-    removeDuplicateLines(compactData);
-    boolean stale = compactStaleReadContent(compactData, staleReadPaths);
-    JsonObject compactResult = result.deepCopy();
-    compactResult.add("data", compactData);
-    Map<String, Object> arguments = new LinkedHashMap<>(call.arguments().asMap());
-    arguments.put("request_projection", stale
-        ? "stale_read_compacted" : "read_content_deduplicated");
-    return new Projection(new ToolArguments(arguments), GSON.toJson(compactResult));
-  }
-
-  private static void removeDuplicateLines(JsonObject data) {
-    if (data.has("content") && data.has("lines")) data.remove("lines");
-    JsonElement items = data.get("items");
-    if (items == null || !items.isJsonArray()) return;
-    for (JsonElement raw : items.getAsJsonArray()) {
-      JsonObject item = object(raw);
-      if (item == null) continue;
-      JsonObject result = object(item.get("result"));
-      if (result != null && result.has("content") && result.has("lines")) result.remove("lines");
-    }
-  }
-
-  private static boolean compactStaleReadContent(
-      JsonObject data, Set<String> staleReadPaths) {
-    if (data == null || staleReadPaths == null || staleReadPaths.isEmpty()) return false;
-    boolean changed = compactStaleReadItem(data, staleReadPaths, "");
-    JsonElement items = data.get("items");
-    if (items != null && items.isJsonArray()) for (JsonElement raw : items.getAsJsonArray()) {
-      JsonObject item = object(raw);
-      JsonObject nested = item == null ? null : object(item.get("result"));
-      if (nested != null) changed |= compactStaleReadItem(nested, staleReadPaths, "");
-    }
-    return changed;
-  }
-
-  private static boolean compactStaleReadItem(
-      JsonObject data, Set<String> staleReadPaths, String fallbackPath) {
-    String path = firstJson(data, "resolved_path", "path");
-    if (path.isEmpty()) path = fallbackPath;
-    if (!staleReadPaths.contains(normalizePath(path))) return false;
-    JsonElement content = data.get("content");
-    if (content != null && content.isJsonPrimitive()) {
-      String value = string(content);
-      data.addProperty("content_chars", value.length());
-      if (!data.has("content_hash")) data.addProperty("content_hash", sha256(value));
-    }
-    data.remove("content");
-    data.remove("lines");
-    data.addProperty("content_compacted", true);
-    data.addProperty("compaction_reason", "superseded_by_new_file_revision");
-    return true;
-  }
-
-  private static int latestBrowserFailureIndex(List<AgentMessage> messages) {
-    int latest = -1;
-    for (int index = 0; index < messages.size(); index++) {
-      AgentMessage message = messages.get(index);
-      if (message.role() != AgentMessage.Role.ASSISTANT) continue;
-      Map<String, AgentMessage> results = new LinkedHashMap<>();
-      int cursor = index + 1;
-      while (cursor < messages.size() && messages.get(cursor).role() == AgentMessage.Role.TOOL) {
-        AgentMessage result = messages.get(cursor++);
-        results.put(result.toolCallId(), result);
-      }
-      for (AgentToolCall call : message.toolCalls()) {
-        if (!"browser_test".equals(call.name())) continue;
-        AgentMessage resultMessage = results.get(call.id());
-        JsonObject root = parseObject(resultMessage == null ? "" : resultMessage.content());
-        JsonObject data = root == null ? null : object(root.get("data"));
-        if (data != null && !booleanValue(data.get("passed"))) latest = index;
-      }
-      index = Math.max(index, cursor - 1);
-    }
-    return latest;
-  }
-
-  private static Map<String, Integer> latestSuccessfulWriteIndexes(List<AgentMessage> messages) {
-    Map<String, Integer> latest = new LinkedHashMap<>();
-    for (int index = 0; index < messages.size(); index++) {
-      AgentMessage message = messages.get(index);
-      if (message.role() != AgentMessage.Role.ASSISTANT) continue;
-      Map<String, AgentMessage> results = new LinkedHashMap<>();
-      int cursor = index + 1;
-      while (cursor < messages.size() && messages.get(cursor).role() == AgentMessage.Role.TOOL) {
-        AgentMessage result = messages.get(cursor++);
-        results.put(result.toolCallId(), result);
-      }
-      for (AgentToolCall call : message.toolCalls()) {
-        if (!isWriteTool(call.name())) continue;
-        JsonObject root = parseObject(results.containsKey(call.id())
-            ? results.get(call.id()).content() : "");
-        JsonObject data = root == null ? null : object(root.get("data"));
-        if (root == null || !successfulWithoutPartialFailure(root, data)) continue;
-        addWritePath(latest, value(first(call.arguments().asMap(), "path", "requested_path")), index);
-        addWritePath(latest, firstJson(data, "resolved_path", "path", "requested_path"), index);
-      }
-      index = Math.max(index, cursor - 1);
-    }
-    return latest;
-  }
-
-  private static Set<String> staleReadPaths(
-      AgentToolCall call, Map<String, Integer> latestWrites, int readIndex) {
-    Set<String> out = new LinkedHashSet<>();
-    if (call == null || !isReadTool(call.name())) return out;
-    collectReadArgumentPaths(call.arguments().asMap(), out);
-    out.removeIf(path -> latestWrites.getOrDefault(path, -1) <= readIndex);
-    return out;
-  }
-
-  private static void collectReadArgumentPaths(Map<String, Object> source, Set<String> out) {
-    addReadPath(out, value(first(source, "path", "resolved_path")));
-    Object targets = source.get("targets");
-    if (targets instanceof List) for (Object raw : (List<?>) targets) {
-      if (!(raw instanceof Map)) continue;
-      addReadPath(out, value(firstAny((Map<?, ?>) raw, "path", "resolved_path")));
-    }
-  }
-
-  private static void addWritePath(Map<String, Integer> target, String path, int index) {
-    String normalized = normalizePath(path);
-    if (!normalized.isEmpty()) target.put(normalized, index);
-  }
-
-  private static void addReadPath(Set<String> target, String path) {
-    String normalized = normalizePath(path);
-    if (!normalized.isEmpty()) target.add(normalized);
-  }
-
-  private static String normalizePath(String value) {
-    return value == null ? "" : value.trim().replace('\\', '/');
-  }
-
-  private static String firstJson(JsonObject source, String... keys) {
-    if (source == null) return "";
-    for (String key : keys) {
-      String value = string(source.get(key));
-      if (!value.isEmpty()) return value;
-    }
-    return "";
-  }
-
-  private static Object firstAny(Map<?, ?> source, String... keys) {
-    if (source == null) return null;
-    for (String key : keys) {
-      Object value = source.get(key);
-      if (value != null && !String.valueOf(value).trim().isEmpty()) return value;
-    }
-    return null;
-  }
-
-  private static Projection createBrowser(
-      AgentToolCall call, AgentMessage resultMessage, boolean keepFailureDetails) {
-    JsonObject result = parseObject(resultMessage.content());
-    if (result == null) return null;
-    JsonObject data = object(result.get("data"));
-    if (data == null) return null;
-    boolean passed = booleanValue(data.get("passed"));
-    Map<String, Object> arguments = new LinkedHashMap<>();
-    Map<String, Object> source = call.arguments().asMap();
-    copyFirst(source, arguments, "operation", "operation");
-    copyFirst(source, arguments, "entry_path", "entry_path");
-    copyFirst(source, arguments, "target_url", "target_url");
-    Object ids = source.get("interaction_check_ids");
-    if (ids != null) arguments.put("interaction_check_ids", ids);
-    arguments.put("step_count", listSize(source.get("steps")));
-    arguments.put("request_projection", passed ? "browser_success_compacted"
-        : keepFailureDetails ? "browser_failure_compacted" : "browser_failure_superseded");
-    if (!passed && keepFailureDetails) addFailedBrowserStep(arguments, source, data);
-
-    JsonObject compact = new JsonObject();
-    String status = string(result.get("status"));
-    compact.addProperty("status", status.isEmpty() ? "success" : status);
-    if (result.has("error_code")) compact.add("error_code", result.get("error_code").deepCopy());
-    if (result.has("message")) compact.addProperty(
-        "message", truncate(string(result.get("message")), MAX_ERROR_MESSAGE_CHARS));
-    JsonObject compactData = new JsonObject();
-    if (!passed && !keepFailureDetails) {
-      copyJson(data, compactData,
-          "operation", "browser_operation", "status", "passed", "failure_class",
-          "failed_check_id");
-    } else {
-      copyJson(data, compactData,
-          "operation", "browser_operation", "entry_path", "status", "passed", "title",
-          "steps_passed", "failure_reason", "failure_class", "failed_check_id",
-          "expected_check_ids", "covered_check_ids", "missing_check_ids", "next_action",
-          "selector_candidates", "test_manifest", "interaction_audit", "plan_state");
-      copyNonEmpty(data, compactData, "page_errors", "console_logs");
-    }
-    JsonObject layout = keepFailureDetails || passed ? object(data.get("layout_audit")) : null;
-    if (layout != null) {
-      JsonObject layoutSummary = new JsonObject();
-      copyJson(layout, layoutSummary,
-          "applicable", "passed", "blocking_issues", "warnings", "screenshot_path");
-      compactData.add("layout_audit", layoutSummary);
-    }
-    compact.add("data", compactData);
-    compact.addProperty("retryable", booleanValue(result.get("retryable")));
-    return new Projection(new ToolArguments(arguments), GSON.toJson(compact));
-  }
-
-  private static void addFailedBrowserStep(
-      Map<String, Object> target, Map<String, Object> source, JsonObject data) {
-    JsonObject failure = object(data.get("step_failure"));
-    if (failure == null) return;
-    int index = count(failure, "index");
-    Object raw = source.get("steps");
-    if (!(raw instanceof List) || index <= 0 || index > ((List<?>) raw).size()) return;
-    Object step = ((List<?>) raw).get(index - 1);
-    if (step != null) target.put("failed_step", step);
-  }
-
-  private static void copyNonEmpty(JsonObject source, JsonObject target, String... keys) {
-    for (String key : keys) {
-      JsonElement value = source.get(key);
-      if (nonEmpty(value)) target.add(key, value.deepCopy());
-    }
   }
 
   private static Map<String, Object> compactArguments(
@@ -806,10 +541,6 @@ final class AgentHistoryRequestProjection {
 
   private static boolean isWriteTool(String name) {
     return "create_file".equals(name) || "search_replace".equals(name) || "rewrite".equals(name);
-  }
-
-  private static boolean isReadTool(String name) {
-    return "read_file".equals(name) || "read_file_batch".equals(name) || "read_plan".equals(name);
   }
 
   private static JsonObject parseObject(String value) {
