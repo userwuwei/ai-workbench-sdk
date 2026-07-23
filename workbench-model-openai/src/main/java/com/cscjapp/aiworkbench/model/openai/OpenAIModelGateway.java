@@ -559,6 +559,12 @@ public final class OpenAIModelGateway implements ModelGateway {
         .append(Math.max(0, messages.size() - start))
         .append(", tools=")
         .append(request.tools().size())
+        .append(", projected_history_chars=")
+        .append(projectedHistoryChars(messages))
+        .append(", compacted_groups=")
+        .append(compactedGroups(messages))
+        .append(", pinned_plan=")
+        .append(hasPinnedPlan(messages))
         .append(", deep_thinking=")
         .append(request.deepThinking());
     if (!request.tools().isEmpty()) {
@@ -590,6 +596,36 @@ public final class OpenAIModelGateway implements ModelGateway {
       }
     }
     log("model_request", output.toString());
+  }
+
+  private int projectedHistoryChars(List<AgentMessage> messages) {
+    int total = 0;
+    for (AgentMessage message : messages) {
+      total += message.content().length() + message.name().length() + message.toolCallId().length();
+      for (AgentToolCall call : message.toolCalls()) {
+        total += call.id().length() + call.name().length()
+            + gson.toJson(call.arguments().asMap()).length();
+      }
+    }
+    return total;
+  }
+
+  private int compactedGroups(List<AgentMessage> messages) {
+    int total = 0;
+    for (AgentMessage message : messages) for (AgentToolCall call : message.toolCalls()) {
+      if (String.valueOf(call.arguments().get("request_projection")).contains("compacted")
+          || String.valueOf(call.arguments().get("request_projection")).contains("deduplicated")) {
+        total++;
+      }
+    }
+    return total;
+  }
+
+  private boolean hasPinnedPlan(List<AgentMessage> messages) {
+    for (AgentMessage message : messages) {
+      if (message.content().startsWith("当前受管计划摘要（由本地运行态固定保留")) return true;
+    }
+    return false;
   }
 
   private String readableJson(Object value) {

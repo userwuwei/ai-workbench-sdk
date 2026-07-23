@@ -93,7 +93,32 @@ public final class AgentHistory {
   /** Creates the bounded, lossy request view without mutating persisted or observable history. */
   static List<AgentMessage> forModelRequest(
       List<AgentMessage> source, int maxMessages, int maxChars) {
-    return bounded(AgentHistoryRequestProjection.project(source), maxMessages, maxChars);
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(source);
+    String planSummary = AgentHistoryRequestProjection.latestManagedPlanSummary(projected);
+    if (!planSummary.isEmpty()) {
+      planSummary = trim(planSummary, Math.max(256, Math.min(6000, Math.max(1, maxChars / 4))));
+    }
+    AgentMessage pinnedPlan = planSummary.isEmpty() ? null : AgentMessage.user(
+        "当前受管计划摘要（由本地运行态固定保留，不替代真实工具证据）：\n" + planSummary);
+    int reserve = pinnedPlan == null ? 0 : estimatedChars(pinnedPlan) + 32;
+    List<AgentMessage> bounded = bounded(
+        projected, Math.max(2, maxMessages - (reserve > 0 ? 1 : 0)), Math.max(4096, maxChars - reserve));
+    if (pinnedPlan == null || containsToolCall(bounded, "plan_task")) return bounded;
+    List<AgentMessage> output = new ArrayList<>(bounded.size() + 1);
+    int insert = !bounded.isEmpty() && bounded.get(0).role() == AgentMessage.Role.SYSTEM ? 1 : 0;
+    output.addAll(bounded.subList(0, insert));
+    output.add(pinnedPlan);
+    output.addAll(bounded.subList(insert, bounded.size()));
+    return Collections.unmodifiableList(output);
+  }
+
+  private static boolean containsToolCall(List<AgentMessage> messages, String toolName) {
+    for (AgentMessage message : messages) {
+      for (AgentToolCall call : message.toolCalls()) {
+        if (toolName.equals(call.name())) return true;
+      }
+    }
+    return false;
   }
 
   static int estimatedChars(List<AgentMessage> messages) {
