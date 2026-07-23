@@ -7,6 +7,8 @@ import com.cscjapp.aiworkbench.api.ToolCallback;
 import com.cscjapp.aiworkbench.api.ToolContext;
 import com.cscjapp.aiworkbench.api.ToolResult;
 import com.cscjapp.aiworkbench.api.ToolSpec;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 final class CodeMetaTool implements AgentTool {
   private final ToolSpec spec;
@@ -30,7 +32,11 @@ final class CodeMetaTool implements AgentTool {
   @Override
   public Cancellable execute(
       ToolContext context, ToolArguments arguments, ToolCallback callback) {
-    callback.onComplete(planCoordinator.executeMeta(spec.name(), arguments));
+    Map<String, Object> data = CodeAgentToolNames.PLAN_TASK.equals(spec.name())
+        ? planCoordinator.acceptPlan(arguments.asMap())
+        : new LinkedHashMap<>(arguments.asMap());
+    data.put("operation", spec.name());
+    callback.onComplete(ToolResult.success(data));
     return Cancellable.NONE;
   }
 }
