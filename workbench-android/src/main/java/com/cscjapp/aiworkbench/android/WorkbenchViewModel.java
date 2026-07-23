@@ -839,6 +839,7 @@ final class WorkbenchViewModel extends ViewModel {
     if (!files.isEmpty()) planMetadata.add("涉及文件：" + files);
     String verification = declaredSummary(source.get("verification_plan"), 6, 180);
     if (!verification.isEmpty()) planMetadata.add("验证策略：" + verification);
+    appendInteractionMetadata(source.get("interaction_checks"), source.get("waived_checks"));
     planMetadata.add("质检状态：未审查");
     if (interfaceProduct) {
       planMetadata.add(!value(source.get("interface_design_spec")).isEmpty()
@@ -871,6 +872,27 @@ final class WorkbenchViewModel extends ViewModel {
       replaceReasonContent(goal.isEmpty() ? "已建立任务执行计划" : goal);
       currentReason.statusLevel = WorkbenchUiItem.STATUS_SUCCESS;
       deactivateReasonAura(currentReason);
+    }
+  }
+
+  private void appendInteractionMetadata(Object rawChecks, Object rawWaived) {
+    int required = 0;
+    List<String> advisory = new ArrayList<>();
+    if (rawChecks instanceof List) for (Object raw : (List<?>) rawChecks) {
+      if (!(raw instanceof Map)) continue;
+      Map<?, ?> check = (Map<?, ?>) raw;
+      String description = first(check, "description", "title", "check_id");
+      if (bool(check.get("required"), false)) required++;
+      else if (!description.isEmpty()) advisory.add(description);
+    }
+    if (rawWaived instanceof List) for (Object raw : (List<?>) rawWaived) {
+      if (!(raw instanceof Map)) continue;
+      String id = first((Map<?, ?>) raw, "check_id", "description");
+      if (!id.isEmpty()) advisory.add("已调整 " + id);
+    }
+    if (required > 0) planMetadata.add("交互验证：核心检查 0/" + required);
+    if (!advisory.isEmpty()) {
+      planMetadata.add("风险未验证：" + joinLimited(advisory, "；", 120));
     }
   }
 
@@ -957,13 +979,16 @@ final class WorkbenchViewModel extends ViewModel {
       return;
     }
     if ("quality_review".equals(toolName)) {
+      ToolArguments quality = result != null && (!result.isSuccess()
+          || Boolean.FALSE.equals(result.data().get("passed")))
+          ? new ToolArguments(result.data()) : args;
       if (result != null && applyPlanState(result.data().get("plan_state"))) {
-        applyQualityMetadata(args);
+        applyQualityMetadata(quality);
         rebuildPlanItem();
         return;
       }
       if (managedPlanActive) {
-        applyQualityMetadata(args);
+        applyQualityMetadata(quality);
         rebuildPlanItem();
         return;
       }
@@ -1068,6 +1093,18 @@ final class WorkbenchViewModel extends ViewModel {
       String id = planStepIds.get(i);
       planStepStates.set(i, done.contains(id) ? "done" : id.equals(currentId) ? "running" : "pending");
     }
+    List<String> required = stringValues(state.get("required_check_ids"));
+    List<String> covered = stringValues(state.get("covered_check_ids"));
+    List<String> missing = stringValues(state.get("missing_check_ids"));
+    if (!required.isEmpty()) {
+      String value = missing.isEmpty()
+          ? "交互验证：核心检查已覆盖 " + covered.size() + "/" + required.size()
+          : "交互验证：待验证 " + joinLimited(missing, "、", 100);
+      replacePlanMetadata("交互验证：", value);
+    }
+    List<String> advisory = stringValues(state.get("advisory_warnings"));
+    replacePlanMetadata("风险未验证：", advisory.isEmpty()
+        ? null : "风险未验证：" + joinLimited(advisory, "；", 120));
     rebuildPlanItem();
     return true;
   }
