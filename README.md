@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.2.2'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:1.2.1'
 }
 ```
 
@@ -82,8 +82,6 @@ Code Agent 通用层提供：
 - 自适应精简受管计划：简单任务直接执行，复杂任务通过短 `plan_task` 按真实工具证据推进。
 - `ADAPTIVE / FORCE / SKIP` 三种规划模式；宿主也可通过 `code_agent_planning_mode` 启动参数选择。
 - 新写入会使旧验证和质量证据失效；只有 Validator 通过后计划才会完成。
-- 交互任务最多保留 3 项确定性 required 检查，其余作为 advisory 风险；浏览器、质量与终态共用同一份当前 revision 证据。
-- 成功写入、读取和浏览器历史仅在模型请求投影中压缩；完整会话与 UI 历史保持不变。
 
 READ 工具应在成功结果的 `data.read_paths[]` 中返回本次真正交付内容的文件路径。Code Agent 也兼容单文件结果的 `path/resolved_path` 和批量结果的 `items[].result.path/resolved_path`；不得把仅请求但因截断或失败未返回的目标放入 `read_paths`。
 
@@ -140,11 +138,11 @@ Logcat 使用可直接阅读的中文分段输出：
 ```bash
 ./gradlew clean test lint :workbench-android:assembleRelease \
   :workbench-starter:assembleRelease :sample-host:assembleDebug \
-  publishToMavenLocal -PAIW_VERSION=1.2.2
+  publishToMavenLocal -PAIW_VERSION=1.2.1
 
-git tag 1.2.2
+git tag 1.2.1
 git push origin main
-git push origin 1.2.2
+git push origin 1.2.1
 ```
 
 正式 Tag 不移动；发布失败后使用新的补丁版本。
