@@ -464,45 +464,40 @@ public final class CodeAgentPresetTest {
         "browser_test",
         new ToolArguments(
             map(
+                "goal", "验证交互",
                 "scenarios",
                 Arrays.asList(
-                    map("id", "start-game"),
-                    map("id", "extra"),
-                    map("id", "extra")))));
+                    dynamicScenario("start-game"),
+                    dynamicScenario("extra"),
+                    dynamicScenario("extra")))));
     assertTrue(mismatch.isSuccess());
     assertEquals(false, mismatch.data().get("passed"));
     assertEquals("test_plan_invalid", mismatch.data().get("failure_kind"));
-    assertEquals(Collections.singletonList("restart-game"), mismatch.data().get("missing_ids"));
-    assertEquals(Collections.singletonList("extra"), mismatch.data().get("unexpected_ids"));
-    assertEquals(Collections.singletonList("extra"), mismatch.data().get("duplicate_ids"));
+    assertTrue(String.valueOf(mismatch.data().get("validation_issues"))
+        .contains("missing_scenario_id"));
+    assertTrue(String.valueOf(mismatch.data().get("validation_issues"))
+        .contains("unexpected_scenario_id"));
+    assertTrue(String.valueOf(mismatch.data().get("validation_issues"))
+        .contains("duplicate_scenario_id"));
+    assertTrue(mismatch.data().containsKey("test_retry_brief"));
     assertEquals(0, mismatch.data().get("webview_launch_count"));
 
     ToolArguments browserArguments = new ToolArguments(
         map(
+            "goal", "验证交互",
             "scenarios",
             Arrays.asList(
                 dynamicScenario("start-game"),
-                map(
-                    "id", "restart-game",
-                    "actions", Collections.emptyList(),
-                    "expectations", Collections.singletonList(
-                        map("transition", "eventually_true"))))));
+                staticScenario("restart-game"))));
     ToolResult staticOnly = coordinator.preflightResult(
         "browser_test",
         new ToolArguments(
             map(
+                "goal", "验证交互",
                 "scenarios",
                 Arrays.asList(
-                    map(
-                        "id", "start-game",
-                        "actions", Collections.emptyList(),
-                        "expectations", Collections.singletonList(
-                            map("transition", "eventually_true"))),
-                    map(
-                        "id", "restart-game",
-                        "actions", Collections.emptyList(),
-                        "expectations", Collections.singletonList(
-                            map("transition", "eventually_true")))))));
+                    staticScenario("start-game"),
+                    staticScenario("restart-game")))));
     assertTrue(staticOnly.isSuccess());
     assertEquals(false, staticOnly.data().get("passed"));
     assertEquals(0, staticOnly.data().get("webview_launch_count"));
@@ -2970,15 +2965,25 @@ public final class CodeAgentPresetTest {
   private static Map<String, Object> dynamicScenario(String id) {
     return map(
         "id", id,
+        "description", "执行 " + id,
         "actions", Collections.singletonList(map("type", "click", "selector", "#control")),
-        "expectations", Collections.singletonList(map("transition", "false_to_true")));
+        "expectations", Collections.singletonList(
+            map(
+                "type", "js_boolean",
+                "expression", "document.body.dataset.ready === 'true'",
+                "transition", "false_to_true")));
   }
 
   private static Map<String, Object> staticScenario(String id) {
     return map(
         "id", id,
+        "description", "检查 " + id,
         "actions", Collections.emptyList(),
-        "expectations", Collections.singletonList(map("transition", "eventually_true")));
+        "expectations", Collections.singletonList(
+            map(
+                "type", "selector_exists",
+                "selector", "body",
+                "transition", "eventually_true")));
   }
 
   private static ToolResult passingBrowser(String... ids) {

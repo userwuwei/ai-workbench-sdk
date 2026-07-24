@@ -311,9 +311,11 @@ final class AgentHistoryRequestProjection {
         "viewport_signature",
         "passed",
         "failure_kind",
+        "failure_reason",
         "reused",
         "webview_launch_count",
         "coverage_summary",
+        "validation_issues",
         "reading_brief",
         "test_retry_brief",
         "environment_diagnostic",
@@ -322,18 +324,35 @@ final class AgentHistoryRequestProjection {
     JsonElement rawResults = data.get("scenario_results");
     if (rawResults != null && rawResults.isJsonArray()) {
       List<Map<String, Object>> summaries = new ArrayList<>();
+      int remainingFailures = 48;
+      int omittedFailures = 0;
       for (JsonElement raw : rawResults.getAsJsonArray()) {
         JsonObject scenario = object(raw);
         if (scenario == null) continue;
         Map<String, Object> summary = new LinkedHashMap<>();
         for (String key : new String[] {
-          "id", "scenario_id", "passed", "failure_kind", "failed_expectations", "actual_state"
+          "id", "scenario_id", "passed", "failure_kind", "failure_reason",
+          "actual_state", "action_trace", "dynamic_coverage"
         }) {
           if (scenario.has(key)) summary.put(key, GSON.fromJson(scenario.get(key), Object.class));
+        }
+        JsonElement rawFailures = scenario.get("failures");
+        if (rawFailures != null && rawFailures.isJsonArray()) {
+          List<Object> failures = new ArrayList<>();
+          for (JsonElement failure : rawFailures.getAsJsonArray()) {
+            if (remainingFailures > 0) {
+              failures.add(GSON.fromJson(failure, Object.class));
+              remainingFailures--;
+            } else {
+              omittedFailures++;
+            }
+          }
+          if (!failures.isEmpty()) summary.put("failures", failures);
         }
         summaries.add(summary);
       }
       compactData.add("scenario_results", GSON.toJsonTree(summaries));
+      if (omittedFailures > 0) compactData.addProperty("omitted_failure_count", omittedFailures);
     }
     compactData.addProperty("history_projection", "browser_verification_compacted");
     compactResult.add("data", compactData);

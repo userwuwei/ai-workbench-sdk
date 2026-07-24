@@ -266,22 +266,27 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   synchronized ToolResult preflightResult(String toolName, ToolArguments arguments) {
     if ("browser_test".equals(toolName) && hasPlan()) {
-      BrowserContract browser = browserContract(arguments);
-      if (!browser.valid(requiredInteractionCheckIds.isEmpty(), interactionRequired)) {
+      BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(
+          arguments == null ? Collections.<String, Object>emptyMap() : arguments.asMap(),
+          requiredInteractionCheckIds,
+          interactionRequired);
+      if (!report.valid()) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("operation", "browser_test");
         data.put("passed", false);
         data.put("failure_kind", "test_plan_invalid");
-        data.put("expected_ids", requiredInteractionCheckIds);
-        data.put("provided_ids", browser.provided);
-        data.put("missing_ids", browser.missing);
-        data.put("unexpected_ids", browser.unexpected);
-        data.put("duplicate_ids", browser.duplicates);
+        data.put("validation_issues", report.validationIssues());
         data.put("webview_launch_count", 0);
         data.put("recommended_next_action", "browser_test");
-        data.put("failure_reason", interactionRequired && !browser.hasDynamicScenario
-            ? "交互页面至少需要一个包含 actions 和 false_to_true 断言的场景。"
-            : "scenarios[].id 必须逐字且一次性覆盖计划中的全部检查 ID。");
+        data.put("failure_reason", report.firstMessage());
+        Map<String, Object> retryBrief = new LinkedHashMap<>();
+        retryBrief.put("goal", "");
+        retryBrief.put("issue", report.firstMessage());
+        retryBrief.put("validation_issues", report.validationIssues());
+        retryBrief.put("recommended_tool", "browser_test");
+        retryBrief.put("instruction",
+            "一次修正 validation_issues 中的全部测试计划问题；不要因此读取或修改产品代码。");
+        data.put("test_retry_brief", retryBrief);
         data.put("plan_state", state());
         return ToolResult.success(data);
       }

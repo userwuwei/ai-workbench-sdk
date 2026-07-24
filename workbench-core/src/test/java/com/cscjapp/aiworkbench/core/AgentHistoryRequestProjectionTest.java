@@ -522,13 +522,19 @@ public class AgentHistoryRequestProjectionTest {
             "test_plan_hash", "plan-1",
             "passed", false,
             "failure_kind", "product_code_failure",
+            "failure_reason", "两个 Canvas 比例不一致",
             "scenario_results",
             Collections.singletonList(
                 map(
                     "id", "start",
                     "passed", false,
                     "failure_kind", "product_code_failure",
-                    "failed_expectations", Collections.singletonList("game did not start"),
+                    "failures", Collections.singletonList(
+                        map(
+                            "phase", "layout",
+                            "code", "canvas_aspect_ratio_mismatch",
+                            "target", "#gameCanvas")),
+                    "actual_state", map("baseline", false, "post", false),
                     "compiled_steps", String.join("", Collections.nCopies(100, "internal-step")))),
             "reading_brief", map("path", "index.html", "signals", Collections.singletonList("#start")),
             "recommended_next_action", "read_plan");
@@ -552,8 +558,11 @@ public class AgentHistoryRequestProjectionTest {
             .getAsJsonObject()
             .getAsJsonObject("data");
     assertEquals("product_code_failure", compactData.get("failure_kind").getAsString());
+    assertEquals("两个 Canvas 比例不一致", compactData.get("failure_reason").getAsString());
     assertEquals("read_plan", compactData.get("recommended_next_action").getAsString());
     assertTrue(compactData.has("reading_brief"));
+    assertTrue(compactData.toString().contains("canvas_aspect_ratio_mismatch"));
+    assertTrue(compactData.toString().contains("#gameCanvas"));
     assertFalse(compactData.has("source_revision"));
     assertFalse(compactData.has("test_plan_hash"));
     assertFalse(projected.get(1).content().contains("internal-step"));
