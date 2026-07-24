@@ -129,6 +129,84 @@ public class AgentCoreTest {
   }
 
   @Test
+  public void roundToolSelectionAlsoBlocksExecutionOfHiddenTools() {
+    AtomicInteger rounds = new AtomicInteger();
+    AtomicInteger hiddenExecutions = new AtomicInteger();
+    AtomicBoolean sawUnavailableResult = new AtomicBoolean();
+    ToolPolicy selectionPolicy = new ToolPolicy() {
+      @Override
+      public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
+        return ToolSelection.onlyNames(tools, Arrays.asList("read_plan", "finalize_task"));
+      }
+
+      public boolean supports(ToolInvocation invocation) { return false; }
+
+      public Cancellable evaluate(
+          ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+        throw new AssertionError("selection-only policy must not evaluate invocations");
+      }
+    };
+    AgentTool hidden = new AgentTool() {
+      public ToolSpec spec() {
+        return new ToolSpec("read_file", "read_file", Collections.singletonMap("type", "object"));
+      }
+
+      public Cancellable execute(
+          ToolContext context, ToolArguments arguments, ToolCallback callback) {
+        hiddenExecutions.incrementAndGet();
+        callback.onComplete(ToolResult.success());
+        return Cancellable.NONE;
+      }
+    };
+    ModelGateway gateway = (request, observer) -> {
+      int round = rounds.incrementAndGet();
+      for (AgentMessage message : request.messages()) {
+        if (message.content().contains("tool_not_available_for_round")) {
+          sawUnavailableResult.set(true);
+        }
+      }
+      String name = round == 1 ? "read_file" : "finalize_task";
+      ToolArguments arguments = round == 1
+          ? ToolArguments.empty()
+          : new ToolArguments(map("status", "completed", "summary", "done"));
+      observer.onComplete(new ModelResponse(
+          "", "tool_calls", Collections.singletonList(new AgentToolCall("call-" + round, name, arguments))));
+      return Cancellable.NONE;
+    };
+    WorkbenchDefinition base = definition(
+        Arrays.asList(hidden, tool("read_plan", false), tool("finalize_task", true)),
+        Collections.emptyList());
+    WorkbenchDefinition routed = new WorkbenchDefinition() {
+      public String id() { return base.id(); }
+      public String displayName() { return base.displayName(); }
+      public List<PromptContributor> promptContributors() { return base.promptContributors(); }
+      public List<ContextProvider> contextProviders() { return base.contextProviders(); }
+      public List<AgentTool> tools() { return base.tools(); }
+      public List<ToolPolicy> toolPolicies() { return Collections.singletonList(selectionPolicy); }
+      public List<TaskValidator> validators() { return base.validators(); }
+      public WorkbenchHost host() { return base.host(); }
+    };
+    AtomicReference<String> finalText = new AtomicReference<>();
+    AgentEngine engine = new AgentEngine(
+        routed,
+        gateway,
+        new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(),
+        Runnable::run,
+        "s",
+        "w",
+        false,
+        4);
+
+    engine.submit("task", observer(finalText));
+
+    assertEquals(2, rounds.get());
+    assertEquals(0, hiddenExecutions.get());
+    assertTrue(sawUnavailableResult.get());
+    assertEquals("done", finalText.get());
+  }
+
+  @Test
   public void refreshesSystemPromptForEveryUserDemand() {
     List<String> systems = new ArrayList<>();
     ModelGateway gateway =
@@ -516,6 +594,14 @@ public class AgentCoreTest {
 
   private static UserDecisionService noopDecisions() {
     return (r, c) -> Cancellable.NONE;
+  }
+
+  private static Map<String, Object> map(Object... values) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    for (int index = 0; index + 1 < values.length; index += 2) {
+      result.put(String.valueOf(values[index]), values[index + 1]);
+    }
+    return result;
   }
 
   private static AgentObserver observer(AtomicReference<String> out) {

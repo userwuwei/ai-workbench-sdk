@@ -33,8 +33,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private String verificationFailureKind = "";
   private String recoverableEditPath = "";
   private boolean recoveryReadReady;
+  private boolean interactionRequired;
   private List<String> requiredInteractionCheckIds = new ArrayList<>();
-  private List<String> browserCoveredInteractionCheckIds = new ArrayList<>();
+  private List<String> browserScenarioIds = new ArrayList<>();
   private String browserPlanId = "";
   private long browserRevision = -1L;
   private String browserSourceRevision = "";
@@ -173,7 +174,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (invocation == null) return false;
     String toolName = invocation.tool().spec().name();
     CodeToolRole role = role(toolName);
-    if (hasPlan() && !requiredInteractionCheckIds.isEmpty()) {
+    if (hasPlan()) {
       if ("browser_test".equals(toolName) || CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)) {
         return true;
       }
@@ -190,9 +191,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   public synchronized Cancellable evaluate(
       ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
     String toolName = invocation.tool().spec().name();
-    if ("browser_test".equals(toolName) && !requiredInteractionCheckIds.isEmpty()) {
+    if ("browser_test".equals(toolName) && hasPlan()) {
       BrowserContract contract = browserContract(invocation.arguments());
-      if (!contract.valid()) {
+      if (!contract.valid(requiredInteractionCheckIds.isEmpty(), interactionRequired)) {
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("operation", "browser_test");
         data.put("passed", false);
@@ -205,9 +206,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         data.put("webview_launch_count", 0);
         data.put("recommended_next_action", "browser_test");
         data.put("plan_state", state());
+        String message = interactionRequired && !contract.hasDynamicScenario
+            ? "交互页面的 browser_test 至少需要一个包含 actions 和 false_to_true 断言的场景。"
+            : "browser_test.scenarios[].id 必须逐字且一次性覆盖当前计划的全部交互检查 ID。";
         callback.resolve(ToolPolicyDecision.error(
             "browser_interaction_contract_mismatch",
-            "browser_test.scenarios[].id 必须逐字且一次性覆盖当前计划的全部交互检查 ID。",
+            message,
             true,
             data));
       } else {
@@ -215,36 +219,28 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       }
       return Cancellable.NONE;
     }
-    if (CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
-        && !requiredInteractionCheckIds.isEmpty()) {
-      if (!hasCurrentBrowserInteractionEvidence()) {
+    if (CodeAgentToolNames.QUALITY_REVIEW.equals(toolName) && hasPlan()) {
+      if (requiresBrowserEvidence() && !hasCurrentBrowserTransaction()) {
         callback.resolve(ToolPolicyDecision.error(
             "quality_review_precondition_failed",
-            "当前计划与源码 revision 尚无完整 browser_test 交互证据。",
+            "当前受管计划尚未完成 browser_test。",
             true,
             preconditionData("quality_review", "browser_test")));
       } else {
-        callback.resolve(ToolPolicyDecision.proceed(
-            invocation.arguments().with(
-                "covered_interaction_check_ids", browserCoveredInteractionCheckIds)));
+        callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
       }
       return Cancellable.NONE;
     }
     if (CodeAgentToolNames.FINALIZE_TASK.equals(toolName)
         && "completed".equals(text(invocation.arguments().get("status")))
-        && !requiredInteractionCheckIds.isEmpty()) {
-      if (!hasCurrentBrowserInteractionEvidence()) {
+        && hasPlan()) {
+      if (!isComplete()) {
+        String missingStage = nextManagedAction();
         callback.resolve(ToolPolicyDecision.error(
             "finalize_precondition_failed",
-            "完成任务前需要当前计划与源码 revision 的完整 browser_test 交互证据。",
+            "当前受管计划尚未完成，请先执行当前缺失阶段。",
             true,
-            preconditionData("finalize_task", "browser_test")));
-      } else if (!hasRoleAtRevision(CodeToolRole.QUALITY)) {
-        callback.resolve(ToolPolicyDecision.error(
-            "finalize_precondition_failed",
-            "完成任务前需要基于最新 browser_test 证据执行 quality_review。",
-            true,
-            preconditionData("finalize_task", "quality_review")));
+            preconditionData("finalize_task", missingStage)));
       } else {
         callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
       }
@@ -269,7 +265,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     normalizedPlan = next;
     planId = "plan-" + activeRunId + "-" + (++planSequence);
     evidence.removeIf(item ->
-        item.role == CodeToolRole.VERIFY || item.role == CodeToolRole.QUALITY);
+        item.role == CodeToolRole.QUALITY || "browser_test".equals(item.toolName));
+    interactionRequired = Boolean.TRUE.equals(next.get("interaction_required"));
     requiredInteractionCheckIds = interactionCheckIds(next.get("interaction_checks"));
     clearBrowserInteractionEvidence();
     verificationFailureTool = "";
@@ -286,6 +283,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     return result;
   }
 
+  @SuppressWarnings("unchecked")
   synchronized ToolResult recordAndDecorate(
       long capturedGeneration,
       String toolName,
@@ -302,7 +300,28 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if ((!stateChanged && !contractResult) || !hasPlan()) return result;
     Map<String, Object> data = new LinkedHashMap<>(result.data());
     if (stateChanged || contractResult) data.put("plan_state", state());
-    if (contractResult) decorateInteractionContract(toolName, data);
+    if (contractResult) decorateManagedResult(toolName, data);
+    boolean invalidBrowserSuccess = "browser_test".equals(toolName)
+        && result.isSuccess()
+        && Boolean.TRUE.equals(result.data().get("passed"))
+        && !hasCurrentBrowserTransaction();
+    if (invalidBrowserSuccess) {
+      data.put("passed", false);
+      data.put("failure_kind", "environment_failure");
+      data.put("recommended_next_action", "browser_test");
+      Object rawCoverage = data.get("coverage_summary");
+      if (rawCoverage instanceof Map) {
+        Map<String, Object> coverage = new LinkedHashMap<>((Map<String, Object>) rawCoverage);
+        coverage.put("complete", false);
+        data.put("coverage_summary", coverage);
+      }
+      stateChanged = false;
+      return ToolResult.error(
+          "browser_test_result_invalid",
+          "browser_test 返回的事务结果不完整，请重新执行当前浏览器验证。",
+          true,
+          data);
+    }
     stateChanged = false;
     if (result.isSuccess()) return ToolResult.success(data);
     if (result.status() == ToolResult.Status.ERROR) {
@@ -347,11 +366,11 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     boolean browserContractReset = false;
     if (role == CodeToolRole.VERIFY || role == CodeToolRole.QUALITY) {
-      if ("browser_test".equals(toolName) && !requiredInteractionCheckIds.isEmpty()) {
+      if ("browser_test".equals(toolName)) {
         clearBrowserInteractionEvidence();
         browserContractReset = true;
       }
-      boolean valid = validEvidence(toolName, role, result);
+      boolean valid = validEvidence(toolName, role, arguments, result);
       if (role == CodeToolRole.VERIFY) recordVerificationRouting(toolName, result, valid);
       boolean removed = evidence.removeIf(item ->
           item.generation == generation
@@ -361,7 +380,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         if (removed || browserContractReset) recompute();
         return;
       }
-    } else if (!validEvidence(toolName, role, result)) return;
+    } else if (!validEvidence(toolName, role, arguments, result)) return;
     if (role == CodeToolRole.READ) {
       if ("read_file".equals(toolName) && result.isSuccess()) {
         String path = canonicalEvidenceFile(text(firstValue(result.data(), "resolved_path", "path")));
@@ -449,7 +468,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     clearBrowserInteractionEvidence();
   }
 
-  private boolean validEvidence(String toolName, CodeToolRole role, ToolResult result) {
+  private boolean validEvidence(
+      String toolName, CodeToolRole role, ToolArguments arguments, ToolResult result) {
     if (role == null || !result.isSuccess()) return false;
     Map<String, Object> data = result.data();
     if (Boolean.FALSE.equals(data.get("passed"))) return false;
@@ -458,16 +478,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return hasReadContent(data);
     }
     if (role == CodeToolRole.VERIFY) {
-      if ("browser_test".equals(toolName) && !requiredInteractionCheckIds.isEmpty()) {
-        return captureBrowserInteractionEvidence(data);
+      if ("browser_test".equals(toolName)) {
+        return captureBrowserTransaction(arguments, data);
       }
       return Boolean.TRUE.equals(data.get("passed"));
     }
     if (role == CodeToolRole.QUALITY) {
-      return (requiredInteractionCheckIds.isEmpty() || hasCurrentBrowserInteractionEvidence())
-          && (requiredInteractionCheckIds.isEmpty()
-              || sameIds(browserCoveredInteractionCheckIds,
-                  stringList(data.get("covered_interaction_check_ids"))))
+      return (!requiresBrowserEvidence() || hasCurrentBrowserTransaction())
           && Boolean.TRUE.equals(data.get("passed"))
           && !Boolean.TRUE.equals(data.get("minimal_version_risk"))
           && emptyValue(data.get("blocking_gaps"))
@@ -518,6 +535,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     verificationFailureTool = toolName;
     String kind = text(result.data().get("failure_kind"));
+    if ("browser_test".equals(toolName)
+        && !valid
+        && Boolean.TRUE.equals(result.data().get("passed"))
+        && (kind.isEmpty() || "none".equals(kind))) {
+      kind = "environment_failure";
+    }
     if (kind.isEmpty()) kind = "product_code_failure";
     verificationFailureKind = kind;
   }
@@ -566,13 +589,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private String nextMissingVerificationTool() {
     PlanStep current = currentStep();
     List<String> required = new ArrayList<>();
-    boolean hasWrite = hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT);
-    if (!hasWrite && current != null && "verify".equals(current.phase)) {
-      required.addAll(current.requiredTools);
-    }
-    if (required.isEmpty()) required.addAll(contract.requiredEvidence("code_generation"));
-    if (required.isEmpty()) {
-      if (current != null && "verify".equals(current.phase)) required.addAll(current.requiredTools);
+    if (current != null && "verify".equals(current.phase)) {
+      required.addAll(requiredVerificationTools(current));
+    } else {
+      required.addAll(contract.requiredEvidence("code_generation"));
     }
     for (String tool : required) {
       String canonical = canonicalToolName(tool);
@@ -584,6 +604,28 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private boolean qualityRequired() {
     PlanStep current = currentStep();
     return current != null && "quality".equals(current.phase);
+  }
+
+  private boolean requiresBrowserEvidence() {
+    for (PlanStep step : steps) {
+      if (!"verify".equals(step.phase)) continue;
+      if (requiredVerificationTools(step).contains("browser_test")) return true;
+    }
+    return false;
+  }
+
+  private String nextManagedAction() {
+    PlanStep current = currentStep();
+    if (current == null) return CodeAgentToolNames.FINALIZE_TASK;
+    if ("verify".equals(current.phase)) {
+      String missing = nextMissingVerificationTool();
+      return missing.isEmpty() ? "browser_test" : missing;
+    }
+    if ("quality".equals(current.phase)) return CodeAgentToolNames.QUALITY_REVIEW;
+    if (!current.requiredTools.isEmpty()) return canonicalToolName(current.requiredTools.get(0));
+    if ("discover".equals(current.phase)) return "read_file";
+    if ("implement".equals(current.phase)) return "search_replace";
+    return CodeAgentToolNames.PLAN_TASK;
   }
 
   private void addRoles(Set<String> output, CodeToolRole... accepted) {
@@ -840,12 +882,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private List<String> requiredVerificationTools(PlanStep step) {
-    List<String> required = new ArrayList<>(contract.requiredEvidence("code_generation"));
-    if (!required.isEmpty()) return required;
+    List<String> required = new ArrayList<>();
     for (String tool : step.requiredTools) {
       String canonical = canonicalToolName(tool);
       if (role(canonical) == CodeToolRole.VERIFY && !required.contains(canonical)) required.add(canonical);
     }
+    if (!required.isEmpty()) return required;
+    required.addAll(contract.requiredEvidence("code_generation"));
     return required;
   }
 
@@ -907,7 +950,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     state.put("done_steps", done);
     if (!requiredInteractionCheckIds.isEmpty()) {
       state.put("required_interaction_check_ids", requiredInteractionCheckIds);
-      state.put("interaction_verification_ready", hasCurrentBrowserInteractionEvidence());
+      state.put("interaction_verification_ready", hasCurrentBrowserTransaction());
     }
     trimState(state);
     return state;
@@ -992,12 +1035,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private void clearInteractionContract() {
+    interactionRequired = false;
     requiredInteractionCheckIds = new ArrayList<>();
     clearBrowserInteractionEvidence();
   }
 
   private void clearBrowserInteractionEvidence() {
-    browserCoveredInteractionCheckIds = new ArrayList<>();
+    browserScenarioIds = new ArrayList<>();
     browserPlanId = "";
     browserRevision = -1L;
     browserSourceRevision = "";
@@ -1010,6 +1054,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     List<String> provided = new ArrayList<>();
     List<String> duplicates = new ArrayList<>();
     Set<String> seen = new LinkedHashSet<>();
+    boolean hasDynamicScenario = false;
     Object raw = arguments == null ? null : arguments.get("scenarios");
     if (raw instanceof List) {
       for (Object item : (List<?>) raw) {
@@ -1017,69 +1062,104 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         if (id.isEmpty()) continue;
         provided.add(id);
         if (!seen.add(id) && !duplicates.contains(id)) duplicates.add(id);
+        if (hasDynamicScenario((Map<?, ?>) item)) hasDynamicScenario = true;
       }
     }
-    List<String> missing = difference(requiredInteractionCheckIds, seen);
-    List<String> unexpected = difference(new ArrayList<>(seen),
-        new LinkedHashSet<>(requiredInteractionCheckIds));
-    return new BrowserContract(provided, missing, unexpected, duplicates);
+    List<String> missing = requiredInteractionCheckIds.isEmpty()
+        ? new ArrayList<>() : difference(requiredInteractionCheckIds, seen);
+    List<String> unexpected = requiredInteractionCheckIds.isEmpty()
+        ? new ArrayList<>()
+        : difference(new ArrayList<>(seen), new LinkedHashSet<>(requiredInteractionCheckIds));
+    return new BrowserContract(provided, missing, unexpected, duplicates, hasDynamicScenario);
   }
 
-  private boolean captureBrowserInteractionEvidence(Map<String, Object> data) {
-    if (!Boolean.TRUE.equals(data.get("passed"))) return false;
+  private static boolean hasDynamicScenario(Map<?, ?> scenario) {
+    Object actions = scenario == null ? null : scenario.get("actions");
+    if (!(actions instanceof Collection) || ((Collection<?>) actions).isEmpty()) return false;
+    Object expectations = scenario.get("expectations");
+    if (!(expectations instanceof Collection)) return false;
+    for (Object raw : (Collection<?>) expectations) {
+      if (raw instanceof Map
+          && "false_to_true".equals(text(((Map<?, ?>) raw).get("transition")))) return true;
+    }
+    return false;
+  }
+
+  private static boolean allScenarioResultsPassed(List<String> expected, Object rawResults) {
+    if (!(rawResults instanceof List)) return false;
+    List<String> actual = new ArrayList<>();
+    Set<String> seen = new LinkedHashSet<>();
+    for (Object raw : (List<?>) rawResults) {
+      if (!(raw instanceof Map)) return false;
+      Map<?, ?> result = (Map<?, ?>) raw;
+      String id = text(result.get("id"));
+      if (id.isEmpty()) id = text(result.get("scenario_id"));
+      if (id.isEmpty() || !seen.add(id) || !Boolean.TRUE.equals(result.get("passed"))) return false;
+      actual.add(id);
+    }
+    return sameIds(expected, actual);
+  }
+
+  private boolean captureBrowserTransaction(ToolArguments arguments, Map<String, Object> data) {
+    BrowserContract contract = browserContract(arguments);
+    if (!contract.valid(requiredInteractionCheckIds.isEmpty(), interactionRequired)
+        || contract.provided.isEmpty()
+        || !Boolean.TRUE.equals(data.get("passed"))
+        || !"none".equals(text(data.get("failure_kind")))) return false;
     Object rawCoverage = data.get("coverage_summary");
     if (!(rawCoverage instanceof Map)) return false;
     Map<?, ?> coverage = (Map<?, ?>) rawCoverage;
     if (!Boolean.TRUE.equals(coverage.get("complete"))) return false;
-    List<String> covered = stringList(coverage.get("covered_interaction_check_ids"));
-    List<String> missing = stringList(coverage.get("missing_interaction_check_ids"));
+    List<String> passedScenarioIds = stringList(coverage.get("passed_scenario_ids"));
+    List<String> failedScenarioIds = stringList(coverage.get("failed_scenario_ids"));
     String sourceRevision = text(data.get("source_revision"));
-    if (!missing.isEmpty()
+    String testPlanHash = text(data.get("test_plan_hash"));
+    if (!failedScenarioIds.isEmpty()
         || sourceRevision.isEmpty()
-        || !sameIds(requiredInteractionCheckIds, covered)) return false;
-    browserCoveredInteractionCheckIds = new ArrayList<>(covered);
+        || testPlanHash.isEmpty()
+        || !sameIds(contract.provided, passedScenarioIds)
+        || !allScenarioResultsPassed(contract.provided, data.get("scenario_results"))) return false;
+    browserScenarioIds = new ArrayList<>(contract.provided);
     browserPlanId = planId;
     browserRevision = revision;
     browserSourceRevision = sourceRevision;
-    browserTestPlanHash = text(data.get("test_plan_hash"));
+    browserTestPlanHash = testPlanHash;
     return true;
   }
 
-  private boolean hasCurrentBrowserInteractionEvidence() {
-    return !requiredInteractionCheckIds.isEmpty()
-        && planId.equals(browserPlanId)
+  private boolean hasCurrentBrowserTransaction() {
+    return planId.equals(browserPlanId)
         && revision == browserRevision
         && !browserSourceRevision.isEmpty()
-        && sameIds(requiredInteractionCheckIds, browserCoveredInteractionCheckIds);
+        && !browserTestPlanHash.isEmpty()
+        && !browserScenarioIds.isEmpty();
   }
 
-  private void decorateInteractionContract(String toolName, Map<String, Object> data) {
-    data.put("plan_id", planId);
-    data.put("required_interaction_check_ids", requiredInteractionCheckIds);
-    if (hasCurrentBrowserInteractionEvidence()) {
-      data.put("source_revision", browserSourceRevision);
-      if (!browserTestPlanHash.isEmpty()) data.put("test_plan_hash", browserTestPlanHash);
-      data.put("covered_interaction_check_ids", browserCoveredInteractionCheckIds);
-      data.put("missing_interaction_check_ids", Collections.emptyList());
-    } else if (!requiredInteractionCheckIds.isEmpty()) {
-      data.put("covered_interaction_check_ids", Collections.emptyList());
-      data.put("missing_interaction_check_ids", requiredInteractionCheckIds);
+  @SuppressWarnings("unchecked")
+  private void decorateManagedResult(String toolName, Map<String, Object> data) {
+    data.remove("required_interaction_check_ids");
+    data.remove("covered_interaction_check_ids");
+    data.remove("missing_interaction_check_ids");
+    data.remove("interaction_audit");
+    Object rawCoverage = data.get("coverage_summary");
+    if (rawCoverage instanceof Map) {
+      Map<String, Object> coverage = new LinkedHashMap<>((Map<String, Object>) rawCoverage);
+      coverage.remove("required_interaction_check_ids");
+      coverage.remove("covered_interaction_check_ids");
+      coverage.remove("missing_interaction_check_ids");
+      data.put("coverage_summary", coverage);
     }
-    if (CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)) {
-      data.put("covered_interaction_check_ids", browserCoveredInteractionCheckIds);
+    if ("browser_test".equals(toolName)) {
+      data.remove("plan_id");
+      data.remove("source_revision");
+      data.remove("test_plan_hash");
+      data.remove("cache_key");
     }
   }
 
   private Map<String, Object> preconditionData(String operation, String nextAction) {
     Map<String, Object> data = new LinkedHashMap<>();
     data.put("operation", operation);
-    data.put("plan_id", planId);
-    data.put("source_revision", browserSourceRevision);
-    data.put("required_interaction_check_ids", requiredInteractionCheckIds);
-    data.put("covered_interaction_check_ids", browserCoveredInteractionCheckIds);
-    data.put("missing_interaction_check_ids",
-        difference(requiredInteractionCheckIds,
-            new LinkedHashSet<>(browserCoveredInteractionCheckIds)));
     data.put("missing_stage", nextAction);
     data.put("recommended_next_action", nextAction);
     data.put("plan_state", state());
@@ -1113,20 +1193,25 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     final List<String> missing;
     final List<String> unexpected;
     final List<String> duplicates;
+    final boolean hasDynamicScenario;
 
     BrowserContract(
         List<String> provided,
         List<String> missing,
         List<String> unexpected,
-        List<String> duplicates) {
+        List<String> duplicates,
+        boolean hasDynamicScenario) {
       this.provided = provided;
       this.missing = missing;
       this.unexpected = unexpected;
       this.duplicates = duplicates;
+      this.hasDynamicScenario = hasDynamicScenario;
     }
 
-    boolean valid() {
-      return missing.isEmpty() && unexpected.isEmpty() && duplicates.isEmpty();
+    boolean valid(boolean idsOptional, boolean dynamicRequired) {
+      return (idsOptional || (missing.isEmpty() && unexpected.isEmpty()))
+          && duplicates.isEmpty()
+          && (!dynamicRequired || hasDynamicScenario);
     }
   }
 

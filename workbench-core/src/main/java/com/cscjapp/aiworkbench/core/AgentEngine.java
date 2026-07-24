@@ -133,6 +133,9 @@ public final class AgentEngine implements Cancellable {
               selectTools(n, runId),
               deepThinking);
     }
+    Set<String> roundToolNames = new LinkedHashSet<>();
+    for (ToolSpec tool : req.tools()) roundToolNames.add(tool.name());
+    Set<String> allowedTools = Collections.unmodifiableSet(roundToolNames);
     active =
         gateway.stream(
             req,
@@ -159,7 +162,7 @@ public final class AgentEngine implements Cancellable {
                   messages.add(AgentMessage.assistant(response.content(), response.toolCalls()));
                 }
                 if (!response.toolCalls().isEmpty()) {
-                  executeCalls(demand, o, n, response.toolCalls(), 0, runId);
+                  executeCalls(demand, o, n, response.toolCalls(), 0, runId, allowedTools);
                   return;
                 }
                 LegacyProtocolParser.Parsed p =
@@ -171,7 +174,8 @@ public final class AgentEngine implements Cancellable {
                       n,
                       Collections.singletonList(new AgentToolCall(p.callId, p.name, p.arguments)),
                       0,
-                      runId);
+                      runId,
+                      allowedTools);
                   return;
                 }
                 if (endpoint.nativeTools() && registry.hasTerminalTool()) {
@@ -210,7 +214,13 @@ public final class AgentEngine implements Cancellable {
   }
 
   private void executeCalls(
-      String demand, AgentObserver o, int round, List<AgentToolCall> calls, int index, long runId) {
+      String demand,
+      AgentObserver o,
+      int round,
+      List<AgentToolCall> calls,
+      int index,
+      long runId,
+      Set<String> allowedTools) {
     if (!isActive(runId)) return;
     if (index >= calls.size()) {
       round(demand, o, round + 1, runId);
@@ -218,6 +228,21 @@ public final class AgentEngine implements Cancellable {
     }
     AgentToolCall call = calls.get(index);
     o.onToolStarted(call.id(), call.name(), call.arguments());
+    if (!allowedTools.contains(call.name())) {
+      ToolResult unavailable = ToolResult.error(
+          "tool_not_available_for_round",
+          "本轮未开放工具 " + call.name() + "；请使用本轮提供的工具: "
+              + String.join(",", allowedTools),
+          true);
+      synchronized (this) {
+        evidence.add(unavailable);
+        messages.add(AgentMessage.tool(
+            call.id(), call.name(), ToolResultCodec.toJson(unavailable)));
+      }
+      o.onToolCompleted(call.id(), call.name(), unavailable);
+      executeCalls(demand, o, round, calls, index + 1, runId, allowedTools);
+      return;
+    }
     active =
         dispatcher.dispatch(
             activeRunContext != null && activeRunContext.runId() == runId
@@ -256,7 +281,7 @@ public final class AgentEngine implements Cancellable {
                   validateAndFinish(demand, o, round, finalContent(call, result), event, runId);
                   return;
                 }
-                executeCalls(demand, o, round, calls, index + 1, runId);
+                executeCalls(demand, o, round, calls, index + 1, runId, allowedTools);
               }
             });
   }

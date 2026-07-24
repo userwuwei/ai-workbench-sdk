@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.3
+
+- 浏览器验证收敛为当前计划与内部 revision 上的一次已接受事务，不再使用动态 `covered_interaction_check_ids` 作为 quality/finalize 的第二套完成账本。
+- `browser_test` 在启动前继续精确校验计划场景 ID；交互页面还要求至少一个 `actions + false_to_true` 场景，成功事务则校验完整场景结果、源码 revision 与计划 hash。
+- `quality_review` 直接消费最新浏览器事务，`finalize_task(completed)` 只依赖受管计划完成状态；终态验证器不再从历史重新计算浏览器和质量证据。
+- 显式验证步骤只检查自己的 `required_tools`，轮次工具选择同时成为实际执行边界，避免隐藏工具被历史调用绕过。
+- 浏览器历史仅保留场景通过/失败摘要，不再向模型暴露交互覆盖账本、源码 hash 或缓存 hash。
+
 ## 2.0.2
 
 - `plan_task.interaction_checks[]` 保留显式稳定 `check_id`，并通过 `plan_state.required_interaction_check_ids` 持续暴露给模型。

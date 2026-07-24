@@ -47,6 +47,7 @@ final class CodeCompletionValidator implements TaskValidator {
     }
     String completionType =
         string(finalize == null ? null : finalize.get("completion_type"), "code_generation");
+    boolean managedPlanComplete = false;
     if (planCoordinator != null) {
       boolean planRequired = planCoordinator.mode() == CodePlanningMode.FORCE
           || (planCoordinator.mode() != CodePlanningMode.SKIP
@@ -61,7 +62,13 @@ final class CodeCompletionValidator implements TaskValidator {
             "managed_plan_incomplete",
             "受管计划仍缺少真实工具证据，不能标记 completed",
             Collections.emptyMap()));
+      } else if (planCoordinator.hasPlan()) {
+        managedPlanComplete = true;
       }
+    }
+    if (managedPlanComplete || !issues.isEmpty()) {
+      callback.onComplete(new ValidationResult(issues));
+      return Cancellable.NONE;
     }
     for (String operation : contract.requiredEvidence(completionType)) {
       if (planCoordinator != null

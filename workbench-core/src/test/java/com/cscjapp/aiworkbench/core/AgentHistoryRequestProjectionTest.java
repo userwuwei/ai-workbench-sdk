@@ -554,6 +554,8 @@ public class AgentHistoryRequestProjectionTest {
     assertEquals("product_code_failure", compactData.get("failure_kind").getAsString());
     assertEquals("read_plan", compactData.get("recommended_next_action").getAsString());
     assertTrue(compactData.has("reading_brief"));
+    assertFalse(compactData.has("source_revision"));
+    assertFalse(compactData.has("test_plan_hash"));
     assertFalse(projected.get(1).content().contains("internal-step"));
   }
 
