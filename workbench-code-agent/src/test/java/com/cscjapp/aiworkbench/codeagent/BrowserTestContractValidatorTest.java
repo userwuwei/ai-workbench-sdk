@@ -47,6 +47,7 @@ public class BrowserTestContractValidatorTest {
     assertTrue(codes.contains("missing_scenario_id"));
     assertTrue(codes.contains("unexpected_scenario_id"));
     assertTrue(codes.contains("missing_dynamic_scenario"));
+    assertEquals(20, issue(report.validationIssues(), "too_many_actions").get("maximum"));
   }
 
   @Test
@@ -154,6 +155,14 @@ public class BrowserTestContractValidatorTest {
       if (expected.equals(String.valueOf(issue.get("code")))) count++;
     }
     return count;
+  }
+
+  private static Map<String, Object> issue(
+      List<Map<String, Object>> issues, String expectedCode) {
+    for (Map<String, Object> issue : issues) {
+      if (expectedCode.equals(String.valueOf(issue.get("code")))) return issue;
+    }
+    return Collections.emptyMap();
   }
 
   private static int totalActions(List<Object> scenarios) {

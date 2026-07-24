@@ -154,7 +154,12 @@ public final class BrowserTestContractValidator {
       value.put("path", path);
       value.put("code", code);
       if (actual != null) value.put("actual", actual);
-      if (allowed != null) value.put("allowed", allowed);
+      if (allowed != null) {
+        value.put("allowed", allowed);
+        if (allowed instanceof Number && code.startsWith("too_many")) {
+          value.put("maximum", allowed);
+        }
+      }
       value.put("message", message);
       return value;
     }
