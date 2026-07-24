@@ -605,6 +605,77 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void productFailureRequiresSameSemanticPlanAndQualityUsesDerivedTrace() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("browser_test")
+            .requireQualityReview("ui_product")
+            .build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(321L, "s", "workspace", "task"));
+    coordinator.acceptPlan(map(
+        "goal", "验证页面",
+        "quality_mode", "interface_product",
+        "steps", Arrays.asList(
+            step("verify", "验证", "verify", "browser_test"),
+            step("quality", "审查", "quality", "quality_review"))));
+    long generation = coordinator.generation();
+    ToolArguments browserArguments = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        browserArguments,
+        ToolResult.success(map(
+            "operation", "browser_test",
+            "passed", false,
+            "failure_kind", "product_code_failure",
+            "source_revision", "source-1",
+            "test_plan_hash", "plan-original")));
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+
+    ToolResult changed = coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        browserArguments,
+        passingBrowserWithHash("plan-changed", "smoke"));
+    assertEquals(false, changed.data().get("passed"));
+    assertEquals("test_plan_invalid", changed.data().get("failure_kind"));
+    assertTrue(String.valueOf(changed.data().get("validation_issues"))
+        .contains("regression_plan_changed"));
+
+    ToolResult verified = coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        browserArguments,
+        passingBrowserWithHash("plan-original", "smoke"));
+    assertEquals(true, verified.data().get("passed"));
+    ToolArguments quality = new ToolArguments(map(
+        "passed", true,
+        "blocking_gaps", Collections.emptyList(),
+        "claimed_but_unsupported", Collections.emptyList(),
+        "minimal_version_risk", false,
+        "web_evidence", Collections.singletonList("unsupported free text")));
+    ToolResult reviewed = coordinator.recordAndDecorate(
+        generation, "quality_review", quality, ToolResult.success(quality.asMap()));
+    assertTrue(reviewed.data().containsKey("verified_behavior_evidence"));
+    assertFalse(String.valueOf(reviewed.data().get("web_evidence"))
+        .contains("unsupported free text"));
+    assertTrue(String.valueOf(reviewed.data().get("verified_behavior_evidence"))
+        .contains("action_trace"));
+  }
+
+  @Test
   public void malformedPassedBrowserResultStaysInBrowserStage() {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("read_file", CodeToolRole.READ);
@@ -2966,11 +3037,12 @@ public final class CodeAgentPresetTest {
     return map(
         "id", id,
         "description", "执行 " + id,
-        "actions", Collections.singletonList(map("type", "click", "selector", "#control")),
+        "actions", Collections.singletonList(
+            map("type", "click", "selector", "#control-" + id)),
         "expectations", Collections.singletonList(
             map(
                 "type", "js_boolean",
-                "expression", "document.body.dataset.ready === 'true'",
+                "expression", "document.body.getAttribute('data-" + id + "') === 'true'",
                 "transition", "false_to_true")));
   }
 
@@ -2987,16 +3059,26 @@ public final class CodeAgentPresetTest {
   }
 
   private static ToolResult passingBrowser(String... ids) {
+    return passingBrowserWithHash("test-plan-1", ids);
+  }
+
+  private static ToolResult passingBrowserWithHash(String planHash, String... ids) {
     List<String> scenarioIds = Arrays.asList(ids);
     List<Map<String, Object>> results = new ArrayList<>();
-    for (String id : scenarioIds) results.add(map("id", id, "passed", true));
+    for (String id : scenarioIds) results.add(map(
+        "id", id,
+        "passed", true,
+        "action_trace", Collections.singletonList(
+            map("index", 1, "action", "click_selector", "status", "success")),
+        "actual_state", map("expectations", Collections.singletonList(
+            map("expectation_index", 0, "status", "success")))));
     return ToolResult.success(
         map(
             "operation", "browser_test",
             "passed", true,
             "failure_kind", "none",
             "source_revision", "source-1",
-            "test_plan_hash", "test-plan-1",
+            "test_plan_hash", planHash,
             "coverage_summary",
             map(
                 "complete", true,

@@ -44,11 +44,13 @@ public final class CodeAgentPreset {
             builder.editVisibleDuringVerify);
 
     boolean hasGoalDrivenReadPlan = hasTool(builder.languageTools, "read_plan");
+    boolean hasBrowserTest = hasTool(builder.languageTools, "browser_test");
     List<PromptContributor> prompts = new ArrayList<>();
     prompts.add(
         commonPrompt(
             builder.planningMode,
             hasGoalDrivenReadPlan,
+            hasBrowserTest,
             builder.convergentReadPrompt));
     if (!builder.profile.languageRules().isEmpty()) {
       prompts.add(
@@ -119,6 +121,7 @@ public final class CodeAgentPreset {
   private static PromptContributor commonPrompt(
       CodePlanningMode planningMode,
       boolean hasGoalDrivenReadPlan,
+      boolean hasBrowserTest,
       boolean convergentReadPrompt) {
     return context -> {
       boolean nativeTools = !Boolean.FALSE.equals(context.runtime().get("native_tools"));
@@ -133,6 +136,7 @@ public final class CodeAgentPreset {
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
               + editEvidenceInstruction(convergentReadPrompt)
               + readPlanningInstruction(hasGoalDrivenReadPlan, convergentReadPrompt)
+              + browserVerificationInstruction(hasBrowserTest)
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
               + "\n只有运行时明确声明 precreated_entry_replace_allowed 的指定预创建入口，首次完整生成时才允许对已存在路径调用 create_file；该例外不授权其他文件。"
               + "\n工具失败、验证失败或质量 blocker 必须真实修复后重试，禁止虚构通过。"
@@ -142,6 +146,13 @@ public final class CodeAgentPreset {
           new PromptSection(
               "code_agent_protocol", PromptPhase.BASE, 0, 5000, content));
     };
+  }
+
+  private static String browserVerificationInstruction(boolean available) {
+    if (!available) return "";
+    return "\nbrowser_test 使用一次完整事务：静态场景使用 actions=[] + eventually_true；普通交互使用 click/input + false_to_true；需要在两个操作之间等待异步状态时，在同一 actions 中使用 wait_for checkpoint。"
+        + "\ntest_plan_invalid/test_expectation_mismatch 只修正并重提测试计划，不读取、重规划或修改产品代码；product_code_failure 只修复 reading_brief 中未被阻断的产品问题，随后保持 actions、wait_for 和 expectations 语义不变回归。"
+        + "\nquality_review/finalize 只能声明 verified_behavior_evidence 和 action/checkpoint trace 已实际覆盖的行为。";
   }
 
   private static String editEvidenceInstruction(boolean convergent) {

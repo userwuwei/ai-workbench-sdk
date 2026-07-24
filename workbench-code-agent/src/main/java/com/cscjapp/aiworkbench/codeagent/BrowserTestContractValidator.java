@@ -9,6 +9,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -18,6 +19,9 @@ public final class BrowserTestContractValidator {
   public static final int MAX_ACTIONS_PER_SCENARIO = 20;
   public static final int MAX_ACTIONS_PER_TRANSACTION = 60;
   public static final int MAX_EXPECTATIONS_PER_SCENARIO = 6;
+  public static final long DEFAULT_WAIT_FOR_TIMEOUT_MS = 10_000L;
+  public static final long MIN_WAIT_FOR_TIMEOUT_MS = 500L;
+  public static final long MAX_WAIT_FOR_TIMEOUT_MS = 60_000L;
 
   private static final Pattern SCENARIO_ID =
       Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
@@ -172,7 +176,7 @@ public final class BrowserTestContractValidator {
     private final List<String> providedIds = new ArrayList<>();
     private final LinkedHashSet<String> uniqueIds = new LinkedHashSet<>();
     private final LinkedHashSet<String> duplicateIds = new LinkedHashSet<>();
-    private final LinkedHashSet<String> dynamicIds = new LinkedHashSet<>();
+    private final Map<String, String> behaviorOwners = new LinkedHashMap<>();
     private final boolean interactionRequired;
     private boolean hasDynamicScenario;
     private int totalActions;
@@ -258,8 +262,9 @@ public final class BrowserTestContractValidator {
             actions.size(), MAX_ACTIONS_PER_SCENARIO);
       }
       totalActions += actions.size();
+      boolean hasUserAction = false;
       for (int index = 0; index < actions.size(); index++) {
-        validateAction(actions.get(index), path + ".actions[" + index + "]");
+        hasUserAction |= validateAction(actions.get(index), path + ".actions[" + index + "]");
       }
 
       Object rawExpectations = scenario.get("expectations");
@@ -276,32 +281,59 @@ public final class BrowserTestContractValidator {
       boolean dynamic = false;
       for (int index = 0; index < expectations.size(); index++) {
         dynamic |= validateExpectation(
-            expectations.get(index), path + ".expectations[" + index + "]", actions.isEmpty());
+            expectations.get(index), path + ".expectations[" + index + "]", !hasUserAction);
       }
-      if (!actions.isEmpty() && !dynamic) {
+      if (!actions.isEmpty() && !hasUserAction) {
+        issue(path + ".actions", "wait_for_without_interaction",
+            path + " 仅包含 wait_for；无用户操作时请改用 eventually_true expectations",
+            false, "click/input");
+      }
+      if (hasUserAction && !dynamic) {
         issue(path + ".expectations", "missing_false_to_true",
-            path + " 包含 actions 时至少需要一个 false_to_true expectation", false, true);
+            path + " 包含 click/input 时至少需要一个 false_to_true expectation", false, true);
       }
-      if (!actions.isEmpty() && dynamic) {
+      if (hasUserAction && dynamic) {
         hasDynamicScenario = true;
-        if (!id.isEmpty()) dynamicIds.add(id);
+      }
+      if (!id.isEmpty() && rawActions instanceof List && rawExpectations instanceof List) {
+        String fingerprint = canonicalValue(normalizedActions(actions)) + "|"
+            + canonicalValue(normalizedExpectations(expectations));
+        String owner = behaviorOwners.get(fingerprint);
+        if (owner == null) {
+          behaviorOwners.put(fingerprint, id);
+        } else if (!owner.equals(id)) {
+          issue(path, "duplicate_scenario_behavior",
+              "不同 scenario.id 不得复用完全相同的 actions + expectations: "
+                  + owner + " / " + id,
+              Arrays.asList(owner, id), "distinct behavior");
+        }
       }
     }
 
-    private void validateAction(Object raw, String path) {
+    private boolean validateAction(Object raw, String path) {
       if (!(raw instanceof Map)) {
         issue(path, "invalid_type", path + " 必须是对象", typeName(raw), "object");
-        return;
+        return false;
       }
       Map<?, ?> action = (Map<?, ?>) raw;
-      onlyKeys(action, path, set("type", "selector", "value"));
       String type = requiredString(action.get("type"), path + ".type", 32);
-      requiredString(action.get("selector"), path + ".selector", 500);
-      if (!"click".equals(type) && !"input".equals(type)) {
-        issue(path + ".type", "unsupported_action", path + ".type 仅支持 click/input",
-            type, Arrays.asList("click", "input"));
+      if ("click".equals(type) || "input".equals(type)) {
+        onlyKeys(action, path, "input".equals(type)
+            ? set("type", "selector", "value") : set("type", "selector"));
+        requiredString(action.get("selector"), path + ".selector", 500);
+        if ("input".equals(type)) requiredString(action.get("value"), path + ".value", 2000);
+        return true;
       }
-      if ("input".equals(type)) requiredString(action.get("value"), path + ".value", 2000);
+      if ("wait_for".equals(type)) {
+        onlyKeys(action, path, set("type", "expectation", "timeout_ms"));
+        validateExpectation(action.get("expectation"), path + ".expectation", false);
+        validateWaitForTimeout(action.get("timeout_ms"), path + ".timeout_ms");
+        return false;
+      }
+      onlyKeys(action, path, set("type", "selector", "value", "expectation", "timeout_ms"));
+      issue(path + ".type", "unsupported_action", path + ".type 仅支持 click/input/wait_for",
+          type, Arrays.asList("click", "input", "wait_for"));
+      return false;
     }
 
     private boolean validateExpectation(Object raw, String path, boolean staticScenario) {
@@ -356,16 +388,25 @@ public final class BrowserTestContractValidator {
         issue("scenarios", "missing_scenario_id", "缺少计划要求的 browser_test scenario.id: " + required,
             required, new ArrayList<>(requiredIds));
       }
-      for (String required : requiredIds) {
-        if (uniqueIds.contains(required) && !dynamicIds.contains(required)) {
-          issue("scenarios", "required_scenario_not_dynamic",
-              "计划要求的交互场景必须包含 actions 和 false_to_true 断言: " + required,
-              required, "actions + false_to_true");
-        }
-      }
       for (String provided : uniqueIds) if (!requiredIds.contains(provided)) {
         issue("scenarios", "unexpected_scenario_id", "包含计划之外的 browser_test scenario.id: " + provided,
             provided, new ArrayList<>(requiredIds));
+      }
+    }
+
+    private void validateWaitForTimeout(Object raw, String path) {
+      if (raw == null) return;
+      if (!(raw instanceof Number)) {
+        issue(path, "invalid_type", path + " 必须是整数", typeName(raw), "integer");
+        return;
+      }
+      double numeric = ((Number) raw).doubleValue();
+      long value = ((Number) raw).longValue();
+      if (!Double.isFinite(numeric) || numeric != Math.rint(numeric)) {
+        issue(path, "invalid_type", path + " 必须是整数", raw, "integer");
+      } else if (value < MIN_WAIT_FOR_TIMEOUT_MS || value > MAX_WAIT_FOR_TIMEOUT_MS) {
+        issue(path, "out_of_range", path + " 必须在 500～60000 之间",
+            value, MIN_WAIT_FOR_TIMEOUT_MS + ".." + MAX_WAIT_FOR_TIMEOUT_MS);
       }
     }
 
@@ -432,6 +473,101 @@ public final class BrowserTestContractValidator {
     Report report() {
       return new Report(issues, providedIds, hasDynamicScenario);
     }
+  }
+
+  private static String canonicalValue(Object raw) {
+    if (raw == null) return "null";
+    if (raw instanceof Map) {
+      StringBuilder out = new StringBuilder("{");
+      boolean first = true;
+      for (Map.Entry<String, Object> entry : new TreeMap<>(stringKeyMap((Map<?, ?>) raw)).entrySet()) {
+        if (!first) out.append(',');
+        first = false;
+        out.append(entry.getKey()).append(':').append(canonicalValue(entry.getValue()));
+      }
+      return out.append('}').toString();
+    }
+    if (raw instanceof Collection) {
+      StringBuilder out = new StringBuilder("[");
+      boolean first = true;
+      for (Object item : (Collection<?>) raw) {
+        if (!first) out.append(',');
+        first = false;
+        out.append(canonicalValue(item));
+      }
+      return out.append(']').toString();
+    }
+    if (raw instanceof String) return "\"" + raw + "\"";
+    return String.valueOf(raw);
+  }
+
+  private static List<Object> normalizedActions(List<?> actions) {
+    List<Object> out = new ArrayList<>();
+    for (Object raw : actions) {
+      if (!(raw instanceof Map)) {
+        out.add(raw);
+        continue;
+      }
+      Map<?, ?> action = (Map<?, ?>) raw;
+      Map<String, Object> value = new LinkedHashMap<>();
+      String type = trimText(action.get("type"));
+      value.put("type", type);
+      if ("click".equals(type) || "input".equals(type)) {
+        value.put("selector", trimText(action.get("selector")));
+        if ("input".equals(type)) value.put("value", trimText(action.get("value")));
+      } else if ("wait_for".equals(type)) {
+        Object expectation = action.get("expectation");
+        value.put("expectation", expectation instanceof Map
+            ? normalizedExpectation((Map<?, ?>) expectation) : expectation);
+        value.put("timeout_ms", normalizedInteger(
+            action.get("timeout_ms"), DEFAULT_WAIT_FOR_TIMEOUT_MS));
+      }
+      out.add(value);
+    }
+    return out;
+  }
+
+  private static List<Object> normalizedExpectations(List<?> expectations) {
+    List<Object> out = new ArrayList<>();
+    for (Object raw : expectations) {
+      out.add(raw instanceof Map ? normalizedExpectation((Map<?, ?>) raw) : raw);
+    }
+    return out;
+  }
+
+  private static Map<String, Object> normalizedExpectation(Map<?, ?> expectation) {
+    Map<String, Object> value = new LinkedHashMap<>();
+    String type = trimText(expectation.get("type"));
+    value.put("type", type);
+    String transition = trimText(expectation.get("transition"));
+    value.put("transition", transition.isEmpty() ? "eventually_true" : transition);
+    if ("selector_exists".equals(type)) {
+      value.put("selector", trimText(expectation.get("selector")));
+    } else if ("js_boolean".equals(type)) {
+      value.put("expression", trimText(expectation.get("expression")));
+    } else {
+      value.put("text", trimText(expectation.get("text")));
+    }
+    return value;
+  }
+
+  private static String trimText(Object raw) {
+    return raw instanceof String ? ((String) raw).trim() : String.valueOf(raw == null ? "" : raw);
+  }
+
+  private static Object normalizedInteger(Object raw, long fallback) {
+    if (!(raw instanceof Number)) return raw == null ? fallback : raw;
+    double numeric = ((Number) raw).doubleValue();
+    return Double.isFinite(numeric) && numeric == Math.rint(numeric)
+        ? ((Number) raw).longValue() : raw;
+  }
+
+  private static Map<String, Object> stringKeyMap(Map<?, ?> raw) {
+    Map<String, Object> out = new LinkedHashMap<>();
+    for (Map.Entry<?, ?> entry : raw.entrySet()) {
+      out.put(String.valueOf(entry.getKey()), entry.getValue());
+    }
+    return out;
   }
 
   private static String maskQuotedStrings(String source) {

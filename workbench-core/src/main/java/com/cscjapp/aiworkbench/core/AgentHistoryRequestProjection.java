@@ -334,6 +334,8 @@ final class AgentHistoryRequestProjection {
       for (JsonElement raw : rawResults.getAsJsonArray()) {
         JsonObject scenario = object(raw);
         if (scenario == null) continue;
+        String scenarioId = string(scenario.get("id"));
+        if (scenarioId.isEmpty()) scenarioId = string(scenario.get("scenario_id"));
         Map<String, Object> summary = new LinkedHashMap<>();
         for (String key : new String[] {
           "id", "scenario_id", "passed", "failure_kind", "failure_reason",
@@ -345,7 +347,7 @@ final class AgentHistoryRequestProjection {
         if (rawFailures != null && rawFailures.isJsonArray()) {
           List<Object> failures = new ArrayList<>();
           for (JsonElement failure : rawFailures.getAsJsonArray()) {
-            String signature = browserFailureSignature(failure);
+            String signature = browserFailureSignature(failure, scenarioId);
             if (!failureSignatures.add(signature)) continue;
             if (remainingFailures > 0) {
               failures.add(GSON.fromJson(failure, Object.class));
@@ -381,11 +383,17 @@ final class AgentHistoryRequestProjection {
     return new Projection(call.arguments(), GSON.toJson(compactResult));
   }
 
-  private static String browserFailureSignature(JsonElement raw) {
+  private static String browserFailureSignature(JsonElement raw, String scenarioId) {
     JsonObject failure = object(raw);
     if (failure == null) return raw == null ? "null" : raw.toString();
-    return string(failure.get("code")) + "|"
+    return scenarioId + "|"
+        + string(failure.get("phase")) + "|"
+        + string(failure.get("code")) + "|"
+        + string(failure.get("expectation_index")) + "|"
+        + string(failure.get("checkpoint_index")) + "|"
+        + string(failure.get("action_index")) + "|"
         + string(failure.get("target")) + "|"
+        + string(failure.get("expression")) + "|"
         + (failure.has("actual") ? failure.get("actual").toString() : "");
   }
 

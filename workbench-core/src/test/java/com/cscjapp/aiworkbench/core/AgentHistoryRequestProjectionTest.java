@@ -605,9 +605,11 @@ public class AgentHistoryRequestProjectionTest {
         .get(0).getAsJsonObject().getAsJsonArray("failures").size());
     assertFalse(compactData.getAsJsonArray("scenario_results")
         .get(1).getAsJsonObject().has("failures"));
-    assertEquals(2, compactData.get("omitted_failure_count").getAsInt());
+    assertEquals(3, compactData.get("omitted_failure_count").getAsInt());
     assertEquals(1, compactData.getAsJsonObject("omitted_failure_counts")
         .get("failure-48").getAsInt());
+    assertEquals(1, compactData.getAsJsonObject("omitted_failure_counts")
+        .get("failure-0").getAsInt());
     assertEquals(50, compactData.get("deficiency_count").getAsInt());
   }
 

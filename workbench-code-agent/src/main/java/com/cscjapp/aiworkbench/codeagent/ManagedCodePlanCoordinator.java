@@ -41,6 +41,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private long browserRevision = -1L;
   private String browserSourceRevision = "";
   private String browserTestPlanHash = "";
+  private String pendingBrowserRegressionPlanId = "";
+  private String pendingBrowserRegressionPlanHash = "";
+  private List<Map<String, Object>> browserVerifiedBehaviorEvidence = new ArrayList<>();
 
   ManagedCodePlanCoordinator(
       CodePlanningMode mode,
@@ -285,7 +288,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         retryBrief.put("validation_issues", report.validationIssues());
         retryBrief.put("recommended_tool", "browser_test");
         retryBrief.put("instruction",
-            "一次修正 validation_issues 中的全部测试计划问题；不要因此读取或修改产品代码。");
+            "一次修正 validation_issues 中的全部测试计划问题并重提 browser_test；"
+                + "不要因此读取、replan 或修改产品代码。");
         data.put("test_retry_brief", retryBrief);
         data.put("plan_state", state());
         return ToolResult.success(data);
@@ -325,6 +329,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         item.role == CodeToolRole.QUALITY || "browser_test".equals(item.toolName));
     interactionRequired = Boolean.TRUE.equals(next.get("interaction_required"));
     requiredInteractionCheckIds = interactionCheckIds(next.get("interaction_checks"));
+    clearPendingBrowserRegression();
     clearBrowserInteractionEvidence();
     verificationFailureTool = "";
     verificationFailureKind = "";
@@ -388,6 +393,27 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (!result.isSuccess()) return result;
     Map<String, Object> data = new LinkedHashMap<>(result.data());
     if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
+      String currentHash = text(data.get("test_plan_hash"));
+      if (!pendingBrowserRegressionPlanHash.isEmpty()
+          && pendingBrowserRegressionPlanId.equals(planId)
+          && !pendingBrowserRegressionPlanHash.equals(currentHash)) {
+        data.put("passed", false);
+        data.put("failure_kind", "test_plan_invalid");
+        data.put("failure_reason", "产品修复后的 browser_test 改变了原诊断测试语义");
+        data.put("recommended_next_action", "browser_test");
+        Map<String, Object> issue = new LinkedHashMap<>();
+        issue.put("path", "browser_test.scenarios");
+        issue.put("code", "regression_plan_changed");
+        issue.put("message", "请使用产品故障诊断时相同的 actions、wait_for 和 expectations 回归");
+        data.put("validation_issues", Collections.singletonList(issue));
+        Map<String, Object> retry = new LinkedHashMap<>();
+        retry.put("issue", issue.get("message"));
+        retry.put("recommended_tool", "browser_test");
+        retry.put("instruction", "保持产品代码不变，恢复原诊断测试语义后重新执行 browser_test");
+        data.put("test_retry_brief", retry);
+      }
+    }
+    if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
       BrowserContract browser = browserContract(arguments);
       List<String> passedIds = passedScenarioResultIds(data.get("scenario_results"));
       boolean structurallyValid = browser.valid(
@@ -425,6 +451,11 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       }
     }
     if (CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)) {
+      if (!browserVerifiedBehaviorEvidence.isEmpty()) {
+        data.put("verified_behavior_evidence",
+            new ArrayList<Map<String, Object>>(browserVerifiedBehaviorEvidence));
+        data.put("web_evidence", verifiedBehaviorSummaries(browserVerifiedBehaviorEvidence));
+      }
       String missingVerification = "";
       for (String required : completionVerificationTools("code_generation")) {
         if (required.equals(verificationFailureTool) || !hasCurrentTool(required)) {
@@ -450,6 +481,19 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       }
     }
     return ToolResult.success(data);
+  }
+
+  private static List<String> verifiedBehaviorSummaries(
+      List<Map<String, Object>> evidence) {
+    List<String> values = new ArrayList<>();
+    for (Map<String, Object> proof : evidence) {
+      String id = text(proof.get("id"));
+      String description = text(proof.get("description"));
+      int actions = proof.get("action_trace") instanceof Collection
+          ? ((Collection<?>) proof.get("action_trace")).size() : 0;
+      values.add(id + ": " + description + " (verified action/checkpoint trace=" + actions + ")");
+    }
+    return values;
   }
 
   private static List<String> passedScenarioResultIds(Object rawResults) {
@@ -497,7 +541,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (role == CodeToolRole.VERIFY || role == CodeToolRole.QUALITY) {
       boolean valid = validEvidence(toolName, role, arguments, result);
-      if (role == CodeToolRole.VERIFY) recordVerificationRouting(toolName, result, valid);
+      if (role == CodeToolRole.VERIFY) {
+        recordVerificationRouting(toolName, result, valid);
+      }
       if (!valid) {
         if (role == CodeToolRole.QUALITY || !"browser_test".equals(toolName)) {
           boolean removed = evidence.removeIf(item ->
@@ -666,6 +712,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         verificationFailureTool = "";
         verificationFailureKind = "";
       }
+      if ("browser_test".equals(toolName)) clearPendingBrowserRegression();
       return;
     }
     verificationFailureTool = toolName;
@@ -678,6 +725,15 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (kind.isEmpty()) kind = "product_code_failure";
     verificationFailureKind = kind;
+    if ("browser_test".equals(toolName)
+        && "product_code_failure".equals(kind)
+        && !result.data().containsKey("test_retry_brief")) {
+      String hash = text(result.data().get("test_plan_hash"));
+      if (!hash.isEmpty()) {
+        pendingBrowserRegressionPlanId = planId;
+        pendingBrowserRegressionPlanHash = hash;
+      }
+    }
   }
 
   private boolean retryBrowserPlanWithoutCodeRead() {
@@ -1314,7 +1370,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private void clearInteractionContract() {
     interactionRequired = false;
     requiredInteractionCheckIds = new ArrayList<>();
+    clearPendingBrowserRegression();
     clearBrowserInteractionEvidence();
+  }
+
+  private void clearPendingBrowserRegression() {
+    pendingBrowserRegressionPlanId = "";
+    pendingBrowserRegressionPlanHash = "";
   }
 
   private void clearBrowserInteractionEvidence() {
@@ -1323,6 +1385,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     browserRevision = -1L;
     browserSourceRevision = "";
     browserTestPlanHash = "";
+    browserVerifiedBehaviorEvidence = new ArrayList<>();
     evidence.removeIf(item ->
         item.role == CodeToolRole.QUALITY || "browser_test".equals(item.toolName));
   }
@@ -1353,6 +1416,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private static boolean hasDynamicScenario(Map<?, ?> scenario) {
     Object actions = scenario == null ? null : scenario.get("actions");
     if (!(actions instanceof Collection) || ((Collection<?>) actions).isEmpty()) return false;
+    boolean hasUserAction = false;
+    for (Object raw : (Collection<?>) actions) {
+      if (!(raw instanceof Map)) continue;
+      String type = text(((Map<?, ?>) raw).get("type"));
+      if ("click".equals(type) || "input".equals(type)) hasUserAction = true;
+    }
+    if (!hasUserAction) return false;
     Object expectations = scenario.get("expectations");
     if (!(expectations instanceof Collection)) return false;
     for (Object raw : (Collection<?>) expectations) {
@@ -1388,7 +1458,44 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     browserRevision = revision;
     browserSourceRevision = sourceRevision;
     browserTestPlanHash = testPlanHash;
+    browserVerifiedBehaviorEvidence = behaviorEvidence(arguments, data);
     return true;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Map<String, Object>> behaviorEvidence(
+      ToolArguments arguments, Map<String, Object> data) {
+    Map<String, Map<?, ?>> scenariosById = new LinkedHashMap<>();
+    Object rawScenarios = arguments == null ? null : arguments.get("scenarios");
+    if (rawScenarios instanceof List) {
+      for (Object raw : (List<?>) rawScenarios) {
+        if (!(raw instanceof Map)) continue;
+        Map<?, ?> scenario = (Map<?, ?>) raw;
+        String id = text(scenario.get("id"));
+        if (!id.isEmpty()) scenariosById.put(id, scenario);
+      }
+    }
+    List<Map<String, Object>> values = new ArrayList<>();
+    Object rawResults = data.get("scenario_results");
+    if (!(rawResults instanceof List)) return values;
+    for (Object raw : (List<?>) rawResults) {
+      if (!(raw instanceof Map)) continue;
+      Map<?, ?> result = (Map<?, ?>) raw;
+      String id = text(firstValue((Map<String, Object>) result, "id", "scenario_id"));
+      if (id.isEmpty() || !Boolean.TRUE.equals(result.get("passed"))) continue;
+      Map<String, Object> proof = new LinkedHashMap<>();
+      proof.put("id", id);
+      Map<?, ?> scenario = scenariosById.get(id);
+      if (scenario != null) proof.put("description", text(scenario.get("description")));
+      if (result.get("action_trace") instanceof List) {
+        proof.put("action_trace", result.get("action_trace"));
+      }
+      if (result.get("actual_state") instanceof Map) {
+        proof.put("actual_state", result.get("actual_state"));
+      }
+      values.add(proof);
+    }
+    return values;
   }
 
   private boolean hasCurrentBrowserTransaction() {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.7
+
+- `browser_test` 允许 required ID 混合静态与动态场景，并新增可选 `wait_for` checkpoint；共享预检对行为重复、动作预算、只读表达式和 checkpoint 超时一次聚合校验。
+- 产品故障后的通过结果必须保持原测试语义 hash 才能成为回归证据；质量结果由成功场景的 action/checkpoint/postcondition trace 派生行为证据。
+- 浏览器模型投影按场景和 expectation/checkpoint/action 身份保留失败，避免不同断言被错误合并，并继续执行 48 项有界投影。
+
 ## 2.0.6
 
 - 新增 SDK/宿主共享的 `BrowserTestContractValidator`，一次聚合全部场景、动作、断言、计划 ID 与动态覆盖问题；非法计划零启动返回 `validation_issues`，每场景动作上限提升为 20、事务上限为 60，并允许只读 `parseInt/parseFloat`。

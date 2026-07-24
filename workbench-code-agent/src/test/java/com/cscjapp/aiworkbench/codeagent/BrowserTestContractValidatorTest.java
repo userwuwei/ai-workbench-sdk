@@ -67,7 +67,7 @@ public class BrowserTestContractValidatorTest {
                   "type", "js_boolean",
                   "expression", scenarioIndex == 0
                       ? "parseInt(document.body.dataset.score) > 0"
-                      : "parseFloat(document.body.dataset.score) >= 0",
+                      : "parseFloat(document.body.dataset.score) >= " + scenarioIndex,
                   "transition", "false_to_true"))));
     }
 
@@ -127,20 +127,80 @@ public class BrowserTestContractValidatorTest {
   }
 
   @Test
-  public void everyRequiredInteractionIdMustBeBackedByDynamicEvidence() {
+  public void requiredIdsMayMixStaticAndDynamicScenarios() {
     BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(
-        map("goal", "验证重开", "scenarios", Collections.singletonList(map(
-            "id", "restart",
-            "description", "只检查按钮存在",
-            "actions", Collections.emptyList(),
-            "expectations", Collections.singletonList(
-                map("type", "selector_exists", "selector", "#restartBtn"))))),
-        Collections.singletonList("restart"),
+        map("goal", "验证页面", "scenarios", Arrays.asList(
+            map(
+                "id", "loads",
+                "description", "页面加载",
+                "actions", Collections.emptyList(),
+                "expectations", Collections.singletonList(
+                    map("type", "selector_exists", "selector", "#game"))),
+            map(
+                "id", "start",
+                "description", "开始游戏",
+                "actions", Collections.singletonList(
+                    map("type", "click", "selector", "#start")),
+                "expectations", Collections.singletonList(
+                    map("type", "js_boolean", "expression",
+                        "document.body.dataset.running === 'true'",
+                        "transition", "false_to_true"))))),
+        Arrays.asList("loads", "start"),
         true);
 
+    assertTrue(report.validationIssues().toString(), report.valid());
+  }
+
+  @Test
+  public void validatesWaitForAndRejectsDuplicateNormalizedBehavior() {
+    Map<String, Object> wait = map(
+        "type", "wait_for",
+        "expectation", map(
+            "type", "js_boolean",
+            "expression", "document.body.dataset.over === 'true'",
+            "transition", "false_to_true"),
+        "timeout_ms", 10000);
+    Map<String, Object> scenario = map(
+        "id", "restart",
+        "description", "重开",
+        "actions", Arrays.asList(
+            map("type", "click", "selector", "#start"),
+            wait,
+            map("type", "click", "selector", "#restart")),
+        "expectations", Collections.singletonList(
+            map("type", "js_boolean", "expression",
+                "document.body.dataset.running === 'true'", "transition", "false_to_true")));
+    BrowserTestContractValidator.Report valid = BrowserTestContractValidator.validate(
+        map("goal", "验证重开", "scenarios", Collections.singletonList(scenario)),
+        Collections.singletonList("restart"), true);
+    assertTrue(valid.validationIssues().toString(), valid.valid());
+
+    Map<String, Object> duplicate = new LinkedHashMap<>(scenario);
+    duplicate.put("id", "restart-copy");
+    duplicate.put("description", "另一描述");
+    BrowserTestContractValidator.Report invalid = BrowserTestContractValidator.validate(
+        map("goal", "验证", "scenarios", Arrays.asList(scenario, duplicate)));
+    assertFalse(invalid.valid());
+    assertTrue(codes(invalid.validationIssues()).contains("duplicate_scenario_behavior"));
+  }
+
+  @Test
+  public void waitForOnlyScenarioAndOutOfRangeTimeoutAreReported() {
+    BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(map(
+        "goal", "验证",
+        "scenarios", Collections.singletonList(map(
+            "id", "wait-only",
+            "description", "等待",
+            "actions", Collections.singletonList(map(
+                "type", "wait_for",
+                "expectation", map("type", "selector_exists", "selector", "#ready"),
+                "timeout_ms", 100)),
+            "expectations", Collections.singletonList(
+                map("type", "selector_exists", "selector", "#ready"))))));
+
     assertFalse(report.valid());
-    assertTrue(codes(report.validationIssues()).contains("required_scenario_not_dynamic"));
-    assertTrue(codes(report.validationIssues()).contains("missing_dynamic_scenario"));
+    assertTrue(codes(report.validationIssues()).contains("out_of_range"));
+    assertTrue(codes(report.validationIssues()).contains("wait_for_without_interaction"));
   }
 
   private static List<String> codes(List<Map<String, Object>> issues) {
