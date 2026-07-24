@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.6
+
+- 新增 SDK/宿主共享的 `BrowserTestContractValidator`，一次聚合全部场景、动作、断言、计划 ID 与动态覆盖问题；非法计划零启动返回 `validation_issues`，每场景动作上限提升为 20、事务上限为 60，并允许只读 `parseInt/parseFloat`。
+- 浏览器历史投影完整保留失败原因、校验问题、场景 failures、实际状态、成功 action trace、联合读取 brief 和推荐动作；失败项跨场景去重并限制为 48 项，超限返回分类计数。
+- 计划要求的每个交互场景都必须具有 `actions + false_to_true` 动态证据，避免仅凭按钮或 selector 存在进入质量审查。
+
 ## 2.0.5
 
 - 同一文件 revision 的读取证据改为单调合并，成功写入或完整证据不再被后续局部片段降级；未写盘的精确替换失败不再清除有效证据。
