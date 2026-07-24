@@ -36,6 +36,8 @@ public final class BrowserTestContractValidator {
       "getElementsByTagName", "getAttribute", "hasAttribute", "matches", "closest",
       "contains", "includes", "startsWith", "endsWith", "indexOf", "some", "every",
       "find", "filter", "map", "getItem");
+  private static final Set<String> LEGACY_TOP_LEVEL_FIELDS = set(
+      "operation", "steps", "interaction_check_ids", "target_url");
 
   private BrowserTestContractValidator() {}
 
@@ -361,6 +363,12 @@ public final class BrowserTestContractValidator {
         return;
       }
       long value = ((Number) raw).longValue();
+      double numeric = ((Number) raw).doubleValue();
+      if (!Double.isFinite(numeric) || numeric != Math.rint(numeric)) {
+        issue("timeout_ms", "invalid_type", "browser_test.timeout_ms 必须是整数",
+            raw, "integer");
+        return;
+      }
       if (value < 3000L || value > 120000L) {
         issue("timeout_ms", "out_of_range", "browser_test.timeout_ms 必须在 3000～120000 之间",
             value, "3000..120000");
@@ -390,8 +398,15 @@ public final class BrowserTestContractValidator {
       for (Object rawKey : value.keySet()) {
         String key = String.valueOf(rawKey);
         if (!allowed.contains(key)) {
-          issue(path + "." + key, "unsupported_field", path + " 包含不支持的参数: " + key,
-              key, new ArrayList<>(allowed));
+          if ("browser_test".equals(path) && LEGACY_TOP_LEVEL_FIELDS.contains(key)) {
+            issue(path + "." + key, "legacy_parameter",
+                "browser_test 2.0 已移除旧参数 " + key
+                    + "；请改用 goal + entry_path + scenarios 声明一次性验证事务",
+                key, new ArrayList<>(allowed));
+          } else {
+            issue(path + "." + key, "unsupported_field", path + " 包含不支持的参数: " + key,
+                key, new ArrayList<>(allowed));
+          }
         }
       }
     }

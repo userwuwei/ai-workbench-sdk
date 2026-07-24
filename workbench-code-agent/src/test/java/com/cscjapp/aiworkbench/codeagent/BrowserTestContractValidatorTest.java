@@ -105,10 +105,38 @@ public class BrowserTestContractValidatorTest {
     assertTrue(codes(report.validationIssues()).contains("too_many_total_actions"));
   }
 
+  @Test
+  public void legacyFieldsAndFractionalTimeoutAreReportedTogether() {
+    BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(map(
+        "operation", "run_steps",
+        "steps", Collections.emptyList(),
+        "timeout_ms", 3000.5d,
+        "goal", "验证",
+        "scenarios", Collections.singletonList(map(
+            "id", "static",
+            "description", "静态检查",
+            "actions", Collections.emptyList(),
+            "expectations", Collections.singletonList(
+                map("type", "selector_exists", "selector", "body"))))));
+
+    assertFalse(report.valid());
+    assertEquals(2, countCode(report.validationIssues(), "legacy_parameter"));
+    assertTrue(codes(report.validationIssues()).contains("invalid_type"));
+    assertTrue(report.firstMessage().contains("已移除旧参数 operation"));
+  }
+
   private static List<String> codes(List<Map<String, Object>> issues) {
     List<String> values = new ArrayList<>();
     for (Map<String, Object> issue : issues) values.add(String.valueOf(issue.get("code")));
     return values;
+  }
+
+  private static int countCode(List<Map<String, Object>> issues, String expected) {
+    int count = 0;
+    for (Map<String, Object> issue : issues) {
+      if (expected.equals(String.valueOf(issue.get("code")))) count++;
+    }
+    return count;
   }
 
   private static int totalActions(List<Object> scenarios) {
