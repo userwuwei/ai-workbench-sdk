@@ -488,7 +488,7 @@ public final class CodeAgentPresetTest {
             "scenarios",
             Arrays.asList(
                 dynamicScenario("start-game"),
-                staticScenario("restart-game"))));
+                dynamicScenario("restart-game"))));
     ToolResult staticOnly = coordinator.preflightResult(
         "browser_test",
         new ToolArguments(

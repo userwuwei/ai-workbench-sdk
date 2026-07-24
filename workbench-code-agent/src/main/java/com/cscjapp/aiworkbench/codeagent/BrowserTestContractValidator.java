@@ -167,6 +167,7 @@ public final class BrowserTestContractValidator {
     private final List<String> providedIds = new ArrayList<>();
     private final LinkedHashSet<String> uniqueIds = new LinkedHashSet<>();
     private final LinkedHashSet<String> duplicateIds = new LinkedHashSet<>();
+    private final LinkedHashSet<String> dynamicIds = new LinkedHashSet<>();
     private final boolean interactionRequired;
     private boolean hasDynamicScenario;
     private int totalActions;
@@ -278,6 +279,7 @@ public final class BrowserTestContractValidator {
       }
       if (!actions.isEmpty() && dynamic) {
         hasDynamicScenario = true;
+        if (!id.isEmpty()) dynamicIds.add(id);
       }
     }
 
@@ -348,6 +350,13 @@ public final class BrowserTestContractValidator {
       for (String required : requiredIds) if (!uniqueIds.contains(required)) {
         issue("scenarios", "missing_scenario_id", "缺少计划要求的 browser_test scenario.id: " + required,
             required, new ArrayList<>(requiredIds));
+      }
+      for (String required : requiredIds) {
+        if (uniqueIds.contains(required) && !dynamicIds.contains(required)) {
+          issue("scenarios", "required_scenario_not_dynamic",
+              "计划要求的交互场景必须包含 actions 和 false_to_true 断言: " + required,
+              required, "actions + false_to_true");
+        }
       }
       for (String provided : uniqueIds) if (!requiredIds.contains(provided)) {
         issue("scenarios", "unexpected_scenario_id", "包含计划之外的 browser_test scenario.id: " + provided,

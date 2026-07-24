@@ -312,10 +312,13 @@ final class AgentHistoryRequestProjection {
         "passed",
         "failure_kind",
         "failure_reason",
+        "deficiency_count",
         "reused",
         "webview_launch_count",
         "coverage_summary",
         "validation_issues",
+        "omitted_failure_count",
+        "omitted_failure_counts",
         "reading_brief",
         "test_retry_brief",
         "environment_diagnostic",
@@ -326,6 +329,8 @@ final class AgentHistoryRequestProjection {
       List<Map<String, Object>> summaries = new ArrayList<>();
       int remainingFailures = 48;
       int omittedFailures = 0;
+      Set<String> failureSignatures = new LinkedHashSet<>();
+      Map<String, Integer> omittedFailureCounts = new LinkedHashMap<>();
       for (JsonElement raw : rawResults.getAsJsonArray()) {
         JsonObject scenario = object(raw);
         if (scenario == null) continue;
@@ -340,11 +345,17 @@ final class AgentHistoryRequestProjection {
         if (rawFailures != null && rawFailures.isJsonArray()) {
           List<Object> failures = new ArrayList<>();
           for (JsonElement failure : rawFailures.getAsJsonArray()) {
+            String signature = browserFailureSignature(failure);
+            if (!failureSignatures.add(signature)) continue;
             if (remainingFailures > 0) {
               failures.add(GSON.fromJson(failure, Object.class));
               remainingFailures--;
             } else {
               omittedFailures++;
+              String code = failure.isJsonObject()
+                  ? string(failure.getAsJsonObject().get("code")) : "unknown";
+              if (code.isEmpty()) code = "unknown";
+              omittedFailureCounts.put(code, omittedFailureCounts.getOrDefault(code, 0) + 1);
             }
           }
           if (!failures.isEmpty()) summary.put("failures", failures);
@@ -352,13 +363,38 @@ final class AgentHistoryRequestProjection {
         summaries.add(summary);
       }
       compactData.add("scenario_results", GSON.toJsonTree(summaries));
-      if (omittedFailures > 0) compactData.addProperty("omitted_failure_count", omittedFailures);
+      if (omittedFailures > 0) {
+        int existing = intValue(compactData.get("omitted_failure_count"));
+        compactData.addProperty("omitted_failure_count", existing + omittedFailures);
+        JsonObject counts = object(compactData.get("omitted_failure_counts"));
+        if (counts == null) counts = new JsonObject();
+        for (Map.Entry<String, Integer> entry : omittedFailureCounts.entrySet()) {
+          counts.addProperty(entry.getKey(), intValue(counts.get(entry.getKey())) + entry.getValue());
+        }
+        compactData.add("omitted_failure_counts", counts);
+      }
     }
     compactData.addProperty("history_projection", "browser_verification_compacted");
     compactResult.add("data", compactData);
     // Browser calls remain valid model-facing transactions. Only their results are compacted;
     // never replace actions/expectations/transition with internal projection metadata.
     return new Projection(call.arguments(), GSON.toJson(compactResult));
+  }
+
+  private static String browserFailureSignature(JsonElement raw) {
+    JsonObject failure = object(raw);
+    if (failure == null) return raw == null ? "null" : raw.toString();
+    return string(failure.get("code")) + "|"
+        + string(failure.get("target")) + "|"
+        + (failure.has("actual") ? failure.get("actual").toString() : "");
+  }
+
+  private static int intValue(JsonElement raw) {
+    try {
+      return raw == null || raw.isJsonNull() ? 0 : raw.getAsInt();
+    } catch (Exception ignored) {
+      return 0;
+    }
   }
 
   private static Map<String, Object> compactArguments(

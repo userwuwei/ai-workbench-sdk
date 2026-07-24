@@ -125,6 +125,23 @@ public class BrowserTestContractValidatorTest {
     assertTrue(report.firstMessage().contains("已移除旧参数 operation"));
   }
 
+  @Test
+  public void everyRequiredInteractionIdMustBeBackedByDynamicEvidence() {
+    BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(
+        map("goal", "验证重开", "scenarios", Collections.singletonList(map(
+            "id", "restart",
+            "description", "只检查按钮存在",
+            "actions", Collections.emptyList(),
+            "expectations", Collections.singletonList(
+                map("type", "selector_exists", "selector", "#restartBtn"))))),
+        Collections.singletonList("restart"),
+        true);
+
+    assertFalse(report.valid());
+    assertTrue(codes(report.validationIssues()).contains("required_scenario_not_dynamic"));
+    assertTrue(codes(report.validationIssues()).contains("missing_dynamic_scenario"));
+  }
+
   private static List<String> codes(List<Map<String, Object>> issues) {
     List<String> values = new ArrayList<>();
     for (Map<String, Object> issue : issues) values.add(String.valueOf(issue.get("code")));

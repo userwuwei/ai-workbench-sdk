@@ -569,6 +569,49 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
+  public void browserHistoryDeduplicatesAndBoundsFailuresWithCategoryCounts() {
+    List<Object> firstFailures = new java.util.ArrayList<>();
+    for (int index = 0; index < 50; index++) {
+      firstFailures.add(map(
+          "phase", "layout",
+          "code", "failure-" + index,
+          "target", "#target-" + index,
+          "actual", map("value", index)));
+    }
+    List<Object> scenarios = Arrays.asList(
+        map(
+            "id", "first",
+            "passed", false,
+            "failures", firstFailures),
+        map(
+            "id", "second",
+            "passed", false,
+            "failures", Collections.singletonList(firstFailures.get(0))));
+    Map<String, Object> data = map(
+        "operation", "browser_test",
+        "passed", false,
+        "failure_kind", "product_code_failure",
+        "deficiency_count", 50,
+        "scenario_results", scenarios);
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(Arrays.asList(
+        AgentMessage.assistant("", Collections.singletonList(new AgentToolCall(
+            "browser", "browser_test", new ToolArguments(map("goal", "verify"))))),
+        AgentMessage.tool(
+            "browser", "browser_test", ToolResultCodec.toJson(ToolResult.success(data)))));
+
+    JsonObject compactData = JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject().getAsJsonObject("data");
+    assertEquals(48, compactData.getAsJsonArray("scenario_results")
+        .get(0).getAsJsonObject().getAsJsonArray("failures").size());
+    assertFalse(compactData.getAsJsonArray("scenario_results")
+        .get(1).getAsJsonObject().has("failures"));
+    assertEquals(2, compactData.get("omitted_failure_count").getAsInt());
+    assertEquals(1, compactData.getAsJsonObject("omitted_failure_counts")
+        .get("failure-48").getAsInt());
+    assertEquals(50, compactData.get("deficiency_count").getAsInt());
+  }
+
+  @Test
   public void characterBudgetCountsToolArgumentsAndToolResults() {
     String large = String.join("", Collections.nCopies(6000, "x"));
     Map<String, Object> arguments = new LinkedHashMap<>();
