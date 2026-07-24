@@ -32,6 +32,19 @@ final class CodeMetaTool implements AgentTool {
   @Override
   public Cancellable execute(
       ToolContext context, ToolArguments arguments, ToolCallback callback) {
+    if (CodeAgentToolNames.PLAN_TASK.equals(spec.name())
+        && arguments != null
+        && arguments.has("__raw_arguments")) {
+      Map<String, Object> data = new LinkedHashMap<>();
+      data.put("operation", spec.name());
+      callback.onComplete(
+          ToolResult.error(
+              "invalid_tool_arguments",
+              "plan_task 参数不是有效的 JSON 对象，请使用更短的合法参数重试。",
+              true,
+              data));
+      return Cancellable.NONE;
+    }
     Map<String, Object> data = CodeAgentToolNames.PLAN_TASK.equals(spec.name())
         ? planCoordinator.acceptPlan(arguments.asMap())
         : new LinkedHashMap<>(arguments.asMap());

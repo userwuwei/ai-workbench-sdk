@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.5
+
+- 同一文件 revision 的读取证据改为单调合并，成功写入或完整证据不再被后续局部片段降级；未写盘的精确替换失败不再清除有效证据。
+- `search_replace` 默认依赖 exact-old 与原子预检，不再要求前置读取门禁；整文件 `rewrite` 继续受保护，并保留 `legacy` 构造期回滚模式。
+- 写入、验证、质量和可恢复失败阶段持续开放 `search_replace`，同时用现有 `recommended_next_action` 指向验证、修复或浏览器重试，不扩大其他写工具可见范围。
+- 通用提示词改为最小充分证据决策；非法 `plan_task` 参数显式返回 `invalid_tool_arguments`，OpenAI 网关仅尝试一次尾括号修复后保留原始错误参数，并记录真实 outbound JSON 的 `serialized_chars`。
+
 ## 2.0.4
 
 - 轮次工具列表继续用于引导模型，但 Core 不再以 `tool_not_available_for_round` 拒绝已注册工具；路径、写入授权、精确替换和浏览器表达式安全策略保持不变。

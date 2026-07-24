@@ -67,6 +67,21 @@ public class OpenAIModelGatewayTest {
   }
 
   @Test
+  public void repairsOnlyOneTrailingToolArgumentBrace() {
+    OpenAIModelGateway gateway = new OpenAIModelGateway();
+
+    Map<String, Object> repaired =
+        gateway.parseToolArguments("{\"goal\":\"repair\"}}");
+    assertEquals("repair", repaired.get("goal"));
+    assertFalse(repaired.containsKey("__raw_arguments"));
+
+    Map<String, Object> malformed =
+        gateway.parseToolArguments("{\"goal\":\"repair\"}}}");
+    assertTrue(malformed.containsKey("__raw_arguments"));
+    assertEquals("{\"goal\":\"repair\"}}}", malformed.get("__raw_arguments"));
+  }
+
+  @Test
   public void legacyOnDeltaObserverReceivesContentExactlyOnce() throws Exception {
     server.enqueue(
         new MockResponse()
@@ -213,6 +228,7 @@ public class OpenAIModelGatewayTest {
     assertTrue(latch.await(3, TimeUnit.SECONDS));
     String requestEvent = firstEvent(events, "model_request");
     assertTrue(requestEvent.contains("[模型请求][request=1][stage=initial][model=test]"));
+    assertTrue(requestEvent.contains("serialized_chars="));
     assertTrue(requestEvent.contains("[message=1][role=user]\nu"));
     assertFalse(requestEvent.contains("body="));
     assertFalse(requestEvent.contains("Bearer secret"));

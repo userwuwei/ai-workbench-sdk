@@ -14,6 +14,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private final Map<String, CodeToolRole> roles;
   private final WorkspaceAccess workspace;
   private final CodePlanNormalizer normalizer;
+  private final boolean editVisibleDuringVerify;
   private long generation;
   private long activeRunId = -1L;
   private long planSequence;
@@ -45,7 +46,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       CodePlanningMode mode,
       CodeValidationContract contract,
       Map<String, CodeToolRole> roles) {
-    this(mode, contract, roles, null);
+    this(mode, contract, roles, null, true);
   }
 
   ManagedCodePlanCoordinator(
@@ -53,10 +54,20 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       CodeValidationContract contract,
       Map<String, CodeToolRole> roles,
       WorkspaceAccess workspace) {
+    this(mode, contract, roles, workspace, true);
+  }
+
+  ManagedCodePlanCoordinator(
+      CodePlanningMode mode,
+      CodeValidationContract contract,
+      Map<String, CodeToolRole> roles,
+      WorkspaceAccess workspace,
+      boolean editVisibleDuringVerify) {
     this.mode = mode == null ? CodePlanningMode.ADAPTIVE : mode;
     this.contract = contract;
     this.roles = new LinkedHashMap<>(roles);
     this.workspace = workspace;
+    this.editVisibleDuringVerify = editVisibleDuringVerify;
     normalizer = new CodePlanNormalizer(contract);
   }
 
@@ -124,6 +135,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         return ToolSelection.onlyNames(registeredTools, allowed);
       }
       if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
+        keepSearchReplaceReachable(allowed);
         String missingVerification = nextMissingContractVerification("code_generation");
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
         else if (qualityEvidenceRequired("code_generation")
@@ -137,7 +149,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
 
     if (!recoverableEditPath.isEmpty()) {
-      if (recoveryReadReady || hasReadyReadCoverage()) {
+      if (editVisibleDuringVerify) {
+        addSearchReplace(allowed);
+      } else if (recoveryReadReady || hasReadyReadCoverage()) {
         addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
@@ -149,7 +163,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       } else if (hasRoleAtRevision(CodeToolRole.CREATE)
           || hasRoleAtRevision(CodeToolRole.EDIT)
           || hasReadyReadCoverage()) {
-        addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        if (editVisibleDuringVerify) addSearchReplace(allowed);
+        else addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
@@ -160,10 +175,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         && qualityEvidenceRequired("code_generation")
         && !hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)) {
       allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
+      keepSearchReplaceReachable(allowed);
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
     if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
+      keepSearchReplaceReachable(allowed);
       String missingVerification = nextMissingVerificationTool();
       if (!missingVerification.isEmpty()) allowed.add(missingVerification);
       else if (qualityRequired()) allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
@@ -176,6 +193,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if (!declaredVerification.isEmpty()) {
         String missingVerification = nextMissingVerificationTool();
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
+        keepSearchReplaceReachable(allowed);
       } else if ("discover".equals(current.phase)) {
         allowed.add("list_dir");
       } else if ("implement".equals(current.phase)) {
@@ -185,9 +203,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       } else if ("verify".equals(current.phase)) {
         String missingVerification = nextMissingVerificationTool();
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
+        keepSearchReplaceReachable(allowed);
       } else if ("quality".equals(current.phase)) {
         allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
-        if (hasReadyReadCoverage()) addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        if (editVisibleDuringVerify) {
+          keepSearchReplaceReachable(allowed);
+        } else if (hasReadyReadCoverage()) {
+          addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        }
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
@@ -308,6 +331,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     result.put("normalized_plan_version", CodePlanNormalizer.VERSION);
     result.put("normalized_plan", new ToolArguments(next).asMap());
     result.put("plan_state", state());
+    result.put("recommended_next_action", nextManagedAction());
     stateChanged = false;
     return result;
   }
@@ -328,10 +352,16 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         && ("browser_test".equals(toolName)
             || CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
             || CodeAgentToolNames.FINALIZE_TASK.equals(toolName));
-    if ((!stateChanged && !contractResult) || !hasPlan()) return effective;
+    boolean recoverableRetry = hasPlan()
+        && editVisibleDuringVerify
+        && recoverableSearchReplaceFailure(toolName, effective);
+    if ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan()) return effective;
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
     if (stateChanged || contractResult) data.put("plan_state", state());
     if (contractResult) decorateManagedResult(toolName, data);
+    if (text(data.get("recommended_next_action")).isEmpty()) {
+      data.put("recommended_next_action", recommendedNextAction());
+    }
     stateChanged = false;
     if (effective.isSuccess()) return ToolResult.success(data);
     if (effective.status() == ToolResult.Status.ERROR) {
@@ -785,6 +815,21 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     return CodeAgentToolNames.FINALIZE_TASK;
   }
 
+  private String recommendedNextAction() {
+    if (editVisibleDuringVerify && !recoverableEditPath.isEmpty()) {
+      return "search_replace";
+    }
+    if (editVisibleDuringVerify
+        && !verificationFailureTool.isEmpty()
+        && !retryBrowserPlanWithoutCodeRead()
+        && (hasRoleAtRevision(CodeToolRole.CREATE)
+            || hasRoleAtRevision(CodeToolRole.EDIT)
+            || hasReadyReadCoverage())) {
+      return "search_replace";
+    }
+    return nextCompletionAction("code_generation");
+  }
+
   private boolean qualityRequired() {
     PlanStep current = currentStep();
     return current != null && "quality".equals(current.phase);
@@ -832,6 +877,19 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     for (Map.Entry<String, CodeToolRole> entry : roles.entrySet()) {
       if (rolesToAdd.contains(entry.getValue())) output.add(entry.getKey());
     }
+  }
+
+  private void keepSearchReplaceReachable(Set<String> output) {
+    if (editVisibleDuringVerify
+        && (hasRoleAtRevision(CodeToolRole.CREATE)
+            || hasRoleAtRevision(CodeToolRole.EDIT)
+            || hasReadyReadCoverage())) {
+      addSearchReplace(output);
+    }
+  }
+
+  private void addSearchReplace(Set<String> output) {
+    if (role("search_replace") == CodeToolRole.EDIT) output.add("search_replace");
   }
 
   private static boolean recoverableSearchReplaceFailure(String toolName, ToolResult result) {

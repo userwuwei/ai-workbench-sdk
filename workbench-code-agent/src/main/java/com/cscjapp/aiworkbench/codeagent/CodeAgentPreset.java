@@ -23,6 +23,9 @@ import java.util.Map;
 /** Opt-in language-neutral Code Agent components composed by an app WorkbenchDefinition. */
 public final class CodeAgentPreset {
   public static final String EXTRA_PLANNING_MODE = "code_agent_planning_mode";
+  public static final String EXTRA_ATOMIC_EDIT_READ_GATE = "atomic_edit_read_gate";
+  public static final String EXTRA_EDIT_VISIBLE_DURING_VERIFY = "edit_visible_during_verify";
+  public static final String EXTRA_CONVERGENT_READ_PROMPT = "convergent_read_prompt";
   private final List<PromptContributor> promptContributors;
   private final List<AgentTool> tools;
   private final List<ToolPolicy> toolPolicies;
@@ -37,11 +40,16 @@ public final class CodeAgentPreset {
             builder.planningMode,
             builder.profile.verificationContract(),
             roles,
-            builder.workspace);
+            builder.workspace,
+            builder.editVisibleDuringVerify);
 
     boolean hasGoalDrivenReadPlan = hasTool(builder.languageTools, "read_plan");
     List<PromptContributor> prompts = new ArrayList<>();
-    prompts.add(commonPrompt(builder.planningMode, hasGoalDrivenReadPlan));
+    prompts.add(
+        commonPrompt(
+            builder.planningMode,
+            hasGoalDrivenReadPlan,
+            builder.convergentReadPrompt));
     if (!builder.profile.languageRules().isEmpty()) {
       prompts.add(
           context ->
@@ -73,7 +81,8 @@ public final class CodeAgentPreset {
 
     List<ToolPolicy> policies = new ArrayList<>();
     policies.add(planCoordinator);
-    policies.add(new ReadBeforeEditPolicy(builder.workspace, roles));
+    policies.add(
+        new ReadBeforeEditPolicy(builder.workspace, roles, builder.atomicEditReadGate));
     if (unique.containsKey("create_file")) {
       policies.add(new ExistingFileConflictPolicy(builder.workspace));
     }
@@ -108,7 +117,9 @@ public final class CodeAgentPreset {
   }
 
   private static PromptContributor commonPrompt(
-      CodePlanningMode planningMode, boolean hasGoalDrivenReadPlan) {
+      CodePlanningMode planningMode,
+      boolean hasGoalDrivenReadPlan,
+      boolean convergentReadPrompt) {
     return context -> {
       boolean nativeTools = !Boolean.FALSE.equals(context.runtime().get("native_tools"));
       String protocol =
@@ -120,8 +131,8 @@ public final class CodeAgentPreset {
               + protocol
               + planningInstruction(planningMode)
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
-              + "\n修改已有文件前先读取真实内容；同一文件多个修改点合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。"
-              + readPlanningInstruction(hasGoalDrivenReadPlan)
+              + editEvidenceInstruction(convergentReadPrompt)
+              + readPlanningInstruction(hasGoalDrivenReadPlan, convergentReadPrompt)
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
               + "\n只有运行时明确声明 precreated_entry_replace_allowed 的指定预创建入口，首次完整生成时才允许对已存在路径调用 create_file；该例外不授权其他文件。"
               + "\n工具失败、验证失败或质量 blocker 必须真实修复后重试，禁止虚构通过。"
@@ -133,10 +144,29 @@ public final class CodeAgentPreset {
     };
   }
 
-  private static String readPlanningInstruction(boolean available) {
-    if (!available) return "";
-    return "\n首次接触当前 revision 的普通源码文件时，优先只传 path 使用 read_file 完整读取；已知具体跨区域问题或验证失败证据时，可使用 read_plan.evidence_requirements 一次定位 DOM/CSS/函数/调用链。读取工具是非破坏性的，由你根据上下文自行选择。"
-        + "\nread_plan.coverage_summary.ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入合并 search_replace；为 false 时根据 missing_evidence_types/missing_signals 决定继续读取或调整判断，禁止猜测 old。";
+  private static String editEvidenceInstruction(boolean convergent) {
+    if (!convergent) {
+      return "\n修改已有文件前先读取真实内容；同一文件多个修改点合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。";
+    }
+    return "\n同一文件多个修改点合并到一次 search_replace.replacements[]；old 必须是当前 revision 中逐字准确的真实源码锚点。";
+  }
+
+  private static String readPlanningInstruction(boolean available, boolean convergent) {
+    if (!convergent) {
+      if (!available) return "";
+      return "\n首次接触当前 revision 的普通源码文件时，优先只传 path 使用 read_file 完整读取；已知具体跨区域问题或验证失败证据时，可使用 read_plan.evidence_requirements 一次定位 DOM/CSS/函数/调用链。读取工具是非破坏性的，由你根据上下文自行选择。"
+          + "\nread_plan.coverage_summary.ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入合并 search_replace；为 false 时根据 missing_evidence_types/missing_signals 决定继续读取或调整判断，禁止猜测 old。";
+    }
+    String multiRegion = available
+        ? "\n3. 涉及两个以上不连续区域、调用链、状态流或 DOM/CSS/JS 联动且缺少锚点时，只调用一次 read_plan.evidence_requirements 收集全部证据。"
+        : "\n3. 涉及多个区域且 read_plan 不可用时，只做最少的定向读取收集精确锚点，禁止重复全文读取。";
+    return "\n读取遵循最小充分证据原则："
+        + "\n1. 当前 revision 已有逐字准确的 old 锚点时，直接编辑或验证，不为同步上下文重复读取。"
+        + "\n2. 只缺一个连续符号或函数时，仅调用一次有界 read_file；范围必须来自当前 revision 的工具结果或错误窗口，禁止猜测行号。"
+        + multiRegion
+        + "\n4. 成功写入已经建立当前 revision；写入后有 old 就直接 search_replace，没有 old 才补一次有界读取或一次 read_plan。"
+        + "\n5. read_plan.coverage_summary.ready_for_edit=true 后默认编辑或验证；为 false 时只补充明确列出的 missing evidence，禁止猜测 old。"
+        + "\n6. 仅在首次接触小文件且确实需要全局理解时，才使用 path-only 完整 read_file。";
   }
 
   private static boolean hasTool(List<? extends AgentTool> tools, String name) {
@@ -152,7 +182,7 @@ public final class CodeAgentPreset {
       return "\n当前任务按简单流程执行，不要求 plan_task；直接使用必要的读取、修改和验证工具。";
     }
     String complex =
-        "完整代码生成、多文件修改、功能集成、重构、界面、游戏、动画、可视化或复杂交互属于复杂任务；可以先用 list_dir/read_file 掌握基础上下文，随后调用 plan_task 再写入。真实证据变化时可再次 plan_task 调整剩余步骤；解释、注释、确定性替换和单点修复可直接执行。";
+        "完整代码生成、多文件修改、功能集成、重构、界面、游戏、动画、可视化或复杂交互属于复杂任务；应基于已有证据调用 plan_task 建立短计划后再写入。真实证据变化时可再次 plan_task 调整剩余步骤；解释、注释、确定性替换和单点修复可直接执行。";
     return mode == CodePlanningMode.FORCE
         ? "\n当前任务要求首次写入前调用 plan_task。" + complex
         : "\n采用自适应规划：复杂任务优先建立短计划，但计划是执行引导而不是终态硬证据。" + complex;
@@ -183,6 +213,9 @@ public final class CodeAgentPreset {
     private final List<TaskValidator> languageValidators = new ArrayList<>();
     private final Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     private CodePlanningMode planningMode = CodePlanningMode.ADAPTIVE;
+    private boolean editVisibleDuringVerify = true;
+    private boolean convergentReadPrompt = true;
+    private String atomicEditReadGate = "rewrite_only";
 
     private Builder(CodeLanguageProfile profile) {
       if (profile == null) throw new IllegalArgumentException("profile required");
@@ -227,6 +260,26 @@ public final class CodeAgentPreset {
 
     public Builder planningMode(String value) {
       return planningMode(CodePlanningMode.from(value));
+    }
+
+    /** Keeps exact-anchor search_replace available while verification or quality is pending. */
+    public Builder editVisibleDuringVerify(boolean value) {
+      editVisibleDuringVerify = value;
+      return this;
+    }
+
+    /** Uses the minimum-sufficient-evidence read decision contract in the common prompt. */
+    public Builder convergentReadPrompt(boolean value) {
+      convergentReadPrompt = value;
+      return this;
+    }
+
+    /** Selects legacy all-edit gating or the production rewrite-only read gate. */
+    public Builder atomicEditReadGate(String value) {
+      atomicEditReadGate = "legacy".equalsIgnoreCase(value == null ? "" : value.trim())
+          ? "legacy"
+          : "rewrite_only";
+      return this;
     }
 
     public CodeAgentPreset build() {

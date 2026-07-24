@@ -14,37 +14,41 @@ import com.cscjapp.aiworkbench.api.WorkspaceAccess;
 import java.io.File;
 import java.io.FileInputStream;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Locale;
 import java.util.logging.Logger;
 
-/** Requires current-run read evidence before an existing file is edited. */
+/** Requires current-run read evidence before an existing file is rewritten wholesale. */
 public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle {
   private static final Logger LOGGER = Logger.getLogger(ReadBeforeEditPolicy.class.getName());
   private final WorkspaceAccess workspace;
   private final Map<String, CodeToolRole> roles;
   private final Map<String, ReadEvidence> readEvidence = new LinkedHashMap<>();
-  private final Set<String> recoveryPendingPaths = new LinkedHashSet<>();
+  private final boolean guardSearchReplace;
   private long activeRunId = -1L;
 
   public ReadBeforeEditPolicy(
       WorkspaceAccess workspace, Map<String, CodeToolRole> roles) {
+    this(workspace, roles, "rewrite_only");
+  }
+
+  public ReadBeforeEditPolicy(
+      WorkspaceAccess workspace, Map<String, CodeToolRole> roles, String gateMode) {
     if (workspace == null) throw new IllegalArgumentException("workspace required");
     this.workspace = workspace;
     this.roles = roles == null ? new LinkedHashMap<>() : new LinkedHashMap<>(roles);
+    guardSearchReplace = "legacy".equalsIgnoreCase(text(gateMode));
   }
 
   @Override
   public synchronized void onRunStarted(AgentRunContext context) {
     activeRunId = context.runId();
     readEvidence.clear();
-    recoveryPendingPaths.clear();
   }
 
   @Override
@@ -72,9 +76,6 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
         if (completeSuccess) addRevisionEvidence(path, "", true);
         else readEvidence.remove(path);
       }
-      recoveryPendingPaths.removeAll(changedPaths);
-    } else if (completedRole == CodeToolRole.EDIT) {
-      collectRecoveryFailure(invocation, result);
     }
   }
 
@@ -103,13 +104,17 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
     if (context != null && context.runId() == activeRunId) {
       activeRunId = -1L;
       readEvidence.clear();
-      recoveryPendingPaths.clear();
     }
   }
 
   @Override
   public boolean supports(ToolInvocation invocation) {
-    return role(invocation) == CodeToolRole.EDIT;
+    if (role(invocation) != CodeToolRole.EDIT) return false;
+    String toolName = invocation.tool().spec().name();
+    // Exact-anchor edits enforce freshness in the file tool itself. Production uses
+    // rewrite_only; legacy remains a construction-time rollback mode for new runs.
+    return "rewrite".equals(toolName)
+        || (guardSearchReplace && "search_replace".equals(toolName));
   }
 
   @Override
@@ -147,8 +152,9 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
                   "read_evidence_required",
                   "当前任务尚未获得该文件当前 revision 的真实源码证据，暂时无法修改："
                       + canonical
-                      + "。请先使用 read_file 获取完整源码或真实短锚点，也可以使用 "
-                      + "ready_for_edit=true 的 read_plan 收集跨区域证据。",
+                      + "。单个明确位置请使用一次有界 read_file 获取真实短锚点；"
+                      + "多个不连续区域或状态流请使用 read_plan 一次收集证据。"
+                      + "不要为确认上下文默认完整读取文件。",
                   true));
         }
       }
@@ -184,7 +190,7 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
     if ("read_file".equals(toolName) && data.containsKey("content")) {
       String path = text(first(data, "resolved_path", "path"));
       if (path.isEmpty()) path = invocation.arguments().getString("path", "");
-      addFileEvidence(path, invocation.arguments(), data);
+      addFileEvidence(path, data);
     }
   }
 
@@ -205,18 +211,16 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
       if (!resolved.exists() || !resolved.isFile()) return;
       String actualRevision = sha256(resolved);
       if (!expectedRevision.isEmpty() && !actualRevision.equalsIgnoreCase(expectedRevision)) return;
-      readEvidence.put(
-          resolved.getCanonicalPath(),
-          new ReadEvidence(actualRevision, planned, ""));
+      mergeEvidence(resolved.getCanonicalPath(), actualRevision, planned, "");
     } catch (Exception ignored) {
       // Invalid or concurrently replaced paths never become edit evidence.
     }
   }
 
-  private void addFileEvidence(
-      String path, ToolArguments arguments, Map<String, Object> data) {
-    String content = text(data.get("content"));
-    if (path == null || path.trim().isEmpty() || content.isEmpty()) return;
+  private void addFileEvidence(String path, Map<String, Object> data) {
+    Object rawContent = data.get("content");
+    String content = rawContent == null ? "" : String.valueOf(rawContent);
+    if (path == null || path.trim().isEmpty()) return;
     try {
       File resolved = workspace.resolveSafely(path);
       if (!resolved.exists() || !resolved.isFile()) return;
@@ -226,20 +230,42 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
       if (!expectedRevision.isEmpty() && !actualRevision.equalsIgnoreCase(expectedRevision)) return;
       int totalLines = positiveInt(data.get("total_lines"));
       boolean full = Boolean.TRUE.equals(data.get("full_file"))
-          || "full_file".equals(text(data.get("mode")))
+          || "full_file".equalsIgnoreCase(text(data.get("mode")))
           || (!Boolean.TRUE.equals(data.get("truncated"))
               && totalLines > 0
-              && lineCount(content) >= totalLines)
-          || (arguments != null
-              && !arguments.asMap().containsKey("start_line")
-              && !arguments.asMap().containsKey("end_line")
-              && text(arguments.get("target_function")).isEmpty()
-              && text(arguments.get("target_class")).isEmpty()
-              && text(arguments.get("target_method")).isEmpty());
-      readEvidence.put(canonical, new ReadEvidence(actualRevision, full, full ? "" : content));
+              && lineCount(content) >= totalLines);
+      if (!full && content.isEmpty()) return;
+      mergeEvidence(canonical, actualRevision, full, full ? "" : content);
     } catch (Exception ignored) {
       // Invalid or concurrently replaced paths never become edit evidence.
     }
+  }
+
+  private void mergeEvidence(
+      String canonical, String revision, boolean planned, String fragment) {
+    ReadEvidence previous = readEvidence.get(canonical);
+    if (previous == null || !revision.equals(previous.revision)) {
+      readEvidence.put(canonical, ReadEvidence.create(revision, planned, fragment));
+      return;
+    }
+    boolean mergedPlanned = previous.planned || planned;
+    List<String> fragments = new ArrayList<>();
+    if (!mergedPlanned) {
+      fragments.addAll(previous.fragments);
+      addFragment(fragments, fragment);
+    }
+    readEvidence.put(canonical, new ReadEvidence(revision, mergedPlanned, fragments));
+  }
+
+  private static void addFragment(List<String> fragments, String candidate) {
+    if (candidate == null || candidate.isEmpty()) return;
+    for (String fragment : fragments) {
+      if (fragment.contains(candidate)) return;
+    }
+    for (int index = fragments.size() - 1; index >= 0; index--) {
+      if (candidate.contains(fragments.get(index))) fragments.remove(index);
+    }
+    fragments.add(candidate);
   }
 
   private static int positiveInt(Object value) {
@@ -260,39 +286,19 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
     return content.endsWith("\n") ? lines - 1 : lines;
   }
 
-  private void collectRecoveryFailure(ToolInvocation invocation, ToolResult result) {
-    if (!recoverableSearchReplaceFailure(invocation, result)) return;
-    Set<String> paths = new LinkedHashSet<>();
-    collectWritePaths(invocation, result == null ? Collections.emptyMap() : result.data(), paths);
-    for (String path : paths) {
-      recoveryPendingPaths.add(path);
-      readEvidence.remove(path);
-    }
-  }
-
-  private static boolean recoverableSearchReplaceFailure(
-      ToolInvocation invocation, ToolResult result) {
-    if (invocation == null
-        || invocation.tool() == null
-        || !"search_replace".equals(invocation.tool().spec().name())
-        || result == null
-        || result.isSuccess()) return false;
-    String detail = (text(result.errorCode()) + " " + text(result.message())).toLowerCase(Locale.US);
-    return detail.contains("search_match_count")
-        || detail.contains("no_match")
-        || detail.contains("multiple")
-        || detail.contains("overlap")
-        || detail.contains("brace")
-        || detail.contains("batch conflict")
-        || detail.contains("batch_conflict");
-  }
-
   private static boolean validRecoveryAnchors(ToolArguments arguments, ReadEvidence evidence) {
-    if (evidence.planned || evidence.content.isEmpty()) return false;
+    if (evidence.planned || evidence.fragments.isEmpty()) return false;
     List<String> anchors = replacementAnchors(arguments);
     if (anchors.isEmpty()) return false;
     for (String anchor : anchors) {
-      if (anchor.isEmpty() || !evidence.content.contains(anchor)) return false;
+      boolean found = false;
+      for (String fragment : evidence.fragments) {
+        if (fragment.contains(anchor)) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
     }
     return true;
   }
@@ -361,12 +367,19 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
   private static final class ReadEvidence {
     final String revision;
     final boolean planned;
-    final String content;
+    final List<String> fragments;
 
-    ReadEvidence(String revision, boolean planned, String content) {
+    ReadEvidence(String revision, boolean planned, List<String> fragments) {
       this.revision = revision;
       this.planned = planned;
-      this.content = content == null ? "" : content;
+      this.fragments = Collections.unmodifiableList(new ArrayList<>(fragments));
+    }
+
+    static ReadEvidence create(
+        String revision, boolean planned, String fragment) {
+      List<String> fragments = new ArrayList<>();
+      if (!planned) addFragment(fragments, fragment);
+      return new ReadEvidence(revision, planned, fragments);
     }
   }
 }

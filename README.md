@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.4'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.5'
 }
 ```
 
@@ -45,6 +45,9 @@ CodeLanguageProfile profile = CodeLanguageProfile.builder("my-language")
 CodeAgentPreset preset = CodeAgentPreset.builder(profile)
     .workspace(workspace)
     .planningMode(CodePlanningMode.ADAPTIVE)
+    .atomicEditReadGate("rewrite_only")
+    .editVisibleDuringVerify(true)
+    .convergentReadPrompt(true)
     .languageTools(languageTools)
     .languagePolicies(languagePolicies)
     .languageValidators(languageValidators)
@@ -74,16 +77,16 @@ public List<TaskValidator> validators() {
 Code Agent 通用层提供：
 
 - 语言无关任务协议与 `plan_task / quality_review / finalize_task`。
-- 当前任务轮次内“读取后才能编辑已有文件”的硬门禁。
+- 整文件 `rewrite` 的当前 revision 读取门禁；`search_replace` 依赖 exact-old、匹配数量和原子预检。
 - `create_file` 文件冲突用户选择覆盖或自动新建。
 - 按 `completion_type` 检查真实验证证据和质量阻塞项。
 - Native Tools 与 Legacy 协议一致的终态约束。
 - 强制区分文件创建与编辑：新路径使用 `create_file`，已有文件修改使用 `search_replace`。
 - 自适应精简受管计划：简单任务直接执行，复杂任务通过短 `plan_task` 按真实工具证据推进。
 - `ADAPTIVE / FORCE / SKIP` 三种规划模式；宿主也可通过 `code_agent_planning_mode` 启动参数选择。
-- 新写入会使旧验证和质量证据失效；只有 Validator 通过后计划才会完成。
+- 新写入会使旧验证和质量证据失效；验证期间仍保持 `search_replace` 可达，只有 Validator 通过后计划才会完成。
 
-Code Agent 的常规源码收集只向模型暴露目标驱动 `read_plan`。它必须返回文件 `revision`、非空 `evidence[]`，并以 `coverage_summary.ready_for_edit=true` 表示当前 revision 已具备编辑证据；成功写入或磁盘内容变化会使旧证据失效。`read_file` 仅在 `search_replace` 精确失败后临时开放，用于同路径的函数/类/方法或最多 80 行短锚点恢复，普通 `read_file/read_file_batch` 不再授权跨区域编辑。
+`read_file` 与目标驱动的 `read_plan` 在代码轮次中保持可达：单个连续缺口使用一次有界 `read_file`，多个区域、调用链或状态流使用一次 `read_plan`。后者返回文件 `revision`、非空 `evidence[]`，并以 `coverage_summary.ready_for_edit=true` 表示证据已覆盖；同 revision 的完整证据不会被后续局部片段降级。
 
 语言 Profile 只保留语言规则、编译/运行工具、验证合同和语言专属验证器。
 

@@ -79,7 +79,7 @@ public final class OpenAIModelGateway implements ModelGateway {
     JsonObject body = buildRequest(modelRequest);
     String requestJson = gson.toJson(body);
     String url = chatUrl(endpoint.baseUrl());
-    logRequest(modelRequest, url, requestIndex);
+    logRequest(modelRequest, url, requestIndex, requestJson.length());
     Request.Builder request =
         new Request.Builder()
             .url(url)
@@ -532,7 +532,7 @@ public final class OpenAIModelGateway implements ModelGateway {
   }
 
   private synchronized void logRequest(
-      ModelRequest request, String url, int requestIndex) {
+      ModelRequest request, String url, int requestIndex, int serializedChars) {
     List<AgentMessage> messages = request.messages();
     int start = 0;
     if (requestIndex > 1 && messages.size() >= previousMessageCount) {
@@ -560,7 +560,9 @@ public final class OpenAIModelGateway implements ModelGateway {
         .append(", tools=")
         .append(request.tools().size())
         .append(", deep_thinking=")
-        .append(request.deepThinking());
+        .append(request.deepThinking())
+        .append(", serialized_chars=")
+        .append(Math.max(0, serializedChars));
     if (!request.tools().isEmpty()) {
       output.append("\ntool_names=");
       for (int index = 0; index < request.tools().size(); index++) {
@@ -616,16 +618,33 @@ public final class OpenAIModelGateway implements ModelGateway {
       ToolCallBuilder b = entry.getValue();
       Map<String, Object> args = Collections.emptyMap();
       if (b.arguments.length() > 0) {
-        try {
-          args = gson.fromJson(b.arguments.toString(), Map.class);
-        } catch (Exception ignored) {
-          args = Collections.singletonMap("__raw_arguments", b.arguments.toString());
-        }
+        args = parseToolArguments(b.arguments.toString());
       }
       String id = blank(b.id) ? "call-" + entry.getKey() : b.id;
       calls.add(new AgentToolCall(id, b.name, new ToolArguments(args)));
     }
     return calls;
+  }
+
+  @SuppressWarnings("unchecked")
+  Map<String, Object> parseToolArguments(String raw) {
+    String source = raw == null ? "" : raw.trim();
+    try {
+      Map<String, Object> parsed = gson.fromJson(source, Map.class);
+      if (parsed != null) return parsed;
+    } catch (Exception ignored) {
+      // Attempt exactly one bounded repair below.
+    }
+    if (source.endsWith("}")) {
+      String candidate = source.substring(0, source.length() - 1).trim();
+      try {
+        Map<String, Object> repaired = gson.fromJson(candidate, Map.class);
+        if (repaired != null) return repaired;
+      } catch (Exception ignored) {
+        // Preserve the original bytes for a short explicit invalid_tool_arguments result.
+      }
+    }
+    return Collections.singletonMap("__raw_arguments", raw == null ? "" : raw);
   }
 
   private static String chatUrl(String baseUrl) {
