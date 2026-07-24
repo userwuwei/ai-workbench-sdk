@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.4
+
+- 轮次工具列表继续用于引导模型，但 Core 不再以 `tool_not_available_for_round` 拒绝已注册工具；路径、写入授权、精确替换和浏览器表达式安全策略保持不变。
+- `plan_task` 在 ADAPTIVE 的读取前后、写入后及验证/质量/恢复阶段持续可见，FORCE 仅在首次写入前保留计划门禁，支持基于真实新证据重新规划。
+- ADAPTIVE 不再把计划存在或所有计划步骤完成作为终态硬证据；完成只依赖当前代码 revision 所需的验证与质量结果。
+- 浏览器计划不匹配、桥接结果异常和 Quality 缺证据均归一化为 `passed=false` 的普通结构化结果，不再产生跨阶段硬错误；失败的新浏览器结果不会覆盖旧成功事务。
+- `missing_stage` 与 `recommended_next_action` 统一复用动态工具选择的同一状态判断，保证建议工具在下一轮可见。
+
 ## 2.0.3
 
 - 浏览器验证收敛为当前计划与内部 revision 上的一次已接受事务，不再使用动态 `covered_interaction_check_ids` 作为 quality/finalize 的第二套完成账本。

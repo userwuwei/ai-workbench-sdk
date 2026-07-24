@@ -47,26 +47,18 @@ final class CodeCompletionValidator implements TaskValidator {
     }
     String completionType =
         string(finalize == null ? null : finalize.get("completion_type"), "code_generation");
-    boolean managedPlanComplete = false;
     if (planCoordinator != null) {
-      boolean planRequired = planCoordinator.mode() == CodePlanningMode.FORCE
-          || (planCoordinator.mode() != CodePlanningMode.SKIP
-              && contract.requiresManagedPlan(completionType));
-      if (planRequired && !planCoordinator.hasPlan()) {
+      if (planCoordinator.mode() == CodePlanningMode.FORCE && !planCoordinator.hasPlan()) {
         issues.add(blocker(
             "managed_plan_missing",
             "当前复杂代码任务必须先通过 plan_task 建立短计划",
             Collections.emptyMap()));
-      } else if (planCoordinator.hasPlan() && !planCoordinator.isComplete()) {
-        issues.add(blocker(
-            "managed_plan_incomplete",
-            "受管计划仍缺少真实工具证据，不能标记 completed",
-            Collections.emptyMap()));
-      } else if (planCoordinator.hasPlan()) {
-        managedPlanComplete = true;
+      } else if (planCoordinator.completionEvidenceReady(completionType)) {
+        callback.onComplete(new ValidationResult(issues));
+        return Cancellable.NONE;
       }
     }
-    if (managedPlanComplete || !issues.isEmpty()) {
+    if (!issues.isEmpty()) {
       callback.onComplete(new ValidationResult(issues));
       return Cancellable.NONE;
     }

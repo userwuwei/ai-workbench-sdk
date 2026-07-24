@@ -3,6 +3,7 @@ package com.cscjapp.aiworkbench.codeagent;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.cscjapp.aiworkbench.api.AgentRunContext;
@@ -416,24 +417,22 @@ public final class CodeAgentPresetTest {
         ToolResult.success(map("passed", true)));
 
     AgentTool browser = tool("browser_test");
-    ToolPolicyDecision mismatch = decision(
-        coordinator,
-        new ToolInvocation(
-            "browser-mismatch",
-            browser,
-            new ToolArguments(
-                map(
-                    "scenarios",
-                    Arrays.asList(
-                        map("id", "start-game"),
-                        map("id", "extra"),
-                        map("id", "extra"))))));
-    assertEquals(ToolPolicyDecision.Kind.ERROR, mismatch.kind());
-    assertEquals("browser_interaction_contract_mismatch", mismatch.result().errorCode());
-    assertEquals(Collections.singletonList("restart-game"), mismatch.result().data().get("missing_ids"));
-    assertEquals(Collections.singletonList("extra"), mismatch.result().data().get("unexpected_ids"));
-    assertEquals(Collections.singletonList("extra"), mismatch.result().data().get("duplicate_ids"));
-    assertEquals(0, mismatch.result().data().get("webview_launch_count"));
+    ToolResult mismatch = coordinator.preflightResult(
+        "browser_test",
+        new ToolArguments(
+            map(
+                "scenarios",
+                Arrays.asList(
+                    map("id", "start-game"),
+                    map("id", "extra"),
+                    map("id", "extra")))));
+    assertTrue(mismatch.isSuccess());
+    assertEquals(false, mismatch.data().get("passed"));
+    assertEquals("test_plan_invalid", mismatch.data().get("failure_kind"));
+    assertEquals(Collections.singletonList("restart-game"), mismatch.data().get("missing_ids"));
+    assertEquals(Collections.singletonList("extra"), mismatch.data().get("unexpected_ids"));
+    assertEquals(Collections.singletonList("extra"), mismatch.data().get("duplicate_ids"));
+    assertEquals(0, mismatch.data().get("webview_launch_count"));
 
     ToolArguments browserArguments = new ToolArguments(
         map(
@@ -445,31 +444,27 @@ public final class CodeAgentPresetTest {
                     "actions", Collections.emptyList(),
                     "expectations", Collections.singletonList(
                         map("transition", "eventually_true"))))));
-    ToolPolicyDecision staticOnly = decision(
-        coordinator,
-        new ToolInvocation(
-            "browser-static",
-            browser,
-            new ToolArguments(
-                map(
-                    "scenarios",
-                    Arrays.asList(
-                        map(
-                            "id", "start-game",
-                            "actions", Collections.emptyList(),
-                            "expectations", Collections.singletonList(
-                                map("transition", "eventually_true"))),
-                        map(
-                            "id", "restart-game",
-                            "actions", Collections.emptyList(),
-                            "expectations", Collections.singletonList(
-                                map("transition", "eventually_true"))))))));
-    assertEquals(ToolPolicyDecision.Kind.ERROR, staticOnly.kind());
-    assertEquals(0, staticOnly.result().data().get("webview_launch_count"));
-    assertTrue(staticOnly.result().message().contains("actions"));
-    assertEquals(
-        ToolPolicyDecision.Kind.PROCEED,
-        decision(coordinator, new ToolInvocation("browser-ok", browser, browserArguments)).kind());
+    ToolResult staticOnly = coordinator.preflightResult(
+        "browser_test",
+        new ToolArguments(
+            map(
+                "scenarios",
+                Arrays.asList(
+                    map(
+                        "id", "start-game",
+                        "actions", Collections.emptyList(),
+                        "expectations", Collections.singletonList(
+                            map("transition", "eventually_true"))),
+                    map(
+                        "id", "restart-game",
+                        "actions", Collections.emptyList(),
+                        "expectations", Collections.singletonList(
+                            map("transition", "eventually_true")))))));
+    assertTrue(staticOnly.isSuccess());
+    assertEquals(false, staticOnly.data().get("passed"));
+    assertEquals(0, staticOnly.data().get("webview_launch_count"));
+    assertTrue(String.valueOf(staticOnly.data().get("failure_reason")).contains("actions"));
+    assertNull(coordinator.preflightResult("browser_test", browserArguments));
 
     ToolResult verified = coordinator.recordAndDecorate(
         generation,
@@ -498,23 +493,18 @@ public final class CodeAgentPresetTest {
     assertEquals("quality_review", beforeQuality.result().data().get("missing_stage"));
 
     AgentTool quality = tool(CodeAgentToolNames.QUALITY_REVIEW);
-    ToolPolicyDecision qualityDecision = decision(
-        coordinator,
-        new ToolInvocation(
-            "quality",
-            quality,
-            new ToolArguments(
-                map(
-                    "passed", true,
-                    "blocking_gaps", Collections.emptyList(),
-                    "minimal_version_risk", false))));
-    assertEquals(ToolPolicyDecision.Kind.PROCEED, qualityDecision.kind());
-    assertFalse(qualityDecision.arguments().has("covered_interaction_check_ids"));
+    ToolArguments qualityArguments = new ToolArguments(
+        map(
+            "passed", true,
+            "blocking_gaps", Collections.emptyList(),
+            "minimal_version_risk", false));
+    assertNull(coordinator.preflightResult(CodeAgentToolNames.QUALITY_REVIEW, qualityArguments));
+    assertFalse(qualityArguments.has("covered_interaction_check_ids"));
     coordinator.recordAndDecorate(
         generation,
         CodeAgentToolNames.QUALITY_REVIEW,
-        qualityDecision.arguments(),
-        ToolResult.success(qualityDecision.arguments().asMap()));
+        qualityArguments,
+        ToolResult.success(qualityArguments.asMap()));
     assertEquals(
         ToolPolicyDecision.Kind.PROCEED,
         decision(coordinator, new ToolInvocation("finalize", finalize, completed)).kind());
@@ -614,8 +604,8 @@ public final class CodeAgentPresetTest {
                     "passed_scenario_ids", Collections.singletonList("smoke"),
                     "failed_scenario_ids", Collections.emptyList()))));
 
-    assertEquals(ToolResult.Status.ERROR, malformed.status());
-    assertEquals("browser_test_result_invalid", malformed.errorCode());
+    assertEquals(ToolResult.Status.SUCCESS, malformed.status());
+    assertEquals(false, malformed.data().get("passed"));
     assertEquals("environment_failure", malformed.data().get("failure_kind"));
     assertFalse(coordinator.hasCurrentEvidence("browser_test"));
     List<ToolSpec> registered = Arrays.asList(
@@ -625,6 +615,172 @@ public final class CodeAgentPresetTest {
         tool("finalize_task").spec());
     assertTrue(selectedNames(
         coordinator.selectTools(new AgentRoundContext(run, 1), registered)).contains("browser_test"));
+  }
+
+  @Test
+  public void explicitBrowserToolStaysReachableWhenModelLabelsStepAsQuality() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .requireQualityReview("code_generation")
+            .build(),
+        roles,
+        workspace);
+    AgentRunContext run = new AgentRunContext(340L, "s", "workspace", "task");
+    coordinator.onRunStarted(run);
+    coordinator.acceptPlan(
+        map(
+            "goal", "验证页面",
+            "quality_mode", "interface_product",
+            "steps", Arrays.asList(
+                step("verify-syntax", "语法验证", "verify", "syntax_check"),
+                // Models sometimes describe the browser acceptance step as quality. Explicit
+                // required_tools remains authoritative so the tool path cannot become hidden.
+                step("browser-test", "浏览器验收", "quality", "browser_test"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "syntax_check", ToolResult.success(map("passed", true)));
+
+    List<ToolSpec> registered = Arrays.asList(
+        tool("read_file").spec(),
+        tool("read_plan").spec(),
+        tool("syntax_check").spec(),
+        tool("browser_test").spec(),
+        tool("quality_review").spec(),
+        tool("finalize_task").spec());
+    Set<String> beforeBrowser = selectedNames(coordinator.selectTools(
+        new AgentRoundContext(run, 1), registered));
+    assertTrue(beforeBrowser.contains("browser_test"));
+    assertFalse(beforeBrowser.contains("quality_review"));
+
+    ToolArguments browserArguments = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "browser_test", browserArguments, passingBrowser("smoke"));
+    Set<String> afterBrowser = selectedNames(coordinator.selectTools(
+        new AgentRoundContext(run, 2), registered));
+    assertTrue(afterBrowser.contains("quality_review"));
+    assertFalse(afterBrowser.contains("browser_test"));
+  }
+
+  @Test
+  public void failedBrowserRetryKeepsOldTransactionButDoesNotAuthorizeCompletion() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("browser_test")
+            .requireQualityReview("code_generation")
+            .build(),
+        roles,
+        workspace);
+    AgentRunContext run = new AgentRunContext(341L, "s", "workspace", "task");
+    coordinator.onRunStarted(run);
+    coordinator.acceptPlan(
+        map(
+            "goal", "验证页面",
+            "steps", Arrays.asList(
+                step("verify-browser", "浏览器验证", "verify", "browser_test"),
+                step("quality", "质量", "quality", "quality_review"))));
+    ToolArguments arguments = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "browser_test", arguments, passingBrowser("smoke"));
+    assertTrue(coordinator.hasCurrentEvidence("browser_test"));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "quality_review", passingQuality());
+    assertTrue(coordinator.completionEvidenceReady("code_generation"));
+
+    ToolResult retry = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "browser_test",
+        arguments,
+        ToolResult.success(map("passed", true, "failure_kind", "none")));
+    assertEquals(false, retry.data().get("passed"));
+    assertTrue(coordinator.hasCurrentEvidence("browser_test"));
+    assertFalse(coordinator.completionEvidenceReady("code_generation"));
+    ToolResult qualityGap = coordinator.preflightResult(
+        "quality_review",
+        new ToolArguments(map("passed", true, "blocking_gaps", Collections.emptyList())));
+    assertEquals(false, qualityGap.data().get("passed"));
+    assertEquals("browser_test", qualityGap.data().get("recommended_next_action"));
+    ToolPolicyDecision finalize = decision(
+        coordinator,
+        new ToolInvocation(
+            "finalize",
+            tool("finalize_task"),
+            new ToolArguments(map("status", "completed", "summary", "done"))));
+    assertEquals("browser_test", finalize.result().data().get("missing_stage"));
+  }
+
+  @Test
+  public void currentQualityCanCompleteAdaptivePlanWithUnmappedProgressSteps() {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("syntax_check", "browser_test")
+        .requireQualityReview("code_generation")
+        .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("quality_review", CodeToolRole.QUALITY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    coordinator.onRunStarted(new AgentRunContext(342L, "s", "workspace", "task"));
+    coordinator.acceptPlan(
+        map(
+            "goal", "完成当前页面",
+            "steps", Arrays.asList(
+                step("discover", "历史映射未完成", "discover", "read_file"),
+                step("implement", "历史映射未完成", "implement", "search_replace"),
+                step("verify", "真实验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "真实质量", "quality", "quality_review"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "syntax_check", ToolResult.success(map("passed", true)));
+    ToolArguments browserArgs = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "browser_test", browserArgs, passingBrowser("smoke"));
+    List<ToolSpec> registered = Arrays.asList(
+        tool("read_file").spec(),
+        tool("search_replace").spec(),
+        tool("syntax_check").spec(),
+        tool("browser_test").spec(),
+        tool("quality_review").spec(),
+        tool("finalize_task").spec());
+    assertTrue(selectedNames(coordinator.selectTools(
+        new AgentRoundContext(
+            new AgentRunContext(342L, "s", "workspace", "task"), 1), registered))
+        .contains("quality_review"));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "quality_review", passingQuality());
+    assertFalse(coordinator.isComplete());
+    assertTrue(coordinator.completionEvidenceReady("code_generation"));
+    ToolPolicyDecision finalize = decision(
+        coordinator,
+        new ToolInvocation(
+            "finalize",
+            tool("finalize_task"),
+            new ToolArguments(
+                map(
+                    "status", "completed",
+                    "completion_type", "code_generation",
+                    "summary", "done"))));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, finalize.kind());
   }
 
   @Test
@@ -673,6 +829,38 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void explicitVerifyContractIsNotExpandedByDefaultEvidence() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(351L, "s", "workspace", "task"));
+    coordinator.acceptPlan(
+        map(
+            "goal", "只需语法验证",
+            "steps", Collections.singletonList(
+                step("verify-syntax", "语法", "verify", "syntax_check"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "syntax_check", ToolResult.success(map("passed", true)));
+
+    assertTrue(coordinator.completionEvidenceReady("code_generation"));
+    ToolPolicyDecision finalize = decision(
+        coordinator,
+        new ToolInvocation(
+            "finalize",
+            tool("finalize_task"),
+            new ToolArguments(map("status", "completed", "summary", "done"))));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, finalize.kind());
+  }
+
+  @Test
   public void replanInvalidatesBrowserAndQualityInteractionEvidence() {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("read_file", CodeToolRole.READ);
@@ -714,21 +902,17 @@ public final class CodeAgentPresetTest {
         "browser_test",
         browserArguments,
         passingBrowser("start-game"));
-    ToolPolicyDecision injected = decision(
-        coordinator,
-        new ToolInvocation(
-            "quality",
-            tool("quality_review"),
-            new ToolArguments(
-                map(
-                    "passed", true,
-                    "minimal_version_risk", false,
-                    "blocking_gaps", Collections.emptyList()))));
+    ToolArguments injected = new ToolArguments(
+        map(
+            "passed", true,
+            "minimal_version_risk", false,
+            "blocking_gaps", Collections.emptyList()));
+    assertNull(coordinator.preflightResult("quality_review", injected));
     coordinator.recordAndDecorate(
         generation,
         "quality_review",
-        injected.arguments(),
-        ToolResult.success(injected.arguments().asMap()));
+        injected,
+        ToolResult.success(injected.asMap()));
     ToolArguments completed = new ToolArguments(map("status", "completed", "summary", "done"));
     assertEquals(
         ToolPolicyDecision.Kind.PROCEED,
@@ -1293,7 +1477,7 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(ready));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "create_file", "search_replace", "rewrite", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "create_file", "search_replace", "rewrite", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     coordinator.recordAndDecorate(
@@ -1302,12 +1486,12 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true)));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "syntax_check", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "syntax_check", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     coordinator.recordAndDecorate(
         generation, "syntax_check", ToolResult.success(map("passed", true)));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "browser_test", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "browser_test", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     coordinator.recordAndDecorate(
@@ -1315,14 +1499,14 @@ public final class CodeAgentPresetTest {
         "browser_test",
         ToolResult.success(map("passed", false, "failure_kind", "test_plan_invalid")));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "browser_test", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "browser_test", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     coordinator.recordAndDecorate(
         generation,
         "browser_test",
         ToolResult.success(map("passed", false, "failure_kind", "product_code_failure")));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "create_file", "search_replace", "rewrite", "finalize_task")),
+        new LinkedHashSet<>(Arrays.asList("read_file", "read_plan", "create_file", "search_replace", "rewrite", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     coordinator.recordAndDecorate(
@@ -1341,7 +1525,7 @@ public final class CodeAgentPresetTest {
             "file_tool_error", "search_match_count:0:expected=1:actual=0", false));
     assertEquals(
         new LinkedHashSet<>(Arrays.asList(
-            "read_file", "read_plan", "create_file", "search_replace", "rewrite", "finalize_task")),
+            "read_file", "read_plan", "create_file", "search_replace", "rewrite", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     AgentTool recoveryRead = tool("read_file");
     assertFalse(coordinator.supports(new ToolInvocation(
@@ -1353,6 +1537,123 @@ public final class CodeAgentPresetTest {
         ToolResult.success(map("path", "main.txt", "content", "before")));
     assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("search_replace"));
     assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
+  }
+
+  @Test
+  public void planRemainsReachableAfterReadWriteVerifyAndFailure() throws Exception {
+    CodeValidationContract contract =
+        CodeValidationContract.builder()
+            .defaultRequiredEvidence("syntax_check", "browser_test")
+            .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("list_dir", CodeToolRole.DISCOVER);
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.PLAN_TASK, CodeToolRole.PLAN);
+    roles.put(CodeAgentToolNames.QUALITY_REVIEW, CodeToolRole.QUALITY);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    List<ToolSpec> registered = new ArrayList<>();
+    for (String name : roles.keySet()) registered.add(tool(name).spec());
+    AgentRunContext run = new AgentRunContext(190L, "s", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 0);
+    ManagedCodePlanCoordinator adaptive =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    adaptive.onRunStarted(run);
+    long generation = adaptive.generation();
+    adaptive.recordAndDecorate(
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(
+            map(
+                "path", "main.txt",
+                "revision", sha256(new File(root, "main.txt")),
+                "content", "before")));
+    Set<String> afterRead = selectedNames(adaptive.selectTools(round, registered));
+    assertTrue(afterRead.contains(CodeAgentToolNames.PLAN_TASK));
+    assertTrue(afterRead.contains("search_replace"));
+
+    adaptive.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+    Set<String> afterWrite = selectedNames(adaptive.selectTools(round, registered));
+    assertTrue(afterWrite.contains(CodeAgentToolNames.PLAN_TASK));
+    assertTrue(afterWrite.contains("syntax_check"));
+
+    adaptive.acceptPlan(
+        map(
+            "goal", "验证",
+            "steps",
+            Arrays.asList(
+                step("verify", "验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "审查", "quality", "quality_review"))));
+    assertTrue(selectedNames(adaptive.selectTools(round, registered))
+        .contains(CodeAgentToolNames.PLAN_TASK));
+    adaptive.recordAndDecorate(
+        generation, "syntax_check", ToolResult.success(map("passed", true)));
+    assertTrue(selectedNames(adaptive.selectTools(round, registered))
+        .contains(CodeAgentToolNames.PLAN_TASK));
+    adaptive.recordAndDecorate(
+        generation,
+        "browser_test",
+        ToolResult.success(map("passed", false, "failure_kind", "test_plan_invalid")));
+    Set<String> afterFailure = selectedNames(adaptive.selectTools(round, registered));
+    assertTrue(afterFailure.contains(CodeAgentToolNames.PLAN_TASK));
+    assertTrue(afterFailure.contains("browser_test"));
+
+    ManagedCodePlanCoordinator force =
+        new ManagedCodePlanCoordinator(CodePlanningMode.FORCE, contract, roles, workspace);
+    force.onRunStarted(new AgentRunContext(191L, "s", "workspace", "task"));
+    force.recordAndDecorate(
+        force.generation(),
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(
+            map(
+                "path", "main.txt",
+                "revision", sha256(new File(root, "main.txt")),
+                "content", "before")));
+    Set<String> forceTools = selectedNames(force.selectTools(round, registered));
+    assertTrue(forceTools.contains(CodeAgentToolNames.PLAN_TASK));
+    assertFalse(forceTools.contains("search_replace"));
+  }
+
+  @Test
+  public void successfulBrowserResultCanDeriveOptionalMetadata() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().defaultRequiredEvidence("browser_test").build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(192L, "s", "workspace", "task"));
+    coordinator.acceptPlan(
+        map(
+            "goal", "浏览器验证",
+            "steps", Collections.singletonList(
+                step("verify", "验证", "verify", "browser_test"))));
+    ToolArguments arguments = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    ToolResult result = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "browser_test",
+        arguments,
+        ToolResult.success(
+            map(
+                "passed", true,
+                "scenario_results",
+                Collections.singletonList(map("id", "smoke", "passed", true)))));
+    assertTrue(result.isSuccess());
+    assertEquals(true, result.data().get("passed"));
+    assertEquals("none", result.data().get("failure_kind"));
+    assertEquals(true, ((Map<?, ?>) result.data().get("coverage_summary")).get("complete"));
+    assertTrue(coordinator.hasCurrentEvidence("browser_test"));
   }
 
   @Test
@@ -2141,9 +2442,9 @@ public final class CodeAgentPresetTest {
     evidence.add(evidence.size() - 1, edit);
     ValidationResult stale = validate(validator, evidence);
     assertFalse(stale.passed());
-    assertTrue(hasIssue(stale, "managed_plan_incomplete"));
-    assertFalse(hasIssue(stale, "browser_test_missing"));
-    assertFalse(hasIssue(stale, "quality_review_missing"));
+    assertFalse(hasIssue(stale, "managed_plan_incomplete"));
+    assertTrue(hasIssue(stale, "browser_test_missing"));
+    assertTrue(hasIssue(stale, "quality_review_missing"));
   }
 
   @Test

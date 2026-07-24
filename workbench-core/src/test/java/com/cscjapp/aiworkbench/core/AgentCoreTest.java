@@ -129,10 +129,9 @@ public class AgentCoreTest {
   }
 
   @Test
-  public void roundToolSelectionAlsoBlocksExecutionOfHiddenTools() {
+  public void roundToolSelectionGuidesModelWithoutBlockingRegisteredTools() {
     AtomicInteger rounds = new AtomicInteger();
     AtomicInteger hiddenExecutions = new AtomicInteger();
-    AtomicBoolean sawUnavailableResult = new AtomicBoolean();
     ToolPolicy selectionPolicy = new ToolPolicy() {
       @Override
       public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
@@ -160,11 +159,6 @@ public class AgentCoreTest {
     };
     ModelGateway gateway = (request, observer) -> {
       int round = rounds.incrementAndGet();
-      for (AgentMessage message : request.messages()) {
-        if (message.content().contains("tool_not_available_for_round")) {
-          sawUnavailableResult.set(true);
-        }
-      }
       String name = round == 1 ? "read_file" : "finalize_task";
       ToolArguments arguments = round == 1
           ? ToolArguments.empty()
@@ -201,8 +195,7 @@ public class AgentCoreTest {
     engine.submit("task", observer(finalText));
 
     assertEquals(2, rounds.get());
-    assertEquals(0, hiddenExecutions.get());
-    assertTrue(sawUnavailableResult.get());
+    assertEquals(1, hiddenExecutions.get());
     assertEquals("done", finalText.get());
   }
 

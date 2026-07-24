@@ -152,10 +152,10 @@ public final class CodeAgentPreset {
       return "\n当前任务按简单流程执行，不要求 plan_task；直接使用必要的读取、修改和验证工具。";
     }
     String complex =
-        "完整代码生成、多文件修改、功能集成、重构、界面、游戏、动画、可视化或复杂交互属于复杂任务，必须先调用 plan_task；解释、注释、确定性替换和单点修复可直接执行。";
+        "完整代码生成、多文件修改、功能集成、重构、界面、游戏、动画、可视化或复杂交互属于复杂任务；可以先用 list_dir/read_file 掌握基础上下文，随后调用 plan_task 再写入。真实证据变化时可再次 plan_task 调整剩余步骤；解释、注释、确定性替换和单点修复可直接执行。";
     return mode == CodePlanningMode.FORCE
         ? "\n当前任务要求首次写入前调用 plan_task。" + complex
-        : "\n采用自适应规划：" + complex;
+        : "\n采用自适应规划：复杂任务优先建立短计划，但计划是执行引导而不是终态硬证据。" + complex;
   }
 
   private static Map<String, CodeToolRole> defaultRoles() {
@@ -257,6 +257,12 @@ public final class CodeAgentPreset {
     public Cancellable execute(
         ToolContext context, ToolArguments arguments, ToolCallback callback) {
       long runGeneration = planCoordinator.generation();
+      ToolResult preflight = planCoordinator.preflightResult(spec().name(), arguments);
+      if (preflight != null) {
+        callback.onComplete(planCoordinator.recordAndDecorate(
+            runGeneration, spec().name(), arguments, preflight));
+        return Cancellable.NONE;
+      }
       return delegate.execute(
           context,
           arguments,
