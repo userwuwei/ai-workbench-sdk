@@ -160,6 +160,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
+    if (syntaxPendingBeforeBrowser()) {
+      keepSearchReplaceReachable(allowed);
+      allowed.add("syntax_check");
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
     if (!verificationFailureTool.isEmpty()) {
       if (retryBrowserPlanWithoutCodeRead()) {
         allowed.add("browser_test");
@@ -293,6 +299,19 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         data.put("plan_state", state());
         return ToolResult.success(data);
       }
+      String candidateHash = report.executionPlanHash();
+      if (!pendingBrowserRegressionPlanHash.isEmpty()
+          && pendingBrowserRegressionPlanId.equals(planId)
+          && !pendingBrowserRegressionPlanHash.equals(candidateHash)) {
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("operation", "browser_test");
+        data.put("passed", false);
+        data.put("failure_kind", "test_plan_invalid");
+        data.put("webview_launch_count", 0);
+        applyRegressionPlanChanged(data);
+        data.put("plan_state", state());
+        return ToolResult.success(data);
+      }
     }
     if (CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
         && !verificationEvidenceReady("code_generation")) {
@@ -368,7 +387,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
     if (stateChanged || contractResult) data.put("plan_state", state());
     if (contractResult) decorateManagedResult(toolName, data);
-    if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
+    if (syntaxPendingBeforeBrowser()) {
+      data.put("recommended_next_action", "syntax_check");
+    } else if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
       data.put("recommended_next_action", recommendedNextAction());
     } else if (text(data.get("recommended_next_action")).isEmpty()) {
       data.put("recommended_next_action", recommendedNextAction());
@@ -394,24 +415,26 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (!result.isSuccess()) return result;
     Map<String, Object> data = new LinkedHashMap<>(result.data());
     if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
-      String currentHash = text(data.get("test_plan_hash"));
+      String invocationHash = browserPlanHash(arguments);
+      String resultHash = text(data.get("test_plan_hash"));
+      if (!invocationHash.isEmpty() && isSha256(resultHash)
+          && !invocationHash.equals(resultHash)) {
+        data.put("passed", false);
+        data.put("failure_kind", "environment_failure");
+        data.put("failure_reason", "browser_test 返回的测试 Hash 与调用参数不一致");
+        data.put("recommended_next_action", "browser_test");
+        markCoverageIncomplete(data);
+        Map<String, Object> diagnostic = new LinkedHashMap<>();
+        diagnostic.put("reason", data.get("failure_reason"));
+        diagnostic.put("internal_retry_exhausted", false);
+        data.put("environment_diagnostic", diagnostic);
+      }
+      String currentHash = invocationHash.isEmpty() ? resultHash : invocationHash;
       if (!pendingBrowserRegressionPlanHash.isEmpty()
           && pendingBrowserRegressionPlanId.equals(planId)
+          && Boolean.TRUE.equals(data.get("passed"))
           && !pendingBrowserRegressionPlanHash.equals(currentHash)) {
-        data.put("passed", false);
-        data.put("failure_kind", "test_plan_invalid");
-        data.put("failure_reason", "产品修复后的 browser_test 改变了原诊断测试语义");
-        data.put("recommended_next_action", "browser_test");
-        Map<String, Object> issue = new LinkedHashMap<>();
-        issue.put("path", "browser_test.scenarios");
-        issue.put("code", "regression_plan_changed");
-        issue.put("message", "请使用产品故障诊断时相同的 actions、wait_for 和 expectations 回归");
-        data.put("validation_issues", Collections.singletonList(issue));
-        Map<String, Object> retry = new LinkedHashMap<>();
-        retry.put("issue", issue.get("message"));
-        retry.put("recommended_tool", "browser_test");
-        retry.put("instruction", "保持产品代码不变，恢复原诊断测试语义后重新执行 browser_test");
-        data.put("test_retry_brief", retry);
+        applyRegressionPlanChanged(data);
       }
     }
     if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
@@ -564,7 +587,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (role == CodeToolRole.VERIFY || role == CodeToolRole.QUALITY) {
       boolean valid = validEvidence(toolName, role, arguments, result);
       if (role == CodeToolRole.VERIFY) {
-        recordVerificationRouting(toolName, result, valid);
+        recordVerificationRouting(toolName, arguments, result, valid);
       }
       if (!valid) {
         if (role == CodeToolRole.QUALITY || !"browser_test".equals(toolName)) {
@@ -728,7 +751,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
   }
 
-  private void recordVerificationRouting(String toolName, ToolResult result, boolean valid) {
+  private void recordVerificationRouting(
+      String toolName, ToolArguments arguments, ToolResult result, boolean valid) {
     if (valid) {
       if (toolName.equals(verificationFailureTool)) {
         verificationFailureTool = "";
@@ -749,8 +773,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     verificationFailureKind = kind;
     if ("browser_test".equals(toolName)
         && "product_code_failure".equals(kind)
+        && hasExplicitBrowserProductFailure(result.data())
         && !hasIndependentBrowserTestFailure(result.data())) {
-      String hash = text(result.data().get("test_plan_hash"));
+      String hash = browserPlanHash(arguments);
+      if (hash.isEmpty()) hash = text(result.data().get("test_plan_hash"));
       if (!hash.isEmpty()) {
         pendingBrowserRegressionPlanId = planId;
         pendingBrowserRegressionPlanHash = hash;
@@ -779,6 +805,23 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       }
     }
     return !sawFailure && data.containsKey("test_retry_brief");
+  }
+
+  private static boolean hasExplicitBrowserProductFailure(Map<String, Object> data) {
+    Object rawResults = data.get("scenario_results");
+    if (!(rawResults instanceof Collection)) return false;
+    for (Object rawResult : (Collection<?>) rawResults) {
+      if (!(rawResult instanceof Map)) continue;
+      Object rawFailures = ((Map<?, ?>) rawResult).get("failures");
+      if (!(rawFailures instanceof Collection)) continue;
+      for (Object rawFailure : (Collection<?>) rawFailures) {
+        if (!(rawFailure instanceof Map)) continue;
+        Map<?, ?> failure = (Map<?, ?>) rawFailure;
+        if (text(failure.get("code")).startsWith("blocked_by_")) continue;
+        if ("product_code_failure".equals(text(failure.get("failure_kind")))) return true;
+      }
+    }
+    return false;
   }
 
   private boolean retryBrowserPlanWithoutCodeRead() {
@@ -896,6 +939,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private String nextCompletionAction(String completionType) {
     if (mode == CodePlanningMode.FORCE && !hasPlan()) return CodeAgentToolNames.PLAN_TASK;
+    if (syntaxPendingBeforeBrowser()) return "syntax_check";
     if (!verificationFailureTool.isEmpty()) return verificationFailureTool;
     if (verificationEvidenceReady(completionType)
         && qualityEvidenceRequired(completionType)
@@ -925,6 +969,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (editVisibleDuringVerify && !recoverableEditPath.isEmpty()) {
       return "search_replace";
     }
+    if (syntaxPendingBeforeBrowser()) return "syntax_check";
     if (editVisibleDuringVerify
         && !verificationFailureTool.isEmpty()
         && !retryBrowserPlanWithoutCodeRead()
@@ -934,6 +979,59 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return "search_replace";
     }
     return nextCompletionAction("code_generation");
+  }
+
+  private boolean syntaxPendingBeforeBrowser() {
+    if ("syntax_check".equals(verificationFailureTool)) return false;
+    if (!hasRoleAtRevision(CodeToolRole.CREATE) && !hasRoleAtRevision(CodeToolRole.EDIT)) {
+      return false;
+    }
+    boolean required = false;
+    for (String tool : completionVerificationTools("code_generation")) {
+      if ("syntax_check".equals(canonicalToolName(tool))) {
+        required = true;
+        break;
+      }
+    }
+    return required && !hasCurrentTool("syntax_check");
+  }
+
+  private static String browserPlanHash(ToolArguments arguments) {
+    if (arguments == null) return "";
+    BrowserTestContractValidator.Report report =
+        BrowserTestContractValidator.validate(arguments.asMap());
+    return report.valid() ? report.executionPlanHash() : "";
+  }
+
+  private static boolean isSha256(String value) {
+    return value != null && value.matches("[0-9a-fA-F]{64}");
+  }
+
+  private static void applyRegressionPlanChanged(Map<String, Object> data) {
+    data.put("passed", false);
+    data.put("failure_kind", "test_plan_invalid");
+    data.put("failure_reason", "产品修复后的 browser_test 改变了原诊断测试语义");
+    data.put("recommended_next_action", "browser_test");
+    markCoverageIncomplete(data);
+    Map<String, Object> issue = new LinkedHashMap<>();
+    issue.put("path", "browser_test.scenarios");
+    issue.put("code", "regression_plan_changed");
+    issue.put("message", "请使用产品故障诊断时相同的 actions、wait_for 和 expectations 回归");
+    data.put("validation_issues", Collections.singletonList(issue));
+    Map<String, Object> retry = new LinkedHashMap<>();
+    retry.put("issue", issue.get("message"));
+    retry.put("recommended_tool", "browser_test");
+    retry.put("instruction", "保持产品代码不变，恢复原诊断测试语义后重新执行 browser_test");
+    data.put("test_retry_brief", retry);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void markCoverageIncomplete(Map<String, Object> data) {
+    Object raw = data.get("coverage_summary");
+    if (!(raw instanceof Map)) return;
+    Map<String, Object> coverage = new LinkedHashMap<>((Map<String, Object>) raw);
+    coverage.put("complete", false);
+    data.put("coverage_summary", coverage);
   }
 
   private boolean qualityRequired() {

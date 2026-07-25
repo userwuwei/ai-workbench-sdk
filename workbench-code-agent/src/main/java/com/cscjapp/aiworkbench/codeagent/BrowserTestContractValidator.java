@@ -1,5 +1,7 @@
 package com.cscjapp.aiworkbench.codeagent;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -22,6 +24,7 @@ public final class BrowserTestContractValidator {
   public static final long DEFAULT_WAIT_FOR_TIMEOUT_MS = 10_000L;
   public static final long MIN_WAIT_FOR_TIMEOUT_MS = 500L;
   public static final long MAX_WAIT_FOR_TIMEOUT_MS = 60_000L;
+  public static final long DEFAULT_TRANSACTION_TIMEOUT_MS = 30_000L;
 
   private static final Pattern SCENARIO_ID =
       Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,63}");
@@ -102,13 +105,18 @@ public final class BrowserTestContractValidator {
     private final List<Issue> issues;
     private final List<String> providedScenarioIds;
     private final boolean hasDynamicScenario;
+    private final String executionPlanHash;
 
     private Report(
-        List<Issue> issues, List<String> providedScenarioIds, boolean hasDynamicScenario) {
+        List<Issue> issues,
+        List<String> providedScenarioIds,
+        boolean hasDynamicScenario,
+        String executionPlanHash) {
       this.issues = Collections.unmodifiableList(new ArrayList<>(issues));
       this.providedScenarioIds =
           Collections.unmodifiableList(new ArrayList<>(providedScenarioIds));
       this.hasDynamicScenario = hasDynamicScenario;
+      this.executionPlanHash = executionPlanHash == null ? "" : executionPlanHash;
     }
 
     public boolean valid() {
@@ -135,6 +143,11 @@ public final class BrowserTestContractValidator {
 
     public boolean hasDynamicScenario() {
       return hasDynamicScenario;
+    }
+
+    /** Hash of the normalized executable browser semantics. Empty when validation failed. */
+    public String executionPlanHash() {
+      return executionPlanHash;
     }
   }
 
@@ -488,8 +501,34 @@ public final class BrowserTestContractValidator {
     }
 
     Report report() {
-      return new Report(issues, providedIds, hasDynamicScenario);
+      return new Report(
+          issues,
+          providedIds,
+          hasDynamicScenario,
+          issues.isEmpty() ? executionPlanHash(arguments) : "");
     }
+  }
+
+  private static String executionPlanHash(Map<String, ?> arguments) {
+    Map<String, Object> plan = new LinkedHashMap<>();
+    plan.put("entry_path", trimText(arguments.get("entry_path")));
+    plan.put("timeout_ms", normalizedInteger(
+        arguments.get("timeout_ms"), DEFAULT_TRANSACTION_TIMEOUT_MS));
+    List<Object> scenarios = new ArrayList<>();
+    Object rawScenarios = arguments.get("scenarios");
+    if (rawScenarios instanceof Collection) {
+      for (Object raw : (Collection<?>) rawScenarios) {
+        Map<?, ?> scenario = (Map<?, ?>) raw;
+        Map<String, Object> normalized = new LinkedHashMap<>();
+        normalized.put("id", trimText(scenario.get("id")));
+        normalized.put("actions", normalizedActions((List<?>) scenario.get("actions")));
+        normalized.put("expectations", normalizedExpectations(
+            (List<?>) scenario.get("expectations")));
+        scenarios.add(normalized);
+      }
+    }
+    plan.put("scenarios", scenarios);
+    return sha256(canonicalJson(plan));
   }
 
   private static String canonicalValue(Object raw) {
@@ -518,6 +557,81 @@ public final class BrowserTestContractValidator {
     return String.valueOf(raw);
   }
 
+  /** Deterministic JSON encoding used only for the executable plan hash. */
+  private static String canonicalJson(Object raw) {
+    if (raw == null) return "null";
+    if (raw instanceof Map) {
+      StringBuilder out = new StringBuilder("{");
+      boolean first = true;
+      for (Map.Entry<String, Object> entry
+          : new TreeMap<>(stringKeyMap((Map<?, ?>) raw)).entrySet()) {
+        if (!first) out.append(',');
+        first = false;
+        appendJsonString(out, entry.getKey());
+        out.append(':').append(canonicalJson(entry.getValue()));
+      }
+      return out.append('}').toString();
+    }
+    if (raw instanceof Collection) {
+      StringBuilder out = new StringBuilder("[");
+      boolean first = true;
+      for (Object item : (Collection<?>) raw) {
+        if (!first) out.append(',');
+        first = false;
+        out.append(canonicalJson(item));
+      }
+      return out.append(']').toString();
+    }
+    if (raw instanceof String) {
+      StringBuilder out = new StringBuilder();
+      appendJsonString(out, (String) raw);
+      return out.toString();
+    }
+    if (raw instanceof Boolean) return Boolean.TRUE.equals(raw) ? "true" : "false";
+    if (raw instanceof Number) return String.valueOf(raw);
+    StringBuilder out = new StringBuilder();
+    appendJsonString(out, String.valueOf(raw));
+    return out.toString();
+  }
+
+  private static void appendJsonString(StringBuilder out, String value) {
+    out.append('"');
+    for (int index = 0; index < value.length(); index++) {
+      char current = value.charAt(index);
+      switch (current) {
+        case '"': out.append("\\\""); break;
+        case '\\': out.append("\\\\"); break;
+        case '\b': out.append("\\b"); break;
+        case '\f': out.append("\\f"); break;
+        case '\n': out.append("\\n"); break;
+        case '\r': out.append("\\r"); break;
+        case '\t': out.append("\\t"); break;
+        default:
+          if (current < 0x20) {
+            String hex = Integer.toHexString(current);
+            out.append("\\u");
+            for (int pad = hex.length(); pad < 4; pad++) out.append('0');
+            out.append(hex);
+          } else {
+            out.append(current);
+          }
+      }
+    }
+    out.append('"');
+  }
+
+  private static String sha256(String value) {
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] bytes = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+      StringBuilder out = new StringBuilder(bytes.length * 2);
+      for (byte item : bytes) out.append(String.format("%02x", item & 0xff));
+      return out.toString();
+    } catch (Exception error) {
+      throw new IllegalStateException("无法计算 browser_test plan hash", error);
+    }
+  }
+
   private static List<Object> normalizedActions(List<?> actions) {
     List<Object> out = new ArrayList<>();
     for (Object raw : actions) {
@@ -531,7 +645,7 @@ public final class BrowserTestContractValidator {
       value.put("type", type);
       if ("click".equals(type) || "input".equals(type)) {
         value.put("selector", trimText(action.get("selector")));
-        if ("input".equals(type)) value.put("value", trimText(action.get("value")));
+        if ("input".equals(type)) value.put("value", rawString(action.get("value")));
       } else if ("wait_for".equals(type)) {
         Object expectation = action.get("expectation");
         value.put("expectation", expectation instanceof Map
@@ -570,6 +684,10 @@ public final class BrowserTestContractValidator {
 
   private static String trimText(Object raw) {
     return raw instanceof String ? ((String) raw).trim() : String.valueOf(raw == null ? "" : raw);
+  }
+
+  private static String rawString(Object raw) {
+    return raw instanceof String ? (String) raw : String.valueOf(raw == null ? "" : raw);
   }
 
   private static Object normalizedInteger(Object raw, long fallback) {

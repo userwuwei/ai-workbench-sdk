@@ -216,6 +216,68 @@ public class BrowserTestContractValidatorTest {
         .contains("wait_for_without_interaction"));
   }
 
+  @Test
+  public void executionHashUsesNormalizedExecutableSemantics() {
+    Map<String, Object> base = hashPlan("目标", "描述", " value ", null, null);
+    Map<String, Object> explicitDefaults =
+        hashPlan("另一个目标", "另一段描述", " value ", 30000L, 10000L);
+
+    BrowserTestContractValidator.Report first = BrowserTestContractValidator.validate(base);
+    BrowserTestContractValidator.Report second =
+        BrowserTestContractValidator.validate(explicitDefaults);
+
+    assertTrue(first.validationIssues().toString(), first.valid());
+    assertTrue(second.validationIssues().toString(), second.valid());
+    assertEquals(first.executionPlanHash(), second.executionPlanHash());
+    assertEquals(64, first.executionPlanHash().length());
+
+    Map<String, Object> changedInput = hashPlan("目标", "描述", "value", null, null);
+    assertFalse(first.executionPlanHash().equals(
+        BrowserTestContractValidator.validate(changedInput).executionPlanHash()));
+
+    Map<String, Object> changedEntry = hashPlan("目标", "描述", " value ", null, null);
+    changedEntry.put("entry_path", "/tmp/other.html");
+    assertFalse(first.executionPlanHash().equals(
+        BrowserTestContractValidator.validate(changedEntry).executionPlanHash()));
+  }
+
+  @Test
+  public void executionHashCorrectlyEncodesQuotesBackslashesAndUnicode() {
+    Map<String, Object> quoted = hashPlan("验证中文", "描述", "a\\\"b\\c", null, null);
+    Map<String, Object> different = hashPlan("验证中文", "描述", "a\"b\\\\c", null, null);
+    BrowserTestContractValidator.Report first = BrowserTestContractValidator.validate(quoted);
+    BrowserTestContractValidator.Report second = BrowserTestContractValidator.validate(different);
+    assertTrue(first.validationIssues().toString(), first.valid());
+    assertTrue(second.validationIssues().toString(), second.valid());
+    assertFalse(first.executionPlanHash().equals(second.executionPlanHash()));
+  }
+
+  private static Map<String, Object> hashPlan(
+      String goal, String description, String input, Long transactionTimeout, Long waitTimeout) {
+    Map<String, Object> wait = map(
+        "type", "wait_for",
+        "expectation", map(
+            "type", "js_boolean",
+            "expression", "document.body.dataset.ready === 'true'",
+            "transition", "false_to_true"));
+    if (waitTimeout != null) wait.put("timeout_ms", waitTimeout);
+    Map<String, Object> plan = map(
+        "entry_path", "/tmp/\"页面\\index.html",
+        "goal", goal,
+        "scenarios", Collections.singletonList(map(
+            "id", "form",
+            "description", description,
+            "actions", Arrays.asList(
+                map("type", "input", "selector", "#name", "value", input),
+                wait),
+            "expectations", Collections.singletonList(map(
+                "type", "selector_exists",
+                "selector", "#done",
+                "transition", "eventually_true")))));
+    if (transactionTimeout != null) plan.put("timeout_ms", transactionTimeout);
+    return plan;
+  }
+
   private static List<String> codes(List<Map<String, Object>> issues) {
     List<String> values = new ArrayList<>();
     for (Map<String, Object> issue : issues) values.add(String.valueOf(issue.get("code")));

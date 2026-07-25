@@ -157,7 +157,8 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("eventually_true/false_to_true 只能写 transition"));
     assertTrue(prompt.contains("自动变化使用 actions=[]"));
     assertTrue(prompt.contains("禁止添加无因果点击凑交互"));
-    assertTrue(prompt.contains("不要断言动画的精确帧、tick 或坐标"));
+    assertTrue(prompt.contains("recommended_next_action"));
+    assertTrue(prompt.contains("不得提前执行其后的验证或修改阶段"));
   }
 
   @Test
@@ -733,6 +734,66 @@ public final class CodeAgentPresetTest {
     assertFalse(String.valueOf(finalized.data().get("verification")).contains("键盘"));
     assertTrue(String.valueOf(finalized.data().get("verification"))
         .contains("successful postconditions"));
+  }
+
+  @Test
+  public void changedRegressionPlanIsRejectedBeforeBrowserLaunch() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().defaultRequiredEvidence("browser_test").build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(322L, "s", "workspace", "task"));
+    coordinator.acceptPlan(map(
+        "goal", "验证页面",
+        "steps", Collections.singletonList(
+            step("verify", "验证", "verify", "browser_test"))));
+    long generation = coordinator.generation();
+    ToolArguments original = new ToolArguments(map(
+        "goal", "验证页面",
+        "scenarios", Collections.singletonList(staticScenario("smoke"))));
+    String originalHash = BrowserTestContractValidator.validate(original.asMap())
+        .executionPlanHash();
+    coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        original,
+        ToolResult.success(map(
+            "operation", "browser_test",
+            "passed", false,
+            "failure_kind", "product_code_failure",
+            "test_plan_hash", originalHash,
+            "scenario_results", Collections.singletonList(map(
+                "id", "smoke",
+                "passed", false,
+                "failures", Collections.singletonList(map(
+                    "phase", "layout",
+                    "code", "horizontal_overflow",
+                    "failure_kind", "product_code_failure")))))));
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+
+    ToolArguments changed = new ToolArguments(map(
+        "goal", "验证页面",
+        "scenarios", Collections.singletonList(map(
+            "id", "smoke",
+            "actions", Collections.emptyList(),
+            "expectations", Collections.singletonList(map(
+                "type", "selector_exists", "selector", "#changed"))))));
+    ToolResult rejected = coordinator.preflightResult("browser_test", changed);
+
+    assertEquals(false, rejected.data().get("passed"));
+    assertEquals("test_plan_invalid", rejected.data().get("failure_kind"));
+    assertEquals(0, rejected.data().get("webview_launch_count"));
+    assertTrue(String.valueOf(rejected.data().get("validation_issues"))
+        .contains("regression_plan_changed"));
+    assertNull(coordinator.preflightResult("browser_test", original));
   }
 
   @Test
