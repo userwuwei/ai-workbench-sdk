@@ -129,7 +129,7 @@ public class AgentCoreTest {
   }
 
   @Test
-  public void roundToolSelectionGuidesModelWithoutBlockingRegisteredTools() {
+  public void roundToolSelectionRejectsToolsThatWereNotOffered() {
     AtomicInteger rounds = new AtomicInteger();
     AtomicInteger hiddenExecutions = new AtomicInteger();
     ToolPolicy selectionPolicy = new ToolPolicy() {
@@ -195,8 +195,75 @@ public class AgentCoreTest {
     engine.submit("task", observer(finalText));
 
     assertEquals(2, rounds.get());
-    assertEquals(1, hiddenExecutions.get());
+    assertEquals(0, hiddenExecutions.get());
+    assertTrue(engine.messages().stream().anyMatch(message ->
+        message.role() == AgentMessage.Role.TOOL
+            && "read_file".equals(message.name())
+            && message.content().contains("tool_not_selected")));
     assertEquals("done", finalText.get());
+  }
+
+  @Test
+  public void unselectedCallIsPairedAndLaterSelectedCallStillExecutes() {
+    AtomicInteger rounds = new AtomicInteger();
+    AtomicInteger hiddenExecutions = new AtomicInteger();
+    AtomicInteger selectedExecutions = new AtomicInteger();
+    AgentTool hidden = countingTool("read_file", hiddenExecutions);
+    AgentTool selected = countingTool("read_plan", selectedExecutions);
+    ToolPolicy policy = new ToolPolicy() {
+      public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
+        return ToolSelection.onlyNames(tools, Arrays.asList("read_plan", "finalize_task"));
+      }
+      public boolean supports(ToolInvocation invocation) { return false; }
+      public Cancellable evaluate(
+          ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+        throw new AssertionError("selection-only policy must not evaluate invocations");
+      }
+    };
+    ModelGateway gateway = (request, observer) -> {
+      int round = rounds.incrementAndGet();
+      if (round == 1) {
+        observer.onComplete(new ModelResponse(
+            "",
+            "tool_calls",
+            Arrays.asList(
+                new AgentToolCall("hidden", "read_file", ToolArguments.empty()),
+                new AgentToolCall("selected", "read_plan", ToolArguments.empty()))));
+      } else {
+        observer.onComplete(new ModelResponse(
+            "",
+            "tool_calls",
+            Collections.singletonList(new AgentToolCall(
+                "final", "finalize_task",
+                new ToolArguments(map("status", "completed", "summary", "done"))))));
+      }
+      return Cancellable.NONE;
+    };
+    WorkbenchDefinition base = definition(
+        Arrays.asList(hidden, selected, tool("finalize_task", true)),
+        Collections.emptyList());
+    WorkbenchDefinition routed = new WorkbenchDefinition() {
+      public String id() { return base.id(); }
+      public String displayName() { return base.displayName(); }
+      public List<PromptContributor> promptContributors() { return base.promptContributors(); }
+      public List<ContextProvider> contextProviders() { return base.contextProviders(); }
+      public List<AgentTool> tools() { return base.tools(); }
+      public List<ToolPolicy> toolPolicies() { return Collections.singletonList(policy); }
+      public List<TaskValidator> validators() { return base.validators(); }
+      public WorkbenchHost host() { return base.host(); }
+    };
+    AgentEngine engine = new AgentEngine(
+        routed, gateway, new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(), Runnable::run, "s", "w", false, 4);
+
+    engine.submit("task", observer(new AtomicReference<>()));
+
+    assertEquals(0, hiddenExecutions.get());
+    assertEquals(1, selectedExecutions.get());
+    assertEquals(2, engine.messages().stream()
+        .filter(message -> message.role() == AgentMessage.Role.TOOL
+            && ("read_file".equals(message.name()) || "read_plan".equals(message.name())))
+        .count());
   }
 
   @Test
@@ -534,6 +601,20 @@ public class AgentCoreTest {
       }
 
       public Cancellable execute(ToolContext c, ToolArguments a, ToolCallback cb) {
+        cb.onComplete(ToolResult.success());
+        return Cancellable.NONE;
+      }
+    };
+  }
+
+  private static AgentTool countingTool(String name, AtomicInteger executions) {
+    return new AgentTool() {
+      public ToolSpec spec() {
+        return new ToolSpec(name, "", Collections.singletonMap("type", "object"));
+      }
+
+      public Cancellable execute(ToolContext c, ToolArguments a, ToolCallback cb) {
+        executions.incrementAndGet();
         cb.onComplete(ToolResult.success());
         return Cancellable.NONE;
       }

@@ -125,12 +125,15 @@ public final class AgentEngine implements Cancellable {
     }
     o.onState("model_running");
     ModelRequest req;
+    Set<String> selectedToolNames;
     synchronized (this) {
+      List<ToolSpec> selectedTools = selectTools(n, runId);
+      selectedToolNames = toolNames(selectedTools);
       req =
           new ModelRequest(
               endpoint,
               AgentHistory.forModelRequest(messages, 80, 120000),
-              selectTools(n, runId),
+              selectedTools,
               deepThinking);
     }
     active =
@@ -159,7 +162,8 @@ public final class AgentEngine implements Cancellable {
                   messages.add(AgentMessage.assistant(response.content(), response.toolCalls()));
                 }
                 if (!response.toolCalls().isEmpty()) {
-                  executeCalls(demand, o, n, response.toolCalls(), 0, runId);
+                  executeCalls(
+                      demand, o, n, response.toolCalls(), 0, runId, selectedToolNames);
                   return;
                 }
                 LegacyProtocolParser.Parsed p =
@@ -171,7 +175,8 @@ public final class AgentEngine implements Cancellable {
                       n,
                       Collections.singletonList(new AgentToolCall(p.callId, p.name, p.arguments)),
                       0,
-                      runId);
+                      runId,
+                      selectedToolNames);
                   return;
                 }
                 if (endpoint.nativeTools() && registry.hasTerminalTool()) {
@@ -209,13 +214,22 @@ public final class AgentEngine implements Cancellable {
     return Collections.unmodifiableList(retained);
   }
 
+  private static Set<String> toolNames(List<ToolSpec> tools) {
+    LinkedHashSet<String> names = new LinkedHashSet<>();
+    if (tools != null) {
+      for (ToolSpec tool : tools) if (tool != null) names.add(tool.name());
+    }
+    return Collections.unmodifiableSet(names);
+  }
+
   private void executeCalls(
       String demand,
       AgentObserver o,
       int round,
       List<AgentToolCall> calls,
       int index,
-      long runId) {
+      long runId,
+      Set<String> selectedToolNames) {
     if (!isActive(runId)) return;
     if (index >= calls.size()) {
       round(demand, o, round + 1, runId);
@@ -223,6 +237,18 @@ public final class AgentEngine implements Cancellable {
     }
     AgentToolCall call = calls.get(index);
     o.onToolStarted(call.id(), call.name(), call.arguments());
+    if (registry.find(call.name()) != null
+        && (selectedToolNames == null || !selectedToolNames.contains(call.name()))) {
+      ToolResult result = ToolResult.error(
+          "tool_not_selected", "本轮未提供工具: " + call.name(), true);
+      synchronized (this) {
+        evidence.add(result);
+        messages.add(AgentMessage.tool(call.id(), call.name(), ToolResultCodec.toJson(result)));
+      }
+      o.onToolCompleted(call.id(), call.name(), result);
+      executeCalls(demand, o, round, calls, index + 1, runId, selectedToolNames);
+      return;
+    }
     active =
         dispatcher.dispatch(
             activeRunContext != null && activeRunContext.runId() == runId
@@ -261,7 +287,8 @@ public final class AgentEngine implements Cancellable {
                   validateAndFinish(demand, o, round, finalContent(call, result), event, runId);
                   return;
                 }
-                executeCalls(demand, o, round, calls, index + 1, runId);
+                executeCalls(
+                    demand, o, round, calls, index + 1, runId, selectedToolNames);
               }
             });
   }
