@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.9
+
+- `wait_for false_to_true` checkpoint 现在使用与最终断言相同的场景动态覆盖审计，成功 baseline→post 证据不再被误报为产品故障。
+- Browser Test 规范化 Hash 由 SDK 与宿主共享，改变回归语义会在 WebView 启动前零执行失败，并保留结果侧校验兜底。
+- 轮次工具选择重新成为实际执行边界；未提供的已注册工具返回配对的 `tool_not_selected`，源码写入后的 syntax 阶段不再被历史工具调用绕过。
+- 交互审计缺失或自相矛盾统一隔离为不可缓存的环境失败，不生成源码读取或测试修改 Brief。
+
 ## 2.0.8
 
 - 收敛 `browser_test` 合法形状与稳定状态断言，`wait_for false_to_true` 可作为交互动态证据。
