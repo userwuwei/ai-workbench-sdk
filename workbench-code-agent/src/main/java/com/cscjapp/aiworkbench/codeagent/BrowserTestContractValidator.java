@@ -225,9 +225,9 @@ public final class BrowserTestContractValidator {
             totalActions, MAX_ACTIONS_PER_TRANSACTION);
       }
       validatePlanIds();
-      if (interactionRequired && !hasDynamicScenario) {
+      if (interactionRequired && !hasDynamicScenario && issues.isEmpty()) {
         issue("scenarios", "missing_dynamic_scenario",
-            "交互页面至少需要一个包含 actions 和 false_to_true 断言的场景。",
+            "交互页面至少需要一个包含 click/input 和 false_to_true 断言或 checkpoint 的场景。",
             false, true);
       }
     }
@@ -239,6 +239,7 @@ public final class BrowserTestContractValidator {
         return;
       }
       Map<?, ?> scenario = (Map<?, ?>) raw;
+      int baseIssueCount = issues.size();
       onlyKeys(scenario, path, set("id", "description", "actions", "expectations"));
       String id = requiredString(scenario.get("id"), path + ".id", 64);
       if (!id.isEmpty()) {
@@ -250,7 +251,7 @@ public final class BrowserTestContractValidator {
         }
         if (!uniqueIds.add(id)) duplicateIds.add(id);
       }
-      requiredString(scenario.get("description"), path + ".description", 300);
+      optionalString(scenario.get("description"), path + ".description", 300);
 
       Object rawActions = scenario.get("actions");
       List<?> actions = rawActions instanceof List ? (List<?>) rawActions : Collections.emptyList();
@@ -263,8 +264,10 @@ public final class BrowserTestContractValidator {
       }
       totalActions += actions.size();
       boolean hasUserAction = false;
+      boolean dynamicCheckpoint = false;
       for (int index = 0; index < actions.size(); index++) {
         hasUserAction |= validateAction(actions.get(index), path + ".actions[" + index + "]");
+        dynamicCheckpoint |= hasFalseToTrueCheckpoint(actions.get(index));
       }
 
       Object rawExpectations = scenario.get("expectations");
@@ -283,19 +286,23 @@ public final class BrowserTestContractValidator {
         dynamic |= validateExpectation(
             expectations.get(index), path + ".expectations[" + index + "]", !hasUserAction);
       }
-      if (!actions.isEmpty() && !hasUserAction) {
+      boolean hasDynamicEvidence = dynamic || dynamicCheckpoint;
+      boolean baseValid = issues.size() == baseIssueCount;
+      if (baseValid && !actions.isEmpty() && !hasUserAction) {
         issue(path + ".actions", "wait_for_without_interaction",
             path + " 仅包含 wait_for；无用户操作时请改用 eventually_true expectations",
             false, "click/input");
       }
-      if (hasUserAction && !dynamic) {
+      if (baseValid && hasUserAction && !hasDynamicEvidence) {
         issue(path + ".expectations", "missing_false_to_true",
-            path + " 包含 click/input 时至少需要一个 false_to_true expectation", false, true);
+            path + " 包含 click/input 时至少需要一个 false_to_true expectation 或 wait_for checkpoint",
+            false, true);
       }
-      if (hasUserAction && dynamic) {
+      if (baseValid && hasUserAction && hasDynamicEvidence) {
         hasDynamicScenario = true;
       }
-      if (!id.isEmpty() && rawActions instanceof List && rawExpectations instanceof List) {
+      if (baseValid && !id.isEmpty()
+          && rawActions instanceof List && rawExpectations instanceof List) {
         String fingerprint = canonicalValue(normalizedActions(actions)) + "|"
             + canonicalValue(normalizedExpectations(expectations));
         String owner = behaviorOwners.get(fingerprint);
@@ -308,6 +315,16 @@ public final class BrowserTestContractValidator {
               Arrays.asList(owner, id), "distinct behavior");
         }
       }
+    }
+
+    private static boolean hasFalseToTrueCheckpoint(Object raw) {
+      if (!(raw instanceof Map)) return false;
+      Map<?, ?> action = (Map<?, ?>) raw;
+      if (!"wait_for".equals(String.valueOf(action.get("type")))) return false;
+      Object rawExpectation = action.get("expectation");
+      if (!(rawExpectation instanceof Map)) return false;
+      return "false_to_true".equals(
+          String.valueOf(((Map<?, ?>) rawExpectation).get("transition")));
     }
 
     private boolean validateAction(Object raw, String path) {

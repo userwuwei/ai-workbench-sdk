@@ -43,10 +43,10 @@ public class BrowserTestContractValidatorTest {
     assertTrue(codes.contains("too_many_actions"));
     assertTrue(codes.contains("invalid_readonly_expression"));
     assertTrue(codes.contains("unsupported_expectation"));
-    assertTrue(codes.contains("missing_false_to_true"));
     assertTrue(codes.contains("missing_scenario_id"));
     assertTrue(codes.contains("unexpected_scenario_id"));
-    assertTrue(codes.contains("missing_dynamic_scenario"));
+    assertFalse(codes.contains("missing_false_to_true"));
+    assertFalse(codes.contains("missing_dynamic_scenario"));
     assertEquals(20, issue(report.validationIssues(), "too_many_actions").get("maximum"));
   }
 
@@ -162,14 +162,13 @@ public class BrowserTestContractValidatorTest {
         "timeout_ms", 10000);
     Map<String, Object> scenario = map(
         "id", "restart",
-        "description", "重开",
         "actions", Arrays.asList(
             map("type", "click", "selector", "#start"),
             wait,
             map("type", "click", "selector", "#restart")),
         "expectations", Collections.singletonList(
             map("type", "js_boolean", "expression",
-                "document.body.dataset.running === 'true'", "transition", "false_to_true")));
+                "document.body.dataset.running === 'true'", "transition", "eventually_true")));
     BrowserTestContractValidator.Report valid = BrowserTestContractValidator.validate(
         map("goal", "验证重开", "scenarios", Collections.singletonList(scenario)),
         Collections.singletonList("restart"), true);
@@ -200,7 +199,21 @@ public class BrowserTestContractValidatorTest {
 
     assertFalse(report.valid());
     assertTrue(codes(report.validationIssues()).contains("out_of_range"));
-    assertTrue(codes(report.validationIssues()).contains("wait_for_without_interaction"));
+    assertFalse(codes(report.validationIssues()).contains("wait_for_without_interaction"));
+
+    BrowserTestContractValidator.Report structurallyValid =
+        BrowserTestContractValidator.validate(map(
+            "goal", "验证",
+            "scenarios", Collections.singletonList(map(
+                "id", "wait-only",
+                "actions", Collections.singletonList(map(
+                    "type", "wait_for",
+                    "expectation", map("type", "selector_exists", "selector", "#ready"),
+                    "timeout_ms", 1000)),
+                "expectations", Collections.singletonList(
+                    map("type", "selector_exists", "selector", "#ready"))))));
+    assertTrue(codes(structurallyValid.validationIssues())
+        .contains("wait_for_without_interaction"));
   }
 
   private static List<String> codes(List<Map<String, Object>> issues) {

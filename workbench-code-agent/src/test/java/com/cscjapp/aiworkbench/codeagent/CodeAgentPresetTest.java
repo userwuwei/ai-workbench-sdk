@@ -143,6 +143,24 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void browserPromptUsesCanonicalShapesAndStableStateGuidance() {
+    CodeAgentPreset preset =
+        CodeAgentPreset.builder(profile(""))
+            .workspace(workspace)
+            .languageTools(Collections.singletonList(tool("browser_test")))
+            .build();
+    String prompt = preset.promptContributors().get(0)
+        .contribute(new PromptContext("workspace", "task", Collections.emptyMap()))
+        .get(0).content();
+
+    assertTrue(prompt.contains("wait_for 只能位于 actions[]"));
+    assertTrue(prompt.contains("eventually_true/false_to_true 只能写 transition"));
+    assertTrue(prompt.contains("自动变化使用 actions=[]"));
+    assertTrue(prompt.contains("禁止添加无因果点击凑交互"));
+    assertTrue(prompt.contains("不要断言动画的精确帧、tick 或坐标"));
+  }
+
+  @Test
   public void malformedNativePlanArgumentsFailBeforeNormalization() {
     CodeAgentPreset preset =
         CodeAgentPreset.builder(profile(""))
@@ -480,6 +498,8 @@ public final class CodeAgentPresetTest {
     assertTrue(String.valueOf(mismatch.data().get("validation_issues"))
         .contains("duplicate_scenario_id"));
     assertTrue(mismatch.data().containsKey("test_retry_brief"));
+    assertFalse(((Map<?, ?>) mismatch.data().get("test_retry_brief"))
+        .containsKey("validation_issues"));
     assertEquals(0, mismatch.data().get("webview_launch_count"));
 
     ToolArguments browserArguments = new ToolArguments(
@@ -502,6 +522,13 @@ public final class CodeAgentPresetTest {
     assertEquals(false, staticOnly.data().get("passed"));
     assertEquals(0, staticOnly.data().get("webview_launch_count"));
     assertTrue(String.valueOf(staticOnly.data().get("failure_reason")).contains("actions"));
+    assertNull(coordinator.preflightResult(
+        "browser_test",
+        new ToolArguments(map(
+            "goal", "验证多阶段交互",
+            "scenarios", Arrays.asList(
+                checkpointScenario("start-game"),
+                checkpointScenario("restart-game"))))));
     assertNull(coordinator.preflightResult("browser_test", browserArguments));
 
     ToolResult verified = coordinator.recordAndDecorate(
@@ -552,6 +579,12 @@ public final class CodeAgentPresetTest {
         "search_replace",
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true)));
+    ToolResult browserBeforeSyntax = coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        browserArguments,
+        passingBrowser("start-game", "restart-game"));
+    assertEquals("syntax_check", browserBeforeSyntax.data().get("recommended_next_action"));
     ToolPolicyDecision stale = decision(
         coordinator, new ToolInvocation("finalize-stale", finalize, completed));
     assertEquals("syntax_check", stale.result().data().get("missing_stage"));
@@ -562,6 +595,7 @@ public final class CodeAgentPresetTest {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("browser_test", CodeToolRole.VERIFY);
     roles.put("quality_review", CodeToolRole.QUALITY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
     roles.put("finalize_task", CodeToolRole.FINALIZE);
     ManagedCodePlanCoordinator coordinator =
         new ManagedCodePlanCoordinator(
@@ -637,7 +671,20 @@ public final class CodeAgentPresetTest {
             "passed", false,
             "failure_kind", "product_code_failure",
             "source_revision", "source-1",
-            "test_plan_hash", "plan-original")));
+            "test_plan_hash", "plan-original",
+            "test_retry_brief", map("issue", "派生阻断不应解锁测试语义"),
+            "scenario_results", Collections.singletonList(map(
+                "id", "smoke",
+                "passed", false,
+                "failures", Arrays.asList(
+                    map(
+                        "phase", "checkpoint",
+                        "code", "checkpoint_timeout",
+                        "failure_kind", "product_code_failure"),
+                    map(
+                        "phase", "expectation",
+                        "code", "blocked_by_action",
+                        "failure_kind", "test_expectation_mismatch")))))));
     coordinator.recordAndDecorate(
         generation,
         "search_replace",
@@ -671,8 +718,21 @@ public final class CodeAgentPresetTest {
     assertTrue(reviewed.data().containsKey("verified_behavior_evidence"));
     assertFalse(String.valueOf(reviewed.data().get("web_evidence"))
         .contains("unsupported free text"));
+    assertTrue(String.valueOf(reviewed.data().get("web_evidence"))
+        .contains("successful postconditions"));
     assertTrue(String.valueOf(reviewed.data().get("verified_behavior_evidence"))
         .contains("action_trace"));
+
+    ToolResult finalized = coordinator.recordAndDecorate(
+        generation,
+        "finalize_task",
+        new ToolArguments(map("status", "completed")),
+        ToolResult.success(map(
+            "status", "completed",
+            "verification", Collections.singletonList("键盘和触摸已验证"))));
+    assertFalse(String.valueOf(finalized.data().get("verification")).contains("键盘"));
+    assertTrue(String.valueOf(finalized.data().get("verification"))
+        .contains("successful postconditions"));
   }
 
   @Test
@@ -3055,6 +3115,25 @@ public final class CodeAgentPresetTest {
             map(
                 "type", "selector_exists",
                 "selector", "body",
+                "transition", "eventually_true")));
+  }
+
+  private static Map<String, Object> checkpointScenario(String id) {
+    return map(
+        "id", id,
+        "actions", Arrays.asList(
+            map("type", "click", "selector", "#start-" + id),
+            map(
+                "type", "wait_for",
+                "expectation", map(
+                    "type", "js_boolean",
+                    "expression", "document.body.dataset.ready === 'true'",
+                    "transition", "false_to_true")),
+            map("type", "click", "selector", "#finish-" + id)),
+        "expectations", Collections.singletonList(
+            map(
+                "type", "selector_exists",
+                "selector", "#done-" + id,
                 "transition", "eventually_true")));
   }
 

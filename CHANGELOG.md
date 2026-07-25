@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.8
+
+- 收敛 `browser_test` 合法形状与稳定状态断言，`wait_for false_to_true` 可作为交互动态证据。
+- 派生阻断不再干扰产品回归 Hash，浏览器通过后的推荐动作服从当前 revision 的真实缺失证据。
+- 测试纠错结果不再重复投影 validation issues，质量与完成验证只使用 SDK 派生行为证据。
+
 ## 2.0.7
 
 - `browser_test` 允许 required ID 混合静态与动态场景，并新增可选 `wait_for` checkpoint；共享预检对行为重复、动作预算、只读表达式和 checkpoint 超时一次聚合校验。

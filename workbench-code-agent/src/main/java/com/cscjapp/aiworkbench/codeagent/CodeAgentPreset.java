@@ -150,9 +150,10 @@ public final class CodeAgentPreset {
 
   private static String browserVerificationInstruction(boolean available) {
     if (!available) return "";
-    return "\nbrowser_test 使用一次完整事务：静态场景使用 actions=[] + eventually_true；普通交互使用 click/input + false_to_true；需要在两个操作之间等待异步状态时，在同一 actions 中使用 wait_for checkpoint。"
-        + "\ntest_plan_invalid/test_expectation_mismatch 只修正并重提测试计划，不读取、重规划或修改产品代码；product_code_failure 只修复 reading_brief 中未被阻断的产品问题，随后保持 actions、wait_for 和 expectations 语义不变回归。"
-        + "\nquality_review/finalize 只能声明 verified_behavior_evidence 和 action/checkpoint trace 已实际覆盖的行为。";
+    return "\nbrowser_test 只使用以下合法形状：静态 actions=[] + expectations[{type:selector_exists,selector,transition:eventually_true}]；普通交互 actions[{type:click,selector}] + expectations[{type:js_boolean,expression,transition:false_to_true}]；多阶段在同一 actions 中使用 click → {type:wait_for,expectation:{type:js_boolean,expression,transition:false_to_true}} → click → {type:wait_for,expectation:{type:js_boolean,expression,transition:eventually_true}}。"
+        + "\n断言 type 只能是 text_visible/selector_exists/url_contains/title_contains/js_boolean；eventually_true/false_to_true 只能写 transition。wait_for 只能位于 actions[] 且必须携带 expectation，不能当作 sleep；自动变化使用 actions=[]，禁止添加无因果点击凑交互。"
+        + "\n测试使用稳定可见、ARIA 或 data-* 状态；不要断言动画的精确帧、tick 或坐标。test_plan_invalid/test_expectation_mismatch 后下一工具只重提 browser_test，不读取、replan 或修改产品代码。"
+        + "\nproduct_code_failure 只修复 reading_brief 中未被阻断的产品问题，随后保持 actions、wait_for 和 expectations 语义不变回归。quality_review/finalize 的已验证行为只能来自 verified_behavior_evidence 和 action/checkpoint trace。";
   }
 
   private static String editEvidenceInstruction(boolean convergent) {
