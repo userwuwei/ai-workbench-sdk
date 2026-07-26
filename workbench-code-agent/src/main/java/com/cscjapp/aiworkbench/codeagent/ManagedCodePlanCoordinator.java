@@ -138,7 +138,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         return ToolSelection.onlyNames(registeredTools, allowed);
       }
       if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
-        keepSearchReplaceReachable(allowed);
         String missingVerification = nextMissingContractVerification("code_generation");
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
         else if (qualityEvidenceRequired("code_generation")
@@ -161,7 +160,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
 
     if (syntaxPendingBeforeBrowser()) {
-      keepSearchReplaceReachable(allowed);
       allowed.add("syntax_check");
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
@@ -184,12 +182,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         && qualityEvidenceRequired("code_generation")
         && !hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)) {
       allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
-      keepSearchReplaceReachable(allowed);
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
     if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
-      keepSearchReplaceReachable(allowed);
       String missingVerification = nextMissingVerificationTool();
       if (!missingVerification.isEmpty()) allowed.add(missingVerification);
       else if (qualityRequired()) allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
@@ -202,7 +198,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if (!declaredVerification.isEmpty()) {
         String missingVerification = nextMissingVerificationTool();
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
-        keepSearchReplaceReachable(allowed);
       } else if ("discover".equals(current.phase)) {
         allowed.add("list_dir");
       } else if ("implement".equals(current.phase)) {
@@ -212,13 +207,11 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       } else if ("verify".equals(current.phase)) {
         String missingVerification = nextMissingVerificationTool();
         if (!missingVerification.isEmpty()) allowed.add(missingVerification);
-        keepSearchReplaceReachable(allowed);
       } else if ("quality".equals(current.phase)) {
-        allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
-        if (editVisibleDuringVerify) {
+        if (CodeAgentToolNames.QUALITY_REVIEW.equals(verificationFailureTool)) {
           keepSearchReplaceReachable(allowed);
-        } else if (hasReadyReadCoverage()) {
-          addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        } else {
+          allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
         }
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
@@ -588,6 +581,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       boolean valid = validEvidence(toolName, role, arguments, result);
       if (role == CodeToolRole.VERIFY) {
         recordVerificationRouting(toolName, arguments, result, valid);
+      } else if (valid) {
+        if (toolName.equals(verificationFailureTool)) {
+          verificationFailureTool = "";
+          verificationFailureKind = "";
+        }
+      } else {
+        verificationFailureTool = toolName;
+        verificationFailureKind = "quality_failure";
       }
       if (!valid) {
         if (role == CodeToolRole.QUALITY || !"browser_test".equals(toolName)) {
@@ -1610,23 +1611,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     browserRevision = revision;
     browserSourceRevision = sourceRevision;
     browserTestPlanHash = testPlanHash;
-    browserVerifiedBehaviorEvidence = behaviorEvidence(arguments, data);
+    browserVerifiedBehaviorEvidence = behaviorEvidence(data);
     return true;
   }
 
   @SuppressWarnings("unchecked")
-  private static List<Map<String, Object>> behaviorEvidence(
-      ToolArguments arguments, Map<String, Object> data) {
-    Map<String, Map<?, ?>> scenariosById = new LinkedHashMap<>();
-    Object rawScenarios = arguments == null ? null : arguments.get("scenarios");
-    if (rawScenarios instanceof List) {
-      for (Object raw : (List<?>) rawScenarios) {
-        if (!(raw instanceof Map)) continue;
-        Map<?, ?> scenario = (Map<?, ?>) raw;
-        String id = text(scenario.get("id"));
-        if (!id.isEmpty()) scenariosById.put(id, scenario);
-      }
-    }
+  private static List<Map<String, Object>> behaviorEvidence(Map<String, Object> data) {
     List<Map<String, Object>> values = new ArrayList<>();
     Object rawResults = data.get("scenario_results");
     if (!(rawResults instanceof List)) return values;
@@ -1637,8 +1627,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if (id.isEmpty() || !Boolean.TRUE.equals(result.get("passed"))) continue;
       Map<String, Object> proof = new LinkedHashMap<>();
       proof.put("id", id);
-      Map<?, ?> scenario = scenariosById.get(id);
-      if (scenario != null) proof.put("description", text(scenario.get("description")));
       if (result.get("action_trace") instanceof List) {
         proof.put("action_trace", result.get("action_trace"));
       }

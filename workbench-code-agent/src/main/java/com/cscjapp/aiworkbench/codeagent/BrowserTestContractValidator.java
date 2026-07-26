@@ -299,6 +299,7 @@ public final class BrowserTestContractValidator {
         dynamic |= validateExpectation(
             expectations.get(index), path + ".expectations[" + index + "]", !hasUserAction);
       }
+      validateContradictoryFalseToTrueBaselines(path, actions, expectations);
       boolean hasDynamicEvidence = dynamic || dynamicCheckpoint;
       boolean baseValid = issues.size() == baseIssueCount;
       if (baseValid && !actions.isEmpty() && !hasUserAction) {
@@ -327,6 +328,58 @@ public final class BrowserTestContractValidator {
                   + owner + " / " + id,
               Arrays.asList(owner, id), "distinct behavior");
         }
+      }
+    }
+
+    private void validateContradictoryFalseToTrueBaselines(
+        String scenarioPath, List<?> actions, List<?> expectations) {
+      List<DynamicExpression> values = new ArrayList<>();
+      for (int index = 0; index < actions.size(); index++) {
+        Object raw = actions.get(index);
+        if (!(raw instanceof Map)) continue;
+        Map<?, ?> action = (Map<?, ?>) raw;
+        if (!"wait_for".equals(trimText(action.get("type")))) continue;
+        addFalseToTrueExpression(
+            values,
+            action.get("expectation"),
+            scenarioPath + ".actions[" + index + "].expectation");
+      }
+      for (int index = 0; index < expectations.size(); index++) {
+        addFalseToTrueExpression(
+            values,
+            expectations.get(index),
+            scenarioPath + ".expectations[" + index + "]");
+      }
+
+      Map<String, DynamicExpression> positive = new LinkedHashMap<>();
+      Map<String, DynamicExpression> negative = new LinkedHashMap<>();
+      Set<String> emitted = new LinkedHashSet<>();
+      for (DynamicExpression value : values) {
+        Map<String, DynamicExpression> same = value.negated ? negative : positive;
+        Map<String, DynamicExpression> opposite = value.negated ? positive : negative;
+        if (!same.containsKey(value.base)) same.put(value.base, value);
+        DynamicExpression conflict = opposite.get(value.base);
+        if (conflict == null || !emitted.add(value.base)) continue;
+        issue(
+            value.path + ".transition",
+            "contradictory_false_to_true_baseline",
+            "同一场景在 actions 前共享 clean baseline；互为正反的条件不能同时使用 false_to_true",
+            Arrays.asList(conflict.path, value.path),
+            "将动作后的稳定复位条件改为 eventually_true");
+      }
+    }
+
+    private static void addFalseToTrueExpression(
+        List<DynamicExpression> values, Object raw, String path) {
+      if (!(raw instanceof Map)) return;
+      Map<?, ?> expectation = (Map<?, ?>) raw;
+      if (!"js_boolean".equals(trimText(expectation.get("type")))
+          || !"false_to_true".equals(trimText(expectation.get("transition")))) return;
+      String expression = trimText(expectation.get("expression"));
+      if (expression.isEmpty() || !readOnlyExpressionError(expression).isEmpty()) return;
+      NormalizedBoolean normalized = normalizeBooleanExpression(expression);
+      if (!normalized.base.isEmpty()) {
+        values.add(new DynamicExpression(path, normalized.base, normalized.negated));
       }
     }
 
@@ -506,6 +559,97 @@ public final class BrowserTestContractValidator {
           providedIds,
           hasDynamicScenario,
           issues.isEmpty() ? executionPlanHash(arguments) : "");
+    }
+  }
+
+  private static NormalizedBoolean normalizeBooleanExpression(String expression) {
+    String value = stripOuterParentheses(compactExpression(expression));
+    boolean negated = false;
+    while (value.startsWith("!") && !value.startsWith("!=")) {
+      negated = !negated;
+      value = stripOuterParentheses(value.substring(1));
+    }
+    return new NormalizedBoolean(value, negated);
+  }
+
+  private static String compactExpression(String expression) {
+    StringBuilder out = new StringBuilder(expression == null ? 0 : expression.length());
+    char quote = 0;
+    boolean escaped = false;
+    String source = expression == null ? "" : expression.trim();
+    for (int index = 0; index < source.length(); index++) {
+      char value = source.charAt(index);
+      if (quote == 0) {
+        if (value == '\'' || value == '"') {
+          quote = value;
+          out.append(value);
+        } else if (!Character.isWhitespace(value)) {
+          out.append(value);
+        }
+      } else {
+        out.append(value);
+        if (escaped) escaped = false;
+        else if (value == '\\') escaped = true;
+        else if (value == quote) quote = 0;
+      }
+    }
+    return out.toString();
+  }
+
+  private static String stripOuterParentheses(String source) {
+    String value = source == null ? "" : source;
+    while (value.length() >= 2 && value.charAt(0) == '('
+        && value.charAt(value.length() - 1) == ')'
+        && enclosesWholeExpression(value)) {
+      value = value.substring(1, value.length() - 1);
+    }
+    return value;
+  }
+
+  private static boolean enclosesWholeExpression(String value) {
+    int depth = 0;
+    char quote = 0;
+    boolean escaped = false;
+    for (int index = 0; index < value.length(); index++) {
+      char current = value.charAt(index);
+      if (quote != 0) {
+        if (escaped) escaped = false;
+        else if (current == '\\') escaped = true;
+        else if (current == quote) quote = 0;
+        continue;
+      }
+      if (current == '\'' || current == '"') {
+        quote = current;
+      } else if (current == '(') {
+        depth++;
+      } else if (current == ')') {
+        depth--;
+        if (depth == 0 && index != value.length() - 1) return false;
+        if (depth < 0) return false;
+      }
+    }
+    return depth == 0 && quote == 0;
+  }
+
+  private static final class DynamicExpression {
+    final String path;
+    final String base;
+    final boolean negated;
+
+    DynamicExpression(String path, String base, boolean negated) {
+      this.path = path;
+      this.base = base;
+      this.negated = negated;
+    }
+  }
+
+  private static final class NormalizedBoolean {
+    final String base;
+    final boolean negated;
+
+    NormalizedBoolean(String base, boolean negated) {
+      this.base = base;
+      this.negated = negated;
     }
   }
 

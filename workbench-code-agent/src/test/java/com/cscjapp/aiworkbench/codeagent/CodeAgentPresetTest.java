@@ -159,6 +159,9 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("禁止添加无因果点击凑交互"));
     assertTrue(prompt.contains("recommended_next_action"));
     assertTrue(prompt.contains("不得提前执行其后的验证或修改阶段"));
+    assertTrue(prompt.contains("逐字来自当前 revision"));
+    assertTrue(prompt.contains("动作后的关闭、消失或复位使用 eventually_true"));
+    assertTrue(prompt.contains("禁止修改产品迎合测试"));
   }
 
   @Test
@@ -723,6 +726,8 @@ public final class CodeAgentPresetTest {
         .contains("successful postconditions"));
     assertTrue(String.valueOf(reviewed.data().get("verified_behavior_evidence"))
         .contains("action_trace"));
+    List<?> verifiedEvidence = (List<?>) reviewed.data().get("verified_behavior_evidence");
+    assertFalse(((Map<?, ?>) verifiedEvidence.get(0)).containsKey("description"));
 
     ToolResult finalized = coordinator.recordAndDecorate(
         generation,
@@ -1865,13 +1870,13 @@ public final class CodeAgentPresetTest {
         ToolResult.success(map("path", "main.txt", "changed", true)));
     assertEquals(
         new LinkedHashSet<>(Arrays.asList(
-            "read_file", "read_plan", "search_replace", "syntax_check", "plan_task", "finalize_task")),
+            "read_file", "read_plan", "syntax_check", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     coordinator.recordAndDecorate(
         generation, "syntax_check", ToolResult.success(map("passed", true)));
     assertEquals(
         new LinkedHashSet<>(Arrays.asList(
-            "read_file", "read_plan", "search_replace", "browser_test", "plan_task", "finalize_task")),
+            "read_file", "read_plan", "browser_test", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
 
     ToolResult invalidBrowser = coordinator.recordAndDecorate(
@@ -1934,7 +1939,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void editVisibilityDuringVerifyAndQualityIsAtomicAndRunFixed() throws Exception {
+  public void verificationStagesOverrideEditVisibilityUntilARealFailure() throws Exception {
     CodeValidationContract contract =
         CodeValidationContract.builder()
             .defaultRequiredEvidence("syntax_check")
@@ -1985,7 +1990,7 @@ public final class CodeAgentPresetTest {
         ToolResult.success(map("path", "main.txt", "changed", true)));
 
     Set<String> duringVerify = selectedNames(coordinator.selectTools(round, registered));
-    assertTrue(duringVerify.contains("search_replace"));
+    assertFalse(duringVerify.contains("search_replace"));
     assertTrue(duringVerify.contains("syntax_check"));
     assertFalse(duringVerify.contains("create_file"));
     assertFalse(duringVerify.contains("rewrite"));
@@ -1993,10 +1998,21 @@ public final class CodeAgentPresetTest {
     coordinator.recordAndDecorate(
         generation, "syntax_check", ToolResult.success(map("passed", true)));
     Set<String> duringQuality = selectedNames(coordinator.selectTools(round, registered));
-    assertTrue(duringQuality.contains("search_replace"));
+    assertFalse(duringQuality.contains("search_replace"));
     assertTrue(duringQuality.contains(CodeAgentToolNames.QUALITY_REVIEW));
     assertFalse(duringQuality.contains("create_file"));
     assertFalse(duringQuality.contains("rewrite"));
+
+    coordinator.recordAndDecorate(
+        generation,
+        CodeAgentToolNames.QUALITY_REVIEW,
+        ToolResult.success(map(
+            "passed", false,
+            "blocking_gaps", Collections.singletonList("需要修复视觉问题"),
+            "minimal_version_risk", false)));
+    Set<String> afterQualityFailure = selectedNames(coordinator.selectTools(round, registered));
+    assertTrue(afterQualityFailure.contains("search_replace"));
+    assertFalse(afterQualityFailure.contains(CodeAgentToolNames.QUALITY_REVIEW));
 
     ManagedCodePlanCoordinator legacy =
         new ManagedCodePlanCoordinator(
@@ -2042,7 +2058,7 @@ public final class CodeAgentPresetTest {
                 "content", "before")));
     Set<String> readOnlyVerifyTools =
         selectedNames(readOnlyVerify.selectTools(round, registered));
-    assertTrue(readOnlyVerifyTools.contains("search_replace"));
+    assertFalse(readOnlyVerifyTools.contains("search_replace"));
     assertTrue(readOnlyVerifyTools.contains("syntax_check"));
     assertFalse(readOnlyVerifyTools.contains("create_file"));
     assertFalse(readOnlyVerifyTools.contains("rewrite"));
@@ -2050,7 +2066,7 @@ public final class CodeAgentPresetTest {
         readOnlyGeneration, "syntax_check", ToolResult.success(map("passed", true)));
     Set<String> readOnlyQualityTools =
         selectedNames(readOnlyVerify.selectTools(round, registered));
-    assertTrue(readOnlyQualityTools.contains("search_replace"));
+    assertFalse(readOnlyQualityTools.contains("search_replace"));
     assertTrue(readOnlyQualityTools.contains(CodeAgentToolNames.QUALITY_REVIEW));
   }
 
@@ -2098,7 +2114,7 @@ public final class CodeAgentPresetTest {
         ToolResult.success(map("path", "main.txt", "changed", true)));
     Set<String> afterWrite = selectedNames(adaptive.selectTools(round, registered));
     assertTrue(afterWrite.contains(CodeAgentToolNames.PLAN_TASK));
-    assertTrue(afterWrite.contains("search_replace"));
+    assertFalse(afterWrite.contains("search_replace"));
     assertTrue(afterWrite.contains("syntax_check"));
 
     adaptive.acceptPlan(

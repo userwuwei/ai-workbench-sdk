@@ -184,6 +184,62 @@ public class BrowserTestContractValidatorTest {
   }
 
   @Test
+  public void rejectsComplementaryFalseToTrueConditionsSharingCleanBaseline() {
+    BrowserTestContractValidator.Report invalid = BrowserTestContractValidator.validate(map(
+        "goal", "验证重开",
+        "scenarios", Collections.singletonList(map(
+            "id", "restart",
+            "actions", Arrays.asList(
+                map("type", "click", "selector", "#start"),
+                map(
+                    "type", "wait_for",
+                    "expectation", map(
+                        "type", "js_boolean",
+                        "expression", " ( document.body.dataset.over === 'true' ) ",
+                        "transition", "false_to_true")),
+                map("type", "click", "selector", "#restart"),
+                map(
+                    "type", "wait_for",
+                    "expectation", map(
+                        "type", "js_boolean",
+                        "expression", "!(document.body.dataset.over === 'true')",
+                        "transition", "false_to_true"))),
+            "expectations", Collections.singletonList(map(
+                "type", "selector_exists", "selector", "#game"))))));
+
+    assertFalse(invalid.valid());
+    assertEquals(1, countCode(
+        invalid.validationIssues(), "contradictory_false_to_true_baseline"));
+  }
+
+  @Test
+  public void acceptsComplementaryResetAsEventuallyTrueAndIndependentDynamicConditions() {
+    BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(map(
+        "goal", "验证多阶段流程",
+        "scenarios", Collections.singletonList(map(
+            "id", "restart",
+            "actions", Arrays.asList(
+                map("type", "click", "selector", "#start"),
+                map("type", "wait_for", "expectation", map(
+                    "type", "js_boolean",
+                    "expression", "document.body.dataset.over === 'true'",
+                    "transition", "false_to_true")),
+                map("type", "wait_for", "expectation", map(
+                    "type", "js_boolean",
+                    "expression", "document.body.dataset.ready === 'true'",
+                    "transition", "false_to_true")),
+                map("type", "click", "selector", "#restart"),
+                map("type", "wait_for", "expectation", map(
+                    "type", "js_boolean",
+                    "expression", "!(document.body.dataset.over === 'true')",
+                    "transition", "eventually_true"))),
+            "expectations", Collections.singletonList(map(
+                "type", "selector_exists", "selector", "#game"))))));
+
+    assertTrue(report.validationIssues().toString(), report.valid());
+  }
+
+  @Test
   public void waitForOnlyScenarioAndOutOfRangeTimeoutAreReported() {
     BrowserTestContractValidator.Report report = BrowserTestContractValidator.validate(map(
         "goal", "验证",

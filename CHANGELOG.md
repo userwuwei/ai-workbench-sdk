@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.10
+
+- `browser_test` 共享预检拒绝同一 clean baseline 下互为正反的 `false_to_true` 条件，动作后的关闭、消失和复位统一使用 `eventually_true`。
+- syntax、browser 与 quality 阶段不再同时开放编辑；只有真实 syntax、产品或 quality 失败才恢复 `search_replace`，未选择工具继续零执行返回 `tool_not_selected`。
+- 测试根因优先留在 browser 重试路径，纯产品失败才锁定回归 Hash；质量与完成证据移除场景自由描述，只保留真实 action/checkpoint/postcondition。
+
 ## 2.0.9
 
 - `wait_for false_to_true` checkpoint 现在使用与最终断言相同的场景动态覆盖审计，成功 baseline→post 证据不再被误报为产品故障。

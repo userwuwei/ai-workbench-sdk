@@ -152,7 +152,8 @@ public final class CodeAgentPreset {
     if (!available) return "";
     return "\nbrowser_test 只使用以下合法形状：静态 actions=[] + expectations[{type:selector_exists,selector,transition:eventually_true}]；普通交互 actions[{type:click,selector}] + expectations[{type:js_boolean,expression,transition:false_to_true}]；多阶段在同一 actions 中使用 click → {type:wait_for,expectation:{type:js_boolean,expression,transition:false_to_true}} → click → {type:wait_for,expectation:{type:js_boolean,expression,transition:eventually_true}}。"
         + "\n断言 type 只能是 text_visible/selector_exists/url_contains/title_contains/js_boolean；eventually_true/false_to_true 只能写 transition。wait_for 只能位于 actions[] 且必须携带 expectation，不能当作 sleep；自动变化使用 actions=[]，禁止添加无因果点击凑交互。"
-        + "\n工具结果包含 recommended_next_action 时，不得提前执行其后的验证或修改阶段。test_plan_invalid/test_expectation_mismatch 后下一工具只重提 browser_test，不读取、replan 或修改产品代码。"
+        + "\nselector、状态 token 和表达式必须逐字来自当前 revision，禁止凭记忆猜测。false_to_true 的条件必须在干净页面 baseline 为 false；动作后的关闭、消失或复位使用 eventually_true。精确文本仅用于用户明确要求的文案；数值状态优先使用独立数字节点、ARIA 或 data-*。"
+        + "\n工具结果包含 recommended_next_action 时，不得提前执行其后的验证或修改阶段。syntax 推荐 browser_test 时不得为方便测试提前改变产品行为；test_plan_invalid/test_expectation_mismatch 后只修正测试并重提 browser_test，禁止修改产品迎合测试。"
         + "\nproduct_code_failure 只修复 reading_brief 中未被阻断的产品问题，随后保持 actions、wait_for 和 expectations 语义不变回归。quality_review/finalize 的已验证行为只能来自 verified_behavior_evidence 和 action/checkpoint trace。";
   }
 
