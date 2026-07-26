@@ -196,11 +196,82 @@ public class AgentCoreTest {
 
     assertEquals(2, rounds.get());
     assertEquals(0, hiddenExecutions.get());
-    assertTrue(engine.messages().stream().anyMatch(message ->
+    AgentMessage rejected = engine.messages().stream().filter(message ->
         message.role() == AgentMessage.Role.TOOL
             && "read_file".equals(message.name())
-            && message.content().contains("tool_not_selected")));
+            && message.content().contains("tool_not_selected"))
+        .findFirst().orElseThrow(AssertionError::new);
+    assertTrue(rejected.content().contains("\"retryable\":false"));
+    assertTrue(rejected.content().contains("当前可用工具: read_plan,finalize_task"));
+    assertTrue(rejected.content().contains("重复调用不会改变工具状态"));
     assertEquals("done", finalText.get());
+  }
+
+  @Test
+  public void unselectedToolCarriesLatestRecommendedAction() {
+    AtomicInteger rounds = new AtomicInteger();
+    AtomicInteger hiddenExecutions = new AtomicInteger();
+    AgentTool hidden = countingTool("read_file", hiddenExecutions);
+    AgentTool routed = new AgentTool() {
+      public ToolSpec spec() {
+        return new ToolSpec("read_plan", "read_plan", Collections.singletonMap("type", "object"));
+      }
+
+      public Cancellable execute(
+          ToolContext context, ToolArguments arguments, ToolCallback callback) {
+        callback.onComplete(ToolResult.success(
+            map("recommended_next_action", "finalize_task")));
+        return Cancellable.NONE;
+      }
+    };
+    ToolPolicy policy = new ToolPolicy() {
+      public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
+        return ToolSelection.onlyNames(tools, Arrays.asList("read_plan", "finalize_task"));
+      }
+      public boolean supports(ToolInvocation invocation) { return false; }
+      public Cancellable evaluate(
+          ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+        throw new AssertionError("selection-only policy must not evaluate invocations");
+      }
+    };
+    ModelGateway gateway = (request, observer) -> {
+      int round = rounds.incrementAndGet();
+      String name = round == 1 ? "read_plan" : round == 2 ? "read_file" : "finalize_task";
+      ToolArguments arguments = "finalize_task".equals(name)
+          ? new ToolArguments(map("status", "completed", "summary", "done"))
+          : ToolArguments.empty();
+      observer.onComplete(new ModelResponse(
+          "", "tool_calls", Collections.singletonList(
+              new AgentToolCall("call-" + round, name, arguments))));
+      return Cancellable.NONE;
+    };
+    WorkbenchDefinition base = definition(
+        Arrays.asList(hidden, routed, tool("finalize_task", true)),
+        Collections.emptyList());
+    WorkbenchDefinition definition = new WorkbenchDefinition() {
+      public String id() { return base.id(); }
+      public String displayName() { return base.displayName(); }
+      public List<PromptContributor> promptContributors() { return base.promptContributors(); }
+      public List<ContextProvider> contextProviders() { return base.contextProviders(); }
+      public List<AgentTool> tools() { return base.tools(); }
+      public List<ToolPolicy> toolPolicies() { return Collections.singletonList(policy); }
+      public List<TaskValidator> validators() { return base.validators(); }
+      public WorkbenchHost host() { return base.host(); }
+    };
+    AgentEngine engine = new AgentEngine(
+        definition, gateway, new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(), Runnable::run, "s", "w", false, 5);
+
+    engine.submit("task", observer(new AtomicReference<>()));
+
+    assertEquals(3, rounds.get());
+    assertEquals(0, hiddenExecutions.get());
+    AgentMessage rejected = engine.messages().stream().filter(message ->
+        message.role() == AgentMessage.Role.TOOL
+            && "read_file".equals(message.name()))
+        .findFirst().orElseThrow(AssertionError::new);
+    assertTrue(rejected.content().contains("请执行 recommended_next_action"));
+    assertTrue(rejected.content().contains("\"recommended_next_action\":\"finalize_task\""));
   }
 
   @Test

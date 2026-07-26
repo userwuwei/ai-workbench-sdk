@@ -537,6 +537,7 @@ public class AgentHistoryRequestProjectionTest {
                     "actual_state", map("baseline", false, "post", false),
                     "compiled_steps", String.join("", Collections.nCopies(100, "internal-step")))),
             "reading_brief", map("path", "index.html", "signals", Collections.singletonList("#start")),
+            "test_retry_brief", map("issue", "baseline_already_true", "recommended_tool", "browser_test"),
             "recommended_next_action", "read_plan");
     List<AgentMessage> projected =
         AgentHistoryRequestProjection.project(
@@ -561,6 +562,9 @@ public class AgentHistoryRequestProjectionTest {
     assertEquals("两个 Canvas 比例不一致", compactData.get("failure_reason").getAsString());
     assertEquals("read_plan", compactData.get("recommended_next_action").getAsString());
     assertTrue(compactData.has("reading_brief"));
+    assertTrue(compactData.has("test_retry_brief"));
+    assertTrue(compactData.getAsJsonObject("test_retry_brief").toString()
+        .contains("baseline_already_true"));
     assertTrue(compactData.toString().contains("canvas_aspect_ratio_mismatch"));
     assertTrue(compactData.toString().contains("#gameCanvas"));
     assertFalse(compactData.has("source_revision"));

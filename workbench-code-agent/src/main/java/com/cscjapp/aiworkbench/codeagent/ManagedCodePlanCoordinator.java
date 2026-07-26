@@ -32,6 +32,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private boolean stateChanged;
   private String verificationFailureTool = "";
   private String verificationFailureKind = "";
+  private boolean verificationFailureHasProductRoot;
+  private boolean verificationFailureHasTestRoot;
   private String recoverableEditPath = "";
   private boolean recoveryReadReady;
   private boolean interactionRequired;
@@ -92,6 +94,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     stateChanged = false;
     verificationFailureTool = "";
     verificationFailureKind = "";
+    verificationFailureHasProductRoot = false;
+    verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
     clearInteractionContract();
@@ -116,6 +120,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     stateChanged = false;
     verificationFailureTool = "";
     verificationFailureKind = "";
+    verificationFailureHasProductRoot = false;
+    verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
     clearInteractionContract();
@@ -165,7 +171,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
 
     if (!verificationFailureTool.isEmpty()) {
-      if (retryBrowserPlanWithoutCodeRead()) {
+      if (mixedBrowserFailure()) {
+        addSearchReplace(allowed);
+        allowed.add("browser_test");
+      } else if (verificationFailureHasProductRoot) {
+        addSearchReplace(allowed);
+      } else if (retryBrowserPlanWithoutCodeRead()) {
         allowed.add("browser_test");
       } else if (hasRoleAtRevision(CodeToolRole.CREATE)
           || hasRoleAtRevision(CodeToolRole.EDIT)
@@ -344,6 +355,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     clearBrowserInteractionEvidence();
     verificationFailureTool = "";
     verificationFailureKind = "";
+    verificationFailureHasProductRoot = false;
+    verificationFailureHasTestRoot = false;
     files = decodeFiles(next.get("planned_files"));
     steps = decodeSteps(next.get("steps"));
     recompute();
@@ -382,6 +395,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (contractResult) decorateManagedResult(toolName, data);
     if (syntaxPendingBeforeBrowser()) {
       data.put("recommended_next_action", "syntax_check");
+    } else if ("browser_test".equals(toolName)
+        && verificationFailureHasProductRoot) {
+      data.put("recommended_next_action", "read_plan");
     } else if ("browser_test".equals(toolName) && Boolean.TRUE.equals(data.get("passed"))) {
       data.put("recommended_next_action", recommendedNextAction());
     } else if (text(data.get("recommended_next_action")).isEmpty()) {
@@ -585,6 +601,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         if (toolName.equals(verificationFailureTool)) {
           verificationFailureTool = "";
           verificationFailureKind = "";
+          verificationFailureHasProductRoot = false;
+          verificationFailureHasTestRoot = false;
         }
       } else {
         verificationFailureTool = toolName;
@@ -668,6 +686,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     recoveryReadReady = false;
     verificationFailureTool = "";
     verificationFailureKind = "";
+    verificationFailureHasProductRoot = false;
+    verificationFailureHasTestRoot = false;
     unresolvedWritePaths.remove(write.path);
     evidence.removeIf(item -> item.role == role && write.path.equals(item.path));
     evidence.add(
@@ -689,6 +709,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     readCoverageByPath.remove(path);
     verificationFailureTool = "";
     verificationFailureKind = "";
+    verificationFailureHasProductRoot = false;
+    verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
     clearBrowserInteractionEvidence();
@@ -758,6 +780,8 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if (toolName.equals(verificationFailureTool)) {
         verificationFailureTool = "";
         verificationFailureKind = "";
+        verificationFailureHasProductRoot = false;
+        verificationFailureHasTestRoot = false;
       }
       if ("browser_test".equals(toolName)) clearPendingBrowserRegression();
       return;
@@ -771,6 +795,22 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       kind = "environment_failure";
     }
     if (kind.isEmpty()) kind = "product_code_failure";
+    boolean browserFailure = "browser_test".equals(toolName);
+    verificationFailureHasTestRoot = browserFailure
+        && hasIndependentBrowserTestFailure(result.data());
+    verificationFailureHasProductRoot = browserFailure
+        && (hasExplicitBrowserProductFailure(result.data())
+            || ("product_code_failure".equals(kind)
+                && !verificationFailureHasTestRoot));
+    if ("environment_failure".equals(kind)) {
+      verificationFailureHasProductRoot = false;
+      verificationFailureHasTestRoot = false;
+    }
+    if (browserFailure
+        && !"environment_failure".equals(kind)
+        && verificationFailureHasProductRoot) {
+      kind = "product_code_failure";
+    }
     verificationFailureKind = kind;
     if ("browser_test".equals(toolName)
         && "product_code_failure".equals(kind)
@@ -827,9 +867,16 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private boolean retryBrowserPlanWithoutCodeRead() {
     if (!"browser_test".equals(verificationFailureTool)) return false;
+    if (verificationFailureHasProductRoot) return false;
     return "test_plan_invalid".equals(verificationFailureKind)
         || "test_expectation_mismatch".equals(verificationFailureKind)
         || "environment_failure".equals(verificationFailureKind);
+  }
+
+  private boolean mixedBrowserFailure() {
+    return "browser_test".equals(verificationFailureTool)
+        && verificationFailureHasProductRoot
+        && verificationFailureHasTestRoot;
   }
 
   private boolean hasReadyReadCoverage() {

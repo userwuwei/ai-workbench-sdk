@@ -239,8 +239,22 @@ public final class AgentEngine implements Cancellable {
     o.onToolStarted(call.id(), call.name(), call.arguments());
     if (registry.find(call.name()) != null
         && (selectedToolNames == null || !selectedToolNames.contains(call.name()))) {
+      String recommended = latestRecommendedNextAction();
+      String available = selectedToolNames == null || selectedToolNames.isEmpty()
+          ? "无" : String.join(",", selectedToolNames);
+      StringBuilder message = new StringBuilder()
+          .append("本轮未提供工具: ").append(call.name())
+          .append("；当前可用工具: ").append(available)
+          .append("。重复调用不会改变工具状态");
+      Map<String, Object> data = new LinkedHashMap<>();
+      if (!recommended.isEmpty()) {
+        message.append("，请执行 recommended_next_action=").append(recommended);
+        data.put("recommended_next_action", recommended);
+      } else {
+        message.append("，请改用本轮已提供工具");
+      }
       ToolResult result = ToolResult.error(
-          "tool_not_selected", "本轮未提供工具: " + call.name(), true);
+          "tool_not_selected", message.append('。').toString(), false, data);
       synchronized (this) {
         evidence.add(result);
         messages.add(AgentMessage.tool(call.id(), call.name(), ToolResultCodec.toJson(result)));
@@ -291,6 +305,16 @@ public final class AgentEngine implements Cancellable {
                     demand, o, round, calls, index + 1, runId, selectedToolNames);
               }
             });
+  }
+
+  private synchronized String latestRecommendedNextAction() {
+    for (int index = evidence.size() - 1; index >= 0; index--) {
+      Object value = evidence.get(index).data().get("recommended_next_action");
+      if (value == null) continue;
+      String text = String.valueOf(value).trim();
+      if (!text.isEmpty()) return text;
+    }
+    return "";
   }
 
   private static String finalContent(AgentToolCall call, ToolResult result) {

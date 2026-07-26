@@ -161,6 +161,9 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("不得提前执行其后的验证或修改阶段"));
     assertTrue(prompt.contains("逐字来自当前 revision"));
     assertTrue(prompt.contains("动作后的关闭、消失或复位使用 eventually_true"));
+    assertTrue(prompt.contains("‘可见且可点击’只能作为静态检查"));
+    assertTrue(prompt.contains("同时存在 reading_brief 与 test_retry_brief"));
+    assertTrue(prompt.contains("只有纯产品失败要求保持"));
     assertTrue(prompt.contains("禁止修改产品迎合测试"));
   }
 
@@ -739,6 +742,91 @@ public final class CodeAgentPresetTest {
     assertFalse(String.valueOf(finalized.data().get("verification")).contains("键盘"));
     assertTrue(String.valueOf(finalized.data().get("verification"))
         .contains("successful postconditions"));
+  }
+
+  @Test
+  public void mixedBrowserFailureAllowsRepairAndDoesNotLockInvalidPlanHash() {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("syntax_check", "browser_test")
+        .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.PLAN_TASK, CodeToolRole.PLAN);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    AgentRunContext run = new AgentRunContext(322L, "s", "workspace", "task");
+    coordinator.onRunStarted(run);
+    coordinator.acceptPlan(map(
+        "goal", "修复混合故障",
+        "planned_files", Collections.singletonList(map("path", "main.txt", "action", "edit")),
+        "steps", Arrays.asList(
+            step("implement", "修复", "implement", "search_replace"),
+            step("verify", "验证", "verify", "syntax_check", "browser_test"))));
+    long generation = coordinator.generation();
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+    coordinator.recordAndDecorate(
+        generation, "syntax_check", ToolResult.success(map("passed", true)));
+
+    ToolArguments originalPlan = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    ToolResult mixed = coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        originalPlan,
+        ToolResult.success(map(
+            "passed", false,
+            "failure_kind", "product_code_failure",
+            "recommended_next_action", "read_plan",
+            "reading_brief", map("path", "main.txt"),
+            "test_retry_brief", map("issue", "baseline already true"),
+            "scenario_results", Collections.singletonList(map(
+                "id", "smoke",
+                "failures", Arrays.asList(
+                    map("code", "page_error", "failure_kind", "product_code_failure"),
+                    map("code", "baseline_already_true",
+                        "failure_kind", "test_expectation_mismatch")))))));
+    List<ToolSpec> registered = new ArrayList<>();
+    for (String name : roles.keySet()) registered.add(tool(name).spec());
+    AgentRoundContext round = new AgentRoundContext(run, 1);
+    Set<String> mixedTools = selectedNames(coordinator.selectTools(round, registered));
+    assertTrue(mixedTools.contains("search_replace"));
+    assertTrue(mixedTools.contains("browser_test"));
+    assertEquals("read_plan", mixed.data().get("recommended_next_action"));
+
+    coordinator.recordAndDecorate(
+        generation,
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true)));
+    Set<String> afterWrite = selectedNames(coordinator.selectTools(round, registered));
+    assertTrue(afterWrite.contains("syntax_check"));
+    assertFalse(afterWrite.contains("search_replace"));
+    assertFalse(afterWrite.contains("browser_test"));
+    coordinator.recordAndDecorate(
+        generation, "syntax_check", ToolResult.success(map("passed", true)));
+
+    ToolArguments correctedPlan = new ToolArguments(map(
+        "goal", "修正已知 baseline",
+        "scenarios", Collections.singletonList(map(
+            "id", "smoke",
+            "actions", Collections.emptyList(),
+            "expectations", Collections.singletonList(map(
+                "type", "selector_exists",
+                "selector", "html",
+                "transition", "eventually_true"))))));
+    ToolResult passed = coordinator.recordAndDecorate(
+        generation, "browser_test", correctedPlan, passingBrowser("smoke"));
+    assertEquals(true, passed.data().get("passed"));
+    assertEquals("none", passed.data().get("failure_kind"));
   }
 
   @Test
@@ -1897,11 +1985,35 @@ public final class CodeAgentPresetTest {
         new LinkedHashSet<>(Arrays.asList(
             "read_file", "read_plan", "browser_test", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
+    ToolResult mixedFailure = coordinator.recordAndDecorate(
+        generation,
+        "browser_test",
+        ToolResult.success(map(
+            "passed", false,
+            "failure_kind", "product_code_failure",
+            "recommended_next_action", "read_plan",
+            "reading_brief", map("path", "main.txt"),
+            "test_retry_brief", map("issue", "baseline already true"),
+            "scenario_results", Collections.singletonList(map(
+                "id", "interaction",
+                "failures", Arrays.asList(
+                    map(
+                        "code", "page_error",
+                        "failure_kind", "product_code_failure"),
+                    map(
+                        "code", "baseline_already_true",
+                        "failure_kind", "test_expectation_mismatch")))))));
+    assertEquals("read_plan", mixedFailure.data().get("recommended_next_action"));
+    assertEquals(
+        new LinkedHashSet<>(Arrays.asList(
+            "read_file", "read_plan", "search_replace", "browser_test",
+            "plan_task", "finalize_task")),
+        selectedNames(coordinator.selectTools(round, registered)));
     ToolResult productFailure = coordinator.recordAndDecorate(
         generation,
         "browser_test",
         ToolResult.success(map("passed", false, "failure_kind", "product_code_failure")));
-    assertEquals("search_replace", productFailure.data().get("recommended_next_action"));
+    assertEquals("read_plan", productFailure.data().get("recommended_next_action"));
     assertEquals(
         new LinkedHashSet<>(Arrays.asList(
             "read_file", "read_plan", "search_replace", "plan_task", "finalize_task")),

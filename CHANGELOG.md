@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.11
+
+- `browser_test` 混合故障优先保留独立产品根因，同时输出互不污染的 `reading_brief` 与 `test_retry_brief`，不再让错误 baseline 遮蔽真实运行时故障。
+- Coordinator 对混合根因同时开放 `search_replace` 与 browser 重试路径；纯测试、环境和纯产品失败仍保持各自阶段边界，只有纯产品失败锁定回归 Hash。
+- `tool_not_selected` 改为不可直接重试，并回显本轮工具与最近推荐动作；交互检查必须描述动作后可观察终态，不再用静态可见性硬凑动态断言。
+
 ## 2.0.10
 
 - `browser_test` 共享预检拒绝同一 clean baseline 下互为正反的 `false_to_true` 条件，动作后的关闭、消失和复位统一使用 `eventually_true`。
