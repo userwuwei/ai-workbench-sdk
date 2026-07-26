@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.12
+
+- 重新发布 `2.0.11` 的 Browser Test 编辑拦截收口修复；`2.0.11` 的首次 JitPack 构建因构建节点无法解析 Gradle 插件仓库而未生成制品。
+
 ## 2.0.11
 
 - `browser_test` 混合故障优先保留独立产品根因，同时输出互不污染的 `reading_brief` 与 `test_retry_brief`，不再让错误 baseline 遮蔽真实运行时故障。
