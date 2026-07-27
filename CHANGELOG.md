@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.14
+
+- 重新发布 `2.0.13` 的 ToolSelection 过度拦截收口修复；JitPack 的 `2.0.13` 版本键此前已缓存到无制品的旧提交，无法解析正式标签制品。
+
 ## 2.0.13
 
 - ToolSelection 恢复为模型工具展示与推荐机制；模型返回的已注册工具统一进入 Dispatcher 和既有 ToolPolicy，不再因本轮未展示而产生 `tool_not_selected` 死循环。
