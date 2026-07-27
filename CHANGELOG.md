@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.13
+
+- ToolSelection 恢复为模型工具展示与推荐机制；模型返回的已注册工具统一进入 Dispatcher 和既有 ToolPolicy，不再因本轮未展示而产生 `tool_not_selected` 死循环。
+- 有效编辑计划在 syntax、browser 与 quality 阶段持续展示原子的 `search_replace`；新写入仍会使当前 revision 的验证和质量证据失效。
+- implement 编辑证据按计划序号隔离，replan 不再复用旧写入完成新步骤；最后一个编辑步骤在当前 revision 的首项必需验证通过后才结束。
+- 通用 Prompt 明确 `recommended_next_action` 是首选而非禁令，并允许复杂修改在 syntax_check 前连续执行多个精确 `search_replace`。
+
 ## 2.0.12
 
 - 重新发布 `2.0.11` 的 Browser Test 编辑拦截收口修复；`2.0.11` 的首次 JitPack 构建因构建节点无法解析 Gradle 插件仓库而未生成制品。

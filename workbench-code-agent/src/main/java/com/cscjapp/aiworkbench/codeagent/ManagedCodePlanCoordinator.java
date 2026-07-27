@@ -14,7 +14,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private final Map<String, CodeToolRole> roles;
   private final WorkspaceAccess workspace;
   private final CodePlanNormalizer normalizer;
-  private final boolean editVisibleDuringVerify;
   private long generation;
   private long activeRunId = -1L;
   private long planSequence;
@@ -72,7 +71,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     this.contract = contract;
     this.roles = new LinkedHashMap<>(roles);
     this.workspace = workspace;
-    this.editVisibleDuringVerify = editVisibleDuringVerify;
     normalizer = new CodePlanNormalizer(contract);
   }
 
@@ -156,11 +154,23 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
+    // Once a managed plan declares edits to an existing file, keep the atomic exact-anchor
+    // editor model-visible throughout implementation, verification and quality. ToolSelection
+    // is advisory; a later write will invalidate stale verification evidence by revision.
+    if (planUsesSearchReplace()) addSearchReplace(allowed);
+
     if (!recoverableEditPath.isEmpty()) {
-      if (editVisibleDuringVerify) {
-        addSearchReplace(allowed);
-      } else if (recoveryReadReady || hasReadyReadCoverage()) {
-        addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+      addSearchReplace(allowed);
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
+    PlanStep pendingImplementation = currentStep();
+    if (pendingImplementation != null
+        && "implement".equals(pendingImplementation.phase)
+        && stepDeclaresWrite(pendingImplementation)
+        && !implementationWriteSatisfied(pendingImplementation)) {
+      if (!requiresReadCoverage(pendingImplementation) || hasReadyReadCoverage()) {
+        addImplementationTools(allowed, pendingImplementation);
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
@@ -181,8 +191,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       } else if (hasRoleAtRevision(CodeToolRole.CREATE)
           || hasRoleAtRevision(CodeToolRole.EDIT)
           || hasReadyReadCoverage()) {
-        if (editVisibleDuringVerify) addSearchReplace(allowed);
-        else addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
+        addSearchReplace(allowed);
       }
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
@@ -386,9 +395,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         && ("browser_test".equals(toolName)
             || CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
             || CodeAgentToolNames.FINALIZE_TASK.equals(toolName));
-    boolean recoverableRetry = hasPlan()
-        && editVisibleDuringVerify
-        && recoverableSearchReplaceFailure(toolName, effective);
+    boolean recoverableRetry = hasPlan() && recoverableSearchReplaceFailure(toolName, effective);
     if ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan()) return effective;
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
     if (stateChanged || contractResult) data.put("plan_state", state());
@@ -644,12 +651,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
             path,
             "",
             generation,
+            planSequence,
             pathRevisions.getOrDefault(path, 0L),
             true));
       }
       recordReadCoverage(paths, result.data());
     } else {
-      evidence.add(new Evidence(toolName, role, "", "", generation, revision, true));
+      evidence.add(
+          new Evidence(toolName, role, "", "", generation, planSequence, revision, true));
     }
     recompute();
   }
@@ -697,6 +706,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
             write.path,
             write.planFileId,
             generation,
+            planSequence,
             revision,
             true));
     recompute();
@@ -1014,12 +1024,11 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private String recommendedNextAction() {
-    if (editVisibleDuringVerify && !recoverableEditPath.isEmpty()) {
+    if (!recoverableEditPath.isEmpty()) {
       return "search_replace";
     }
     if (syntaxPendingBeforeBrowser()) return "syntax_check";
-    if (editVisibleDuringVerify
-        && !verificationFailureTool.isEmpty()
+    if (!verificationFailureTool.isEmpty()
         && !retryBrowserPlanWithoutCodeRead()
         && (hasRoleAtRevision(CodeToolRole.CREATE)
             || hasRoleAtRevision(CodeToolRole.EDIT)
@@ -1031,6 +1040,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private boolean syntaxPendingBeforeBrowser() {
     if ("syntax_check".equals(verificationFailureTool)) return false;
+    PlanStep current = currentStep();
+    if (current != null
+        && "implement".equals(current.phase)
+        && !implementationWriteSatisfied(current)) {
+      return false;
+    }
     if (!hasRoleAtRevision(CodeToolRole.CREATE) && !hasRoleAtRevision(CodeToolRole.EDIT)) {
       return false;
     }
@@ -1132,16 +1147,52 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private void keepSearchReplaceReachable(Set<String> output) {
-    if (editVisibleDuringVerify
-        && (hasRoleAtRevision(CodeToolRole.CREATE)
+    if (hasRoleAtRevision(CodeToolRole.CREATE)
             || hasRoleAtRevision(CodeToolRole.EDIT)
-            || hasReadyReadCoverage())) {
+            || hasReadyReadCoverage()) {
       addSearchReplace(output);
     }
   }
 
   private void addSearchReplace(Set<String> output) {
     if (role("search_replace") == CodeToolRole.EDIT) output.add("search_replace");
+  }
+
+  private void addImplementationTools(Set<String> output, PlanStep step) {
+    boolean added = false;
+    for (String raw : step.requiredTools) {
+      String tool = canonicalToolName(raw);
+      CodeToolRole candidate = role(tool);
+      if (candidate == CodeToolRole.CREATE || candidate == CodeToolRole.EDIT) {
+        output.add(tool);
+        added = true;
+      }
+    }
+    if (!added) addRoles(output, CodeToolRole.CREATE, CodeToolRole.EDIT);
+  }
+
+  private boolean stepDeclaresWrite(PlanStep step) {
+    if (step == null) return false;
+    if (!step.fileRefs.isEmpty()) return true;
+    for (String raw : step.requiredTools) {
+      CodeToolRole candidate = role(canonicalToolName(raw));
+      if (candidate == CodeToolRole.CREATE || candidate == CodeToolRole.EDIT) return true;
+    }
+    return false;
+  }
+
+  private boolean planUsesSearchReplace() {
+    if (role("search_replace") != CodeToolRole.EDIT) return false;
+    for (PlanFile file : files) {
+      if ("edit".equals(file.action)) return true;
+    }
+    for (PlanStep step : steps) {
+      if (!"implement".equals(step.phase)) continue;
+      for (String tool : step.requiredTools) {
+        if ("search_replace".equals(canonicalToolName(tool))) return true;
+      }
+    }
+    return false;
   }
 
   private static boolean recoverableSearchReplaceFailure(String toolName, ToolResult result) {
@@ -1355,6 +1406,12 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private boolean implementationSatisfied(PlanStep step) {
+    if (!implementationWriteSatisfied(step)) return false;
+    return !requiresImplementationVerificationBoundary(step)
+        || implementationVerificationBoundarySatisfied();
+  }
+
+  private boolean implementationWriteSatisfied(PlanStep step) {
     if (!step.fileRefs.isEmpty()) {
       for (String ref : step.fileRefs) {
         PlanFile file = file(ref);
@@ -1364,15 +1421,55 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     Set<CodeToolRole> accepted = implementationRoles(step.requiredTools);
     for (Evidence item : evidence) {
-      if (item.generation == generation && accepted.contains(item.role) && item.passed) return true;
+      if (item.generation == generation
+          && (item.role != CodeToolRole.EDIT || item.planSequence == planSequence)
+          && accepted.contains(item.role)
+          && item.passed) return true;
     }
     return false;
+  }
+
+  private boolean requiresImplementationVerificationBoundary(PlanStep step) {
+    boolean found = false;
+    for (PlanStep candidate : steps) {
+      if (candidate == step) {
+        found = true;
+      } else if (found && "implement".equals(candidate.phase)) {
+        return false;
+      }
+    }
+    for (PlanFile file : files) {
+      if ("edit".equals(file.action)) return true;
+    }
+    for (PlanStep candidate : steps) {
+      if (!"implement".equals(candidate.phase)) continue;
+      for (String tool : candidate.requiredTools) {
+        if (role(canonicalToolName(tool)) == CodeToolRole.EDIT) return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean implementationVerificationBoundarySatisfied() {
+    String first = firstImplementationVerificationTool();
+    return first.isEmpty() || hasCurrentTool(first);
+  }
+
+  private String firstImplementationVerificationTool() {
+    for (String tool : completionVerificationTools("code_generation")) {
+      String canonical = canonicalToolName(tool);
+      if (role(canonical) == CodeToolRole.VERIFY) return canonical;
+    }
+    return "";
   }
 
   private boolean hasWriteFor(PlanFile file) {
     if (file.canonicalPath.isEmpty() || unresolvedWritePaths.contains(file.canonicalPath)) return false;
     for (Evidence item : evidence) {
-      if (item.generation != generation || !item.passed || !file.canonicalPath.equals(item.path)) continue;
+      if (item.generation != generation
+          || !item.passed
+          || !file.canonicalPath.equals(item.path)) continue;
+      if (item.role == CodeToolRole.EDIT && item.planSequence != planSequence) continue;
       if (!item.planFileId.isEmpty() && !item.planFileId.equals(file.id)) continue;
       if ("create".equals(file.action) && item.role == CodeToolRole.CREATE) return true;
       if ("edit".equals(file.action) && item.role == CodeToolRole.EDIT) return true;
@@ -1485,16 +1582,22 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     } else if ("discover".equals(step.phase)) {
       out.add("read:actual_content");
     } else if ("implement".equals(step.phase)) {
-      if (step.fileRefs.isEmpty()) {
-        out.add("write:planned_target");
-      } else {
-        for (String ref : step.fileRefs) {
-          PlanFile file = file(ref);
-          if (file != null && !hasWriteFor(file)) {
-            String role = "create".equals(file.action) ? "create" : "edit";
-            out.add(evidenceLabel(role, file.displayPath));
+      if (!implementationWriteSatisfied(step)) {
+        if (step.fileRefs.isEmpty()) {
+          out.add("write:planned_target");
+        } else {
+          for (String ref : step.fileRefs) {
+            PlanFile file = file(ref);
+            if (file != null && !hasWriteFor(file)) {
+              String role = "create".equals(file.action) ? "create" : "edit";
+              out.add(evidenceLabel(role, file.displayPath));
+            }
           }
         }
+      } else if (requiresImplementationVerificationBoundary(step)
+          && !implementationVerificationBoundarySatisfied()) {
+        String boundary = firstImplementationVerificationTool();
+        if (!boundary.isEmpty()) out.add(limit("verify:" + boundary, 88));
       }
     } else if ("verify".equals(step.phase)) {
       for (String tool : requiredVerificationTools(step)) {
@@ -1942,6 +2045,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     final String path;
     final String planFileId;
     final long generation;
+    final long planSequence;
     final long revision;
     final boolean passed;
 
@@ -1951,6 +2055,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         String path,
         String planFileId,
         long generation,
+        long planSequence,
         long revision,
         boolean passed) {
       this.toolName = toolName;
@@ -1958,6 +2063,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       this.path = path;
       this.planFileId = planFileId;
       this.generation = generation;
+      this.planSequence = planSequence;
       this.revision = revision;
       this.passed = passed;
     }

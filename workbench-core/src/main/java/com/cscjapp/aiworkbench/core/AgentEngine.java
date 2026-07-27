@@ -125,10 +125,8 @@ public final class AgentEngine implements Cancellable {
     }
     o.onState("model_running");
     ModelRequest req;
-    Set<String> selectedToolNames;
     synchronized (this) {
       List<ToolSpec> selectedTools = selectTools(n, runId);
-      selectedToolNames = toolNames(selectedTools);
       req =
           new ModelRequest(
               endpoint,
@@ -162,8 +160,7 @@ public final class AgentEngine implements Cancellable {
                   messages.add(AgentMessage.assistant(response.content(), response.toolCalls()));
                 }
                 if (!response.toolCalls().isEmpty()) {
-                  executeCalls(
-                      demand, o, n, response.toolCalls(), 0, runId, selectedToolNames);
+                  executeCalls(demand, o, n, response.toolCalls(), 0, runId);
                   return;
                 }
                 LegacyProtocolParser.Parsed p =
@@ -175,8 +172,7 @@ public final class AgentEngine implements Cancellable {
                       n,
                       Collections.singletonList(new AgentToolCall(p.callId, p.name, p.arguments)),
                       0,
-                      runId,
-                      selectedToolNames);
+                      runId);
                   return;
                 }
                 if (endpoint.nativeTools() && registry.hasTerminalTool()) {
@@ -214,22 +210,13 @@ public final class AgentEngine implements Cancellable {
     return Collections.unmodifiableList(retained);
   }
 
-  private static Set<String> toolNames(List<ToolSpec> tools) {
-    LinkedHashSet<String> names = new LinkedHashSet<>();
-    if (tools != null) {
-      for (ToolSpec tool : tools) if (tool != null) names.add(tool.name());
-    }
-    return Collections.unmodifiableSet(names);
-  }
-
   private void executeCalls(
       String demand,
       AgentObserver o,
       int round,
       List<AgentToolCall> calls,
       int index,
-      long runId,
-      Set<String> selectedToolNames) {
+      long runId) {
     if (!isActive(runId)) return;
     if (index >= calls.size()) {
       round(demand, o, round + 1, runId);
@@ -237,32 +224,6 @@ public final class AgentEngine implements Cancellable {
     }
     AgentToolCall call = calls.get(index);
     o.onToolStarted(call.id(), call.name(), call.arguments());
-    if (registry.find(call.name()) != null
-        && (selectedToolNames == null || !selectedToolNames.contains(call.name()))) {
-      String recommended = latestRecommendedNextAction();
-      String available = selectedToolNames == null || selectedToolNames.isEmpty()
-          ? "无" : String.join(",", selectedToolNames);
-      StringBuilder message = new StringBuilder()
-          .append("本轮未提供工具: ").append(call.name())
-          .append("；当前可用工具: ").append(available)
-          .append("。重复调用不会改变工具状态");
-      Map<String, Object> data = new LinkedHashMap<>();
-      if (!recommended.isEmpty()) {
-        message.append("，请执行 recommended_next_action=").append(recommended);
-        data.put("recommended_next_action", recommended);
-      } else {
-        message.append("，请改用本轮已提供工具");
-      }
-      ToolResult result = ToolResult.error(
-          "tool_not_selected", message.append('。').toString(), false, data);
-      synchronized (this) {
-        evidence.add(result);
-        messages.add(AgentMessage.tool(call.id(), call.name(), ToolResultCodec.toJson(result)));
-      }
-      o.onToolCompleted(call.id(), call.name(), result);
-      executeCalls(demand, o, round, calls, index + 1, runId, selectedToolNames);
-      return;
-    }
     active =
         dispatcher.dispatch(
             activeRunContext != null && activeRunContext.runId() == runId
@@ -301,20 +262,9 @@ public final class AgentEngine implements Cancellable {
                   validateAndFinish(demand, o, round, finalContent(call, result), event, runId);
                   return;
                 }
-                executeCalls(
-                    demand, o, round, calls, index + 1, runId, selectedToolNames);
+                executeCalls(demand, o, round, calls, index + 1, runId);
               }
             });
-  }
-
-  private synchronized String latestRecommendedNextAction() {
-    for (int index = evidence.size() - 1; index >= 0; index--) {
-      Object value = evidence.get(index).data().get("recommended_next_action");
-      if (value == null) continue;
-      String text = String.valueOf(value).trim();
-      if (!text.isEmpty()) return text;
-    }
-    return "";
   }
 
   private static String finalContent(AgentToolCall call, ToolResult result) {

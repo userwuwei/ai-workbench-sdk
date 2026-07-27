@@ -129,7 +129,7 @@ public class AgentCoreTest {
   }
 
   @Test
-  public void roundToolSelectionRejectsToolsThatWereNotOffered() {
+  public void roundToolSelectionIsAdvisoryForRegisteredTools() {
     AtomicInteger rounds = new AtomicInteger();
     AtomicInteger hiddenExecutions = new AtomicInteger();
     ToolPolicy selectionPolicy = new ToolPolicy() {
@@ -195,20 +195,18 @@ public class AgentCoreTest {
     engine.submit("task", observer(finalText));
 
     assertEquals(2, rounds.get());
-    assertEquals(0, hiddenExecutions.get());
-    AgentMessage rejected = engine.messages().stream().filter(message ->
+    assertEquals(1, hiddenExecutions.get());
+    AgentMessage executed = engine.messages().stream().filter(message ->
         message.role() == AgentMessage.Role.TOOL
-            && "read_file".equals(message.name())
-            && message.content().contains("tool_not_selected"))
+            && "read_file".equals(message.name()))
         .findFirst().orElseThrow(AssertionError::new);
-    assertTrue(rejected.content().contains("\"retryable\":false"));
-    assertTrue(rejected.content().contains("当前可用工具: read_plan,finalize_task"));
-    assertTrue(rejected.content().contains("重复调用不会改变工具状态"));
+    assertTrue(executed.content().contains("\"status\":\"success\""));
+    assertFalse(executed.content().contains("tool_not_selected"));
     assertEquals("done", finalText.get());
   }
 
   @Test
-  public void unselectedToolCarriesLatestRecommendedAction() {
+  public void recommendedActionDoesNotGateARegisteredTool() {
     AtomicInteger rounds = new AtomicInteger();
     AtomicInteger hiddenExecutions = new AtomicInteger();
     AgentTool hidden = countingTool("read_file", hiddenExecutions);
@@ -265,13 +263,13 @@ public class AgentCoreTest {
     engine.submit("task", observer(new AtomicReference<>()));
 
     assertEquals(3, rounds.get());
-    assertEquals(0, hiddenExecutions.get());
-    AgentMessage rejected = engine.messages().stream().filter(message ->
+    assertEquals(1, hiddenExecutions.get());
+    AgentMessage executed = engine.messages().stream().filter(message ->
         message.role() == AgentMessage.Role.TOOL
             && "read_file".equals(message.name()))
         .findFirst().orElseThrow(AssertionError::new);
-    assertTrue(rejected.content().contains("请执行 recommended_next_action"));
-    assertTrue(rejected.content().contains("\"recommended_next_action\":\"finalize_task\""));
+    assertTrue(executed.content().contains("\"status\":\"success\""));
+    assertFalse(executed.content().contains("tool_not_selected"));
   }
 
   @Test
@@ -329,12 +327,58 @@ public class AgentCoreTest {
 
     engine.submit("task", observer(new AtomicReference<>()));
 
-    assertEquals(0, hiddenExecutions.get());
+    assertEquals(1, hiddenExecutions.get());
     assertEquals(1, selectedExecutions.get());
     assertEquals(2, engine.messages().stream()
         .filter(message -> message.role() == AgentMessage.Role.TOOL
             && ("read_file".equals(message.name()) || "read_plan".equals(message.name())))
         .count());
+  }
+
+  @Test
+  public void unregisteredToolStillReturnsUnsupportedToolAndKeepsProtocolPaired() {
+    AtomicInteger rounds = new AtomicInteger();
+    ModelGateway gateway = (request, observer) -> {
+      int round = rounds.incrementAndGet();
+      if (round == 1) {
+        observer.onComplete(new ModelResponse(
+            "",
+            "tool_calls",
+            Collections.singletonList(
+                new AgentToolCall("unknown", "missing_tool", ToolArguments.empty()))));
+      } else {
+        observer.onComplete(new ModelResponse(
+            "",
+            "tool_calls",
+            Collections.singletonList(new AgentToolCall(
+                "final",
+                "finalize_task",
+                new ToolArguments(map("status", "completed", "summary", "done"))))));
+      }
+      return Cancellable.NONE;
+    };
+    WorkbenchDefinition definition = definition(
+        Collections.singletonList(tool("finalize_task", true)), Collections.emptyList());
+    AtomicReference<String> finalText = new AtomicReference<>();
+    AgentEngine engine = new AgentEngine(
+        definition,
+        gateway,
+        new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(),
+        Runnable::run,
+        "s",
+        "w",
+        false,
+        4);
+
+    engine.submit("task", observer(finalText));
+
+    assertEquals(2, rounds.get());
+    AgentMessage unsupported = engine.messages().stream().filter(message ->
+        message.role() == AgentMessage.Role.TOOL && "missing_tool".equals(message.name()))
+        .findFirst().orElseThrow(AssertionError::new);
+    assertTrue(unsupported.content().contains("unsupported_tool"));
+    assertEquals("done", finalText.get());
   }
 
   @Test

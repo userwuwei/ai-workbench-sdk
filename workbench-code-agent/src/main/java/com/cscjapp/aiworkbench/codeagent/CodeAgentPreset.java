@@ -135,6 +135,7 @@ public final class CodeAgentPreset {
               + planningInstruction(planningMode)
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
               + editEvidenceInstruction(convergentReadPrompt)
+              + workflowInstruction()
               + readPlanningInstruction(hasGoalDrivenReadPlan, convergentReadPrompt)
               + browserVerificationInstruction(hasBrowserTest)
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
@@ -154,15 +155,21 @@ public final class CodeAgentPreset {
         + "\n断言 type 只能是 text_visible/selector_exists/url_contains/title_contains/js_boolean；eventually_true/false_to_true 只能写 transition。wait_for 只能位于 actions[] 且必须携带 expectation，不能当作 sleep；自动变化使用 actions=[]，禁止添加无因果点击凑交互。"
         + "\nselector、状态 token 和表达式必须逐字来自当前 revision，禁止凭记忆猜测。false_to_true 的条件必须在干净页面 baseline 为 false；动作后的关闭、消失或复位使用 eventually_true。精确文本仅用于用户明确要求的文案；数值状态优先使用独立数字节点、ARIA 或 data-*。"
         + "\n每个 interaction check 必须描述动作后可观察的终态；‘可见且可点击’只能作为静态检查，不能用动作前已经成立的条件硬凑 false_to_true。"
-        + "\n工具结果包含 recommended_next_action 时，不得提前执行其后的验证或修改阶段。syntax 推荐 browser_test 时不得为方便测试提前改变产品行为；只有不存在独立 reading_brief 产品根因时，test_plan_invalid/test_expectation_mismatch 才只修正测试并重提 browser_test。"
+        + "\nsyntax 推荐 browser_test 时不得为方便测试提前改变产品行为；只有不存在独立 reading_brief 产品根因时，test_plan_invalid/test_expectation_mismatch 才只修正测试并重提 browser_test。"
         + "\n同时存在 reading_brief 与 test_retry_brief 时，只按 reading_brief 修复未被阻断的产品根因，禁止修改产品迎合测试；产品修复并通过 syntax_check 后，在下一次 browser_test 中修正 test_retry_brief 指出的测试问题。只有纯产品失败要求保持 actions、wait_for 和 expectations 语义及 Hash 不变回归。quality_review/finalize 的已验证行为只能来自 verified_behavior_evidence 和 action/checkpoint trace。";
+  }
+
+  private static String workflowInstruction() {
+    return "\nrecommended_next_action 是当前首选动作，不是其他安全工具的执行禁令；已知仍有计划内修改时，先完成当前编辑批次，再调用 syntax_check。"
+        + "\n同一文件中已经确定的修改优先合并到一次 search_replace.replacements[]；受输出大小或独立锚点限制时，允许在 syntax_check 前连续执行多次 search_replace。"
+        + "\n只有测试根因时优先修正测试，禁止修改产品迎合错误断言。任何新写入都会使旧 syntax_check、browser_test 和 quality_review 证据失效，必须基于最新 revision 重新验证。";
   }
 
   private static String editEvidenceInstruction(boolean convergent) {
     if (!convergent) {
-      return "\n修改已有文件前先读取真实内容；同一文件多个修改点合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。";
+      return "\n修改已有文件前先读取真实内容；同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。";
     }
-    return "\n同一文件多个修改点合并到一次 search_replace.replacements[]；old 必须是当前 revision 中逐字准确的真实源码锚点。";
+    return "\n同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]；old 必须是当前 revision 中逐字准确的真实源码锚点。";
   }
 
   private static String readPlanningInstruction(boolean available, boolean convergent) {
@@ -276,7 +283,10 @@ public final class CodeAgentPreset {
       return planningMode(CodePlanningMode.from(value));
     }
 
-    /** Keeps exact-anchor search_replace available while verification or quality is pending. */
+    /**
+     * Compatibility setting retained for existing hosts. Managed plans now always keep their
+     * exact-anchor search_replace path visible through verification and quality.
+     */
     public Builder editVisibleDuringVerify(boolean value) {
       editVisibleDuringVerify = value;
       return this;
