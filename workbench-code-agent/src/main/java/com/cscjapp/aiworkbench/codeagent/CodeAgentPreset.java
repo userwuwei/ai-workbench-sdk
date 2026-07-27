@@ -166,10 +166,11 @@ public final class CodeAgentPreset {
   }
 
   private static String editEvidenceInstruction(boolean convergent) {
+    String searchReplaceContract = " search_replace.old 推荐使用当前 revision 中 2～6 行的精确短窗口，不得超过 40 行或 3000 字符；单行 substring 仅在 expected_matches=1 且唯一命中时可用，重复文本必须分别增加上下文。预检已返回 candidate_windows/preferred_retry_old 时，直接修正整批 replacements，不为同一缺口重新读取。";
     if (!convergent) {
-      return "\n修改已有文件前先读取真实内容；同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。";
+      return "\n修改已有文件前先读取真实内容；同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。" + searchReplaceContract;
     }
-    return "\n同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]；old 必须是当前 revision 中逐字准确的真实源码锚点。";
+    return "\n同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]；old 必须是当前 revision 中逐字准确的真实源码锚点。" + searchReplaceContract;
   }
 
   private static String readPlanningInstruction(boolean available, boolean convergent) {

@@ -1203,6 +1203,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         || detail.contains("multiple")
         || detail.contains("overlap")
         || detail.contains("brace")
+        || detail.contains("old_too_large")
+        || detail.contains("context_invalid")
+        || detail.contains("precheck_failed")
         || detail.contains("batch conflict")
         || detail.contains("batch_conflict");
   }

@@ -3,8 +3,10 @@ package com.cscjapp.aiworkbench.core;
 import static org.junit.Assert.*;
 
 import com.cscjapp.aiworkbench.api.*;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -270,6 +272,99 @@ public class AgentHistoryRequestProjectionTest {
     assertTrue(errorProjection.get(1).content().contains("exact repair anchor"));
     assertTrue(errorProjection.get(1).content().contains("search_replace_conflict"));
     assertTrue(partialHistory.get(0).toolCalls().get(0).arguments().asMap().toString().contains(content));
+  }
+
+  @Test
+  public void structuredSearchReplaceFailureKeepsAllReasonsAndBoundsCandidates() {
+    String content = javascript(180);
+    ToolArguments arguments = searchReplaceArguments("/project/src/script.js", content);
+    List<Object> failures = new ArrayList<>();
+    List<Object> preferred = new ArrayList<>();
+    for (int index = 0; index < 10; index++) {
+      Map<String, Object> candidate = new LinkedHashMap<>();
+      candidate.put("failed_index", index);
+      candidate.put("start_line", index + 10);
+      candidate.put("old", "const candidate" + index + " = true;");
+      Map<String, Object> failure = new LinkedHashMap<>();
+      failure.put("index", index);
+      failure.put("failed_index", index);
+      failure.put("status", "failed");
+      failure.put("error_code", index == 0
+          ? "search_replace_old_too_large" : "search_replace_context_invalid");
+      failure.put("expected_matches", 1);
+      failure.put("actual_matches", index);
+      failure.put("matched_lines", Collections.singletonList(index + 10));
+      failure.put("candidate_windows", Collections.singletonList(candidate));
+      failures.add(failure);
+      preferred.add(candidate);
+    }
+    Map<String, Object> evidence = new LinkedHashMap<>();
+    evidence.put("path", "/project/src/script.js");
+    evidence.put("recommended_next_action", "search_replace");
+    evidence.put("recommended_retry", ((Map<?, ?>) preferred.get(0)));
+    evidence.put("preferred_retry_old", preferred);
+    evidence.put("copyable_old_candidates", preferred);
+    evidence.put("failures", failures);
+    List<AgentMessage> history = writeTurn(
+        arguments,
+        ToolResult.error("search_replace_old_too_large", "old 过大", true, evidence));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    JsonObject result = JsonParser.parseString(projected.get(1).content()).getAsJsonObject();
+    JsonObject data = result.getAsJsonObject("data");
+    assertEquals("search_replace", data.get("recommended_next_action").getAsString());
+    assertTrue(data.get("recommended_retry").isJsonObject());
+    assertEquals(10, data.getAsJsonArray("failures").size());
+    int retainedCandidates = 0;
+    for (JsonElement raw : data.getAsJsonArray("failures")) {
+      JsonObject failure = raw.getAsJsonObject();
+      assertTrue(failure.has("failed_index"));
+      assertTrue(failure.has("error_code"));
+      assertTrue(failure.has("actual_matches"));
+      if (failure.has("candidate_windows")) {
+        retainedCandidates += failure.getAsJsonArray("candidate_windows").size();
+      }
+    }
+    assertEquals(8, retainedCandidates);
+    assertEquals(8, data.getAsJsonArray("preferred_retry_old").size());
+    assertEquals(8, data.getAsJsonArray("copyable_old_candidates").size());
+    JsonObject originalResult = JsonParser.parseString(history.get(1).content()).getAsJsonObject();
+    assertEquals(10, originalResult.getAsJsonObject("data").getAsJsonArray("failures").size());
+  }
+
+  @Test
+  public void atomicSearchReplaceFailureKeepsEveryUnwrittenRetryUnit() {
+    String firstNew = javascript(90);
+    String secondNew = javascript(91);
+    ToolArguments arguments = twoReplacementArguments(
+        "/project/src/script.js",
+        "const firstOld = true;",
+        firstNew,
+        "const secondOld = true;",
+        secondNew);
+    Map<String, Object> failure = new LinkedHashMap<>();
+    failure.put("index", 1);
+    failure.put("failed_index", 1);
+    failure.put("status", "failed");
+    failure.put("error_code", "search_replace_context_invalid");
+    Map<String, Object> evidence = new LinkedHashMap<>();
+    evidence.put("path", "/project/src/script.js");
+    evidence.put("current_file_changed", false);
+    evidence.put("applied_count", 0);
+    evidence.put("failures", Collections.singletonList(failure));
+    List<AgentMessage> history = writeTurn(
+        arguments,
+        ToolResult.error("search_replace_context_invalid", "预检失败", true, evidence));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    ToolArguments repair = projected.get(0).toolCalls().get(0).arguments();
+    assertEquals(2, ((List<?>) repair.get("retry_anchors")).size());
+    assertEquals(firstNew, retryAnchor(repair, 0).get("new"));
+    assertEquals(secondNew, retryAnchor(repair, 1).get("new"));
+    JsonObject result = JsonParser.parseString(projected.get(1).content()).getAsJsonObject();
+    assertEquals(1, result.getAsJsonObject("data").getAsJsonArray("failures").size());
   }
 
   @Test

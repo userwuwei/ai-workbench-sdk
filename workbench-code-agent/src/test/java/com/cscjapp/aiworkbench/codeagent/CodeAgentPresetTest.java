@@ -104,6 +104,10 @@ public final class CodeAgentPresetTest {
     assertTrue(common.contains("都必须使用 search_replace"));
     assertTrue(common.contains("planned_files 只表示任务涉及的文件"));
     assertTrue(common.contains("search_replace.replacements[]"));
+    assertTrue(common.contains("2～6 行"));
+    assertTrue(common.contains("40 行或 3000 字符"));
+    assertTrue(common.contains("唯一命中"));
+    assertTrue(common.contains("不为同一缺口重新读取"));
     assertFalse(common.contains("create_file 用于写入模型已经生成的完整内容"));
     assertFalse(common.contains("目标冲突由本地用户决定覆盖或新建"));
     assertTrue(composed.contains("language-specific-rules"));
@@ -2051,6 +2055,28 @@ public final class CodeAgentPresetTest {
         new LinkedHashSet<>(Arrays.asList(
             "read_file", "read_plan", "search_replace", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
+    for (String errorCode : Arrays.asList(
+        "search_replace_old_too_large",
+        "search_replace_context_invalid",
+        "search_replace_precheck_failed",
+        "search_replace_batch_conflict")) {
+      ToolResult structuredRetry = coordinator.recordAndDecorate(
+          generation,
+          "search_replace",
+          new ToolArguments(map("path", "main.txt", "old", "stale", "new", "after")),
+          ToolResult.error(
+              errorCode,
+              "预检失败",
+              true,
+              map(
+                  "preferred_retry_old",
+                  Collections.singletonList(map("failed_index", 0, "old", "before")),
+                  "recommended_next_action",
+                  "search_replace")));
+      assertEquals("search_replace", structuredRetry.data().get("recommended_next_action"));
+      assertTrue(selectedNames(coordinator.selectTools(round, registered))
+          .contains("search_replace"));
+    }
     AgentTool recoveryRead = tool("read_file");
     assertFalse(coordinator.supports(new ToolInvocation(
         "full-read", recoveryRead, new ToolArguments(map("path", "main.txt")))));

@@ -2,6 +2,7 @@ package com.cscjapp.aiworkbench.core;
 
 import com.cscjapp.aiworkbench.api.ToolArguments;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -106,7 +107,13 @@ final class AgentHistoryRequestProjection {
     compactArguments.put("original_arguments_chars", rawArguments.length());
     compactArguments.put("payload_chars", stats.chars);
     compactArguments.put("payload_sha256", stats.sha256);
-    Set<Integer> failedIndexes = failedIndexes(data);
+    boolean atomicSearchReplaceFailure = "search_replace".equals(call.name())
+        && "error".equalsIgnoreCase(string(result.get("status")))
+        && data != null
+        && data.has("failures")
+        && data.get("failures").isJsonArray();
+    Set<Integer> failedIndexes = atomicSearchReplaceFailure
+        ? Collections.emptySet() : failedIndexes(data);
     Set<Integer> appliedIndexes = completedIndexes(data);
     if (repair) {
       addRetryAnchors(
@@ -153,8 +160,12 @@ final class AgentHistoryRequestProjection {
       compactData.addProperty("repair_evidence_compacted", true);
       addIntegerList(compactData, "failed_indexes", failedIndexes);
       addIntegerList(compactData, "applied_indexes", integerValues(data, "applied_indexes"));
-      List<String> windows = candidateWindows(data);
-      if (!windows.isEmpty()) compactData.add("candidate_windows", GSON.toJsonTree(windows));
+      boolean structuredSearchRepair = "search_replace".equals(call.name())
+          && copySearchReplaceRepairEvidence(data, compactData);
+      if (!structuredSearchRepair) {
+        List<String> windows = candidateWindows(data);
+        if (!windows.isEmpty()) compactData.add("candidate_windows", GSON.toJsonTree(windows));
+      }
     }
     compactData.addProperty("original_arguments_chars", rawArguments.length());
     compactData.addProperty("payload_chars", stats.chars);
@@ -162,6 +173,100 @@ final class AgentHistoryRequestProjection {
     compactResult.add("data", compactData);
     compactResult.addProperty("retryable", booleanValue(result.get("retryable")));
     return new Projection(new ToolArguments(compactArguments), GSON.toJson(compactResult));
+  }
+
+  private static boolean copySearchReplaceRepairEvidence(JsonObject source, JsonObject target) {
+    if (source == null || target == null) return false;
+    JsonElement rawFailures = source.get("failures");
+    if (rawFailures == null || !rawFailures.isJsonArray()) return false;
+    copyJson(
+        source,
+        target,
+        "recommended_next_action",
+        "expected_next_action");
+    JsonObject recommendedRetry = compactSearchReplaceCandidate(source.get("recommended_retry"));
+    if (recommendedRetry != null) target.add("recommended_retry", recommendedRetry);
+    JsonArray failures = new JsonArray();
+    int remainingCandidates = MAX_RETRY_ITEMS;
+    for (JsonElement rawFailure : rawFailures.getAsJsonArray()) {
+      JsonObject failure = object(rawFailure);
+      if (failure == null) continue;
+      JsonObject summary = new JsonObject();
+      copyJson(
+          failure,
+          summary,
+          "index",
+          "failed_index",
+          "status",
+          "error_code",
+          "expected_matches",
+          "actual_matches",
+          "original_matches",
+          "matched_lines",
+          "old_line_count",
+          "old_char_count",
+          "maximum_old_line_count",
+          "maximum_old_char_count",
+          "too_large_old",
+          "suggested_strategy",
+          "conflict_type",
+          "conflict_with_index");
+      if (failure.has("error_message")) {
+        summary.addProperty(
+            "error_message", truncate(string(failure.get("error_message")), MAX_ERROR_MESSAGE_CHARS));
+      }
+      JsonElement rawCandidates = failure.get("candidate_windows");
+      if (remainingCandidates > 0 && rawCandidates != null && rawCandidates.isJsonArray()) {
+        JsonArray candidates = new JsonArray();
+        for (JsonElement rawCandidate : rawCandidates.getAsJsonArray()) {
+          if (remainingCandidates <= 0) break;
+          JsonObject candidate = compactSearchReplaceCandidate(rawCandidate);
+          if (candidate == null) continue;
+          candidates.add(candidate);
+          remainingCandidates--;
+        }
+        if (candidates.size() > 0) summary.add("candidate_windows", candidates);
+      }
+      failures.add(summary);
+    }
+    target.add("failures", failures);
+    copyBoundedSearchReplaceCandidates(source, target, "copyable_old_candidates");
+    copyBoundedSearchReplaceCandidates(source, target, "preferred_retry_old");
+    return true;
+  }
+
+  private static void copyBoundedSearchReplaceCandidates(
+      JsonObject source, JsonObject target, String key) {
+    JsonElement raw = source.get(key);
+    if (raw == null || !raw.isJsonArray()) return;
+    JsonArray output = new JsonArray();
+    for (JsonElement item : raw.getAsJsonArray()) {
+      if (output.size() >= MAX_RETRY_ITEMS) break;
+      JsonObject candidate = compactSearchReplaceCandidate(item);
+      if (candidate != null) output.add(candidate);
+    }
+    if (output.size() > 0) target.add(key, output);
+  }
+
+  private static JsonObject compactSearchReplaceCandidate(JsonElement raw) {
+    JsonObject source = object(raw);
+    if (source == null) return null;
+    JsonObject output = new JsonObject();
+    copyJson(
+        source,
+        output,
+        "failed_index",
+        "source",
+        "start_line",
+        "end_line",
+        "expected_matches");
+    for (String key : new String[] {
+        "old", "snippet", "preferred_old", "retry_template", "instruction"
+    }) {
+      if (!source.has(key)) continue;
+      output.addProperty(key, truncate(string(source.get(key)), MAX_RETRY_TEXT_CHARS));
+    }
+    return output;
   }
 
   /**
