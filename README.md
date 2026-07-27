@@ -10,11 +10,13 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.15'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.16'
 }
 ```
 
 `workbench-starter` 传递导出 API、Core、OpenAI 网关、标准文件工具、Android UI 和可选 Code Agent 组件。宿主只有显式创建 `CodeAgentPreset` 才会获得代码任务语义。
+
+Android 参考工作台默认每完成 20 次模型交互暂停自动继续，并通过“继续生成”在同一进程和 ViewModel 生命周期内无损授权下一段 20 轮。暂停发生在完整模型响应及其全部工具结果之后，不增加 USER 消息，也不结束当前 run；进程死亡后旧检查点只作失效提示，不会伪装成同-run恢复。
 
 ## 普通工作台
 

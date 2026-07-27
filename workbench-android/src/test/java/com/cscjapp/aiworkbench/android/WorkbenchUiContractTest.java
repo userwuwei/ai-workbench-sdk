@@ -155,6 +155,32 @@ public final class WorkbenchUiContractTest {
   }
 
   @Test
+  public void interactionLimitPauseUsesInternalRecoverableContinueAction() throws Exception {
+    String activity =
+        read("src/main/java/com/cscjapp/aiworkbench/android/AIWorkbenchActivity.java");
+    String viewModel =
+        read("src/main/java/com/cscjapp/aiworkbench/android/WorkbenchViewModel.java");
+    String initialize = methodBody(viewModel, "synchronized void initialize");
+    String continueRun = methodBody(viewModel, "synchronized boolean continuePausedRun");
+    String click =
+        methodBody(activity, "private void initializeReferenceUi");
+
+    assertTrue(initialize.contains("Integer.MAX_VALUE"));
+    assertTrue(initialize.contains("20"));
+    assertTrue(viewModel.contains("STATE_INTERACTION_LIMIT_PAUSED"));
+    assertTrue(viewModel.contains("continue_model_interaction"));
+    assertTrue(viewModel.contains("已暂停自动继续"));
+    assertTrue(viewModel.contains("继续生成"));
+    assertTrue(continueRun.contains("engine.isPaused()"));
+    assertTrue(continueRun.contains("engine.resumePausedRun()"));
+    assertTrue(!continueRun.contains("engine.submit("));
+    assertTrue(click.contains("ACTION_CONTINUE_MODEL_INTERACTION.equals(item.actionId)"));
+    assertTrue(click.contains("viewModel.continuePausedRun()"));
+    assertTrue(viewModel.contains("invalidateRestoredPauseAction();"));
+    assertTrue(viewModel.contains("上次运行检查点已失效"));
+  }
+
+  @Test
   public void auraOptimizationPreservesVisualContractAndAllocatesOutsideDraw() throws Exception {
     String aura =
         read(

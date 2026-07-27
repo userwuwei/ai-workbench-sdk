@@ -32,6 +32,10 @@ import java.util.concurrent.Executors;
 
 /** Lifecycle state plus the complete reference-workbench presentation controller. */
 final class WorkbenchViewModel extends ViewModel {
+  static final String ACTION_CONTINUE_MODEL_INTERACTION = "continue_model_interaction";
+  private static final String PAUSE_TITLE = "已暂停自动继续";
+  private static final String PAUSE_CONTENT =
+      "本任务已连续完成20次模型交互，点击后将基于当前工具结果继续处理。";
   static final class ToolRunningState {
     final boolean visible;
     final String name;
@@ -192,6 +196,7 @@ final class WorkbenchViewModel extends ViewModel {
   private WorkbenchUiItem currentReason;
   private WorkbenchUiItem currentSummary;
   private WorkbenchUiItem currentPlan;
+  private WorkbenchUiItem pausedInteractionSummary;
   private boolean managedPlanActive;
   private ToolRunningState currentToolRunningState = ToolRunningState.hidden();
   private long streamUiSequence;
@@ -256,8 +261,10 @@ final class WorkbenchViewModel extends ViewModel {
             sessionId,
             request.workspaceId(),
             request.deepThinking(),
-            40);
+            Integer.MAX_VALUE,
+            20);
     engine.restoreMessages(restoredMessages);
+    invalidateRestoredPauseAction();
     refreshContextUsage();
   }
 
@@ -286,6 +293,7 @@ final class WorkbenchViewModel extends ViewModel {
     if (Boolean.TRUE.equals(running.getValue()) || demand == null || demand.trim().isEmpty()) {
       return;
     }
+    closePauseAction("已开始处理新的需求，原运行检查点已失效。", true);
     state.add(WorkbenchUiItem.userDemand(userName, demand.trim()));
     clearActivePlan();
     postItems(false);
@@ -298,6 +306,26 @@ final class WorkbenchViewModel extends ViewModel {
     modelRoundIndex = 0;
     streamRunGeneration++;
     engine.submit(demand.trim(), observer());
+  }
+
+  synchronized boolean continuePausedRun() {
+    if (engine == null || Boolean.TRUE.equals(running.getValue()) || !engine.isPaused()) {
+      markPauseActionInvalid("运行检查点已失效，请发送新的需求继续处理。", true);
+      return false;
+    }
+    WorkbenchUiItem item = pausedInteractionSummary;
+    if (item != null) {
+      item.content = "正在基于当前工具结果继续处理。";
+      item.actionEnabled = false;
+      item.actionVisible = true;
+      item.actionText = "正在继续处理";
+      postItems(true);
+    }
+    running.setValue(true);
+    if (engine.resumePausedRun()) return true;
+    running.setValue(false);
+    markPauseActionInvalid("运行检查点已失效，请发送新的需求继续处理。", true);
+    return false;
   }
 
   synchronized boolean tickThinking() {
@@ -327,6 +355,7 @@ final class WorkbenchViewModel extends ViewModel {
 
   synchronized void cancel() {
     if (engine != null) engine.cancel();
+    closePauseAction("本轮已手动终止，运行检查点已失效。", true);
     postStreamTerminalUpdate();
     if (Boolean.TRUE.equals(running.getValue())) {
       if (currentReason != null) {
@@ -364,6 +393,7 @@ final class WorkbenchViewModel extends ViewModel {
     currentThought = null;
     currentReason = null;
     currentSummary = null;
+    pausedInteractionSummary = null;
     currentPlan = null;
     managedPlanActive = false;
     items.setValue(new ArrayList<>());
@@ -418,7 +448,11 @@ final class WorkbenchViewModel extends ViewModel {
               deactivateReasonAura(currentReason);
               postItems(false);
             }
+            closePauseAction("本任务已结束，本运行检查点已关闭。", false);
             running.postValue(false);
+            postItems(true);
+          } else if (AgentEngine.STATE_INTERACTION_LIMIT_PAUSED.equals(value)) {
+            handleInteractionLimitPaused();
           }
         }
       }
@@ -574,10 +608,71 @@ final class WorkbenchViewModel extends ViewModel {
           item.statusLevel = WorkbenchUiItem.STATUS_ERROR;
           state.add(item);
           currentSummary = item;
+          closePauseAction("本任务发生错误，本运行检查点已关闭。", false);
           postItems(true);
         }
       }
     };
+  }
+
+  private void handleInteractionLimitPaused() {
+    postStreamTerminalUpdate();
+    hideToolRunning();
+    markThoughtCompleted();
+    clearReasonStreamingState();
+    if (currentReason != null) {
+      deactivateReasonAura(currentReason);
+      currentReason.title = roundTitle("已暂停");
+      replaceReasonContent("已完成本段20次模型交互，等待继续生成。");
+      currentReason.statusLevel = WorkbenchUiItem.STATUS_WARNING;
+    }
+    if (pausedInteractionSummary == null || !state.contains(pausedInteractionSummary)) {
+      pausedInteractionSummary = WorkbenchUiItem.summary(PAUSE_TITLE, PAUSE_CONTENT);
+      state.add(pausedInteractionSummary);
+    }
+    pausedInteractionSummary.title = PAUSE_TITLE;
+    pausedInteractionSummary.content = PAUSE_CONTENT;
+    pausedInteractionSummary.statusLevel = WorkbenchUiItem.STATUS_WARNING;
+    pausedInteractionSummary.errorState = false;
+    pausedInteractionSummary.actionVisible = true;
+    pausedInteractionSummary.actionEnabled = true;
+    pausedInteractionSummary.actionText = "继续生成";
+    pausedInteractionSummary.actionId = ACTION_CONTINUE_MODEL_INTERACTION;
+    currentSummary = pausedInteractionSummary;
+    running.postValue(false);
+    refreshContextUsage();
+    postItems(true);
+  }
+
+  private void invalidateRestoredPauseAction() {
+    for (WorkbenchUiItem item : state) {
+      if (!ACTION_CONTINUE_MODEL_INTERACTION.equals(item.actionId)) continue;
+      pausedInteractionSummary = item;
+      item.content = "上次运行检查点已失效，请发送新的需求继续处理。";
+      item.statusLevel = WorkbenchUiItem.STATUS_WARNING;
+      item.actionVisible = true;
+      item.actionEnabled = false;
+      item.actionText = "检查点已失效";
+    }
+    if (pausedInteractionSummary != null) postItems(true);
+  }
+
+  private void markPauseActionInvalid(String content, boolean persistNow) {
+    if (pausedInteractionSummary == null) return;
+    pausedInteractionSummary.content = content == null ? "运行检查点已失效。" : content;
+    pausedInteractionSummary.statusLevel = WorkbenchUiItem.STATUS_WARNING;
+    pausedInteractionSummary.actionVisible = true;
+    pausedInteractionSummary.actionEnabled = false;
+    pausedInteractionSummary.actionText = "检查点已失效";
+    if (persistNow) postItems(true);
+  }
+
+  private void closePauseAction(String content, boolean persistNow) {
+    if (pausedInteractionSummary == null) return;
+    pausedInteractionSummary.content = content == null ? "运行检查点已关闭。" : content;
+    pausedInteractionSummary.actionVisible = false;
+    pausedInteractionSummary.actionEnabled = false;
+    if (persistNow) postItems(true);
   }
 
   private void applyStreamDelta(ModelStreamDelta delta) {

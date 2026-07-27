@@ -177,7 +177,11 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
     adapter.setOnSummaryActionClickListener(
         (item, position) -> {
           if (item.actionVisible && !item.actionId.isEmpty()) {
-            definition.host().handleAction(item.actionId, ToolArguments.empty());
+            if (WorkbenchViewModel.ACTION_CONTINUE_MODEL_INTERACTION.equals(item.actionId)) {
+              viewModel.continuePausedRun();
+            } else {
+              definition.host().handleAction(item.actionId, ToolArguments.empty());
+            }
           }
         });
     adapter.setOnItemLongClickListener((item, position) -> copyWorkbenchItem(item));

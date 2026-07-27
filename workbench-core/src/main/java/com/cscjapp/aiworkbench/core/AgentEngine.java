@@ -6,6 +6,8 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.*;
 
 public final class AgentEngine implements Cancellable {
+  public static final String STATE_INTERACTION_LIMIT_PAUSED = "interaction_limit_paused";
+
   private final WorkbenchDefinition definition;
   private final ModelGateway gateway;
   private volatile ModelEndpoint endpoint;
@@ -20,11 +22,14 @@ public final class AgentEngine implements Cancellable {
   private final String sessionId, workspaceId;
   private volatile boolean deepThinking;
   private final int maxRounds;
+  private final int autoPauseEveryRounds;
   private final AtomicBoolean cancelled = new AtomicBoolean();
   private final AtomicLong runGeneration = new AtomicLong();
   private final Set<Long> finishedRuns = ConcurrentHashMap.newKeySet();
   private volatile Cancellable active = Cancellable.NONE;
   private volatile AgentRunContext activeRunContext;
+  private volatile PausedContinuation pausedContinuation;
+  private int authorizedRoundLimit;
 
   public AgentEngine(
       WorkbenchDefinition d,
@@ -36,6 +41,30 @@ public final class AgentEngine implements Cancellable {
       String workspaceId,
       boolean deepThinking,
       int maxRounds) {
+    this(
+        d,
+        g,
+        e,
+        decisions,
+        executor,
+        sessionId,
+        workspaceId,
+        deepThinking,
+        maxRounds,
+        0);
+  }
+
+  public AgentEngine(
+      WorkbenchDefinition d,
+      ModelGateway g,
+      ModelEndpoint e,
+      UserDecisionService decisions,
+      Executor executor,
+      String sessionId,
+      String workspaceId,
+      boolean deepThinking,
+      int maxRounds,
+      int autoPauseEveryRounds) {
     definition = d;
     gateway = g;
     endpoint = e;
@@ -44,6 +73,8 @@ public final class AgentEngine implements Cancellable {
     this.workspaceId = workspaceId;
     this.deepThinking = deepThinking;
     this.maxRounds = Math.max(1, maxRounds);
+    this.autoPauseEveryRounds = Math.max(0, autoPauseEveryRounds);
+    this.authorizedRoundLimit = initialAuthorizedRoundLimit();
     registry = new ToolRegistry(d.tools());
     List<ToolPolicy> configuredPolicies = d.toolPolicies();
     toolPolicies =
@@ -80,6 +111,10 @@ public final class AgentEngine implements Cancellable {
     if (previousRun != null) finishRun(previousRun.runId(), "superseded");
     long runId = runGeneration.incrementAndGet();
     cancelled.set(false);
+    clearPausedContinuation();
+    synchronized (this) {
+      authorizedRoundLimit = initialAuthorizedRoundLimit();
+    }
     AgentRunContext runContext = new AgentRunContext(runId, sessionId, workspaceId, demand);
     activeRunContext = runContext;
     dispatcher.onRunStarted(runContext);
@@ -123,6 +158,7 @@ public final class AgentEngine implements Cancellable {
       o.onError(new IllegalStateException("Agent 超过最大工具轮次 " + maxRounds));
       return;
     }
+    if (pauseBeforeRound(demand, o, n, runId)) return;
     o.onState("model_running");
     ModelRequest req;
     synchronized (this) {
@@ -309,6 +345,52 @@ public final class AgentEngine implements Cancellable {
     return !cancelled.get() && runGeneration.get() == runId;
   }
 
+  private boolean pauseBeforeRound(String demand, AgentObserver observer, int nextRound, long runId) {
+    if (autoPauseEveryRounds <= 0) return false;
+    synchronized (this) {
+      if (!isActive(runId) || nextRound < authorizedRoundLimit) return false;
+      pausedContinuation =
+          new PausedContinuation(demand, observer, nextRound, runId);
+    }
+    observer.onState(STATE_INTERACTION_LIMIT_PAUSED);
+    return true;
+  }
+
+  public boolean resumePausedRun() {
+    PausedContinuation continuation;
+    synchronized (this) {
+      continuation = pausedContinuation;
+      if (continuation == null || !isActive(continuation.runId)) return false;
+      pausedContinuation = null;
+      authorizedRoundLimit = saturatingAdd(authorizedRoundLimit, autoPauseEveryRounds);
+    }
+    executor.execute(
+        () ->
+            round(
+                continuation.demand,
+                continuation.observer,
+                continuation.nextRound,
+                continuation.runId));
+    return true;
+  }
+
+  public synchronized boolean isPaused() {
+    return pausedContinuation != null && isActive(pausedContinuation.runId);
+  }
+
+  private synchronized void clearPausedContinuation() {
+    pausedContinuation = null;
+  }
+
+  private int initialAuthorizedRoundLimit() {
+    return autoPauseEveryRounds <= 0 ? Integer.MAX_VALUE : autoPauseEveryRounds;
+  }
+
+  private static int saturatingAdd(int value, int increment) {
+    if (increment <= 0 || value >= Integer.MAX_VALUE - increment) return Integer.MAX_VALUE;
+    return value + increment;
+  }
+
   private void hostEvent(String type, String message) {
     try {
       definition
@@ -332,16 +414,36 @@ public final class AgentEngine implements Cancellable {
     AgentRunContext context = activeRunContext;
     cancelled.set(true);
     runGeneration.incrementAndGet();
+    clearPausedContinuation();
     active.cancel();
     if (context != null) finishRun(context.runId(), "cancelled");
   }
 
   private void finishRun(long runId, String state) {
     if (!finishedRuns.add(runId)) return;
+    synchronized (this) {
+      if (pausedContinuation != null && pausedContinuation.runId == runId) {
+        pausedContinuation = null;
+      }
+    }
     AgentRunContext context = activeRunContext;
     if (context == null || context.runId() != runId) {
       context = new AgentRunContext(runId, sessionId, workspaceId, "");
     }
     dispatcher.onRunFinished(context, state == null ? "" : state);
+  }
+
+  private static final class PausedContinuation {
+    final String demand;
+    final AgentObserver observer;
+    final int nextRound;
+    final long runId;
+
+    PausedContinuation(String demand, AgentObserver observer, int nextRound, long runId) {
+      this.demand = demand;
+      this.observer = observer;
+      this.nextRound = nextRound;
+      this.runId = runId;
+    }
   }
 }
