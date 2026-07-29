@@ -808,8 +808,8 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
   }
 
   private static String contextUsageColor(int percent) {
-    if (percent >= 72) return "#FCA5A5";
-    if (percent >= 58) return "#FDE68A";
+    if (percent >= 88) return "#FCA5A5";
+    if (percent >= 78) return "#FDE68A";
     return "#DCEBFF";
   }
 
@@ -834,12 +834,19 @@ public final class AIWorkbenchActivity extends AppCompatActivity {
             + "\n剩余 "
             + formatTokenCount(state.remainingTokens)
             + " 标记"
+            + (state.cachedPercent >= 0
+                ? "\n上轮缓存命中 " + state.cachedPercent + "%（缓存 "
+                    + formatTokenCount(state.cachedTokens) + "，未缓存 "
+                    + formatTokenCount(state.uncachedTokens) + "）"
+                : "")
+            + "\n请求投影："
+            + state.projectionMode
             + (state.restored ? "\n已恢复上次 Agent 背景信息。" : "")
-            + (state.usedPercent >= 72
-                ? "\n下一轮请求前会自动压缩背景信息。"
-                : state.usedPercent >= 58
-                    ? "\n上下文占用正在接近自动压缩阈值。"
-                    : "\nAI 工作台会在接近窗口上限前自动压缩背景信息。");
+            + (state.usedPercent >= 88
+                ? "\n已达到88%强压缩阈值。"
+                : state.usedPercent >= 78
+                    ? "\n已达到78%自动压缩阈值。"
+                    : "\n达到78%时会自动压缩模型请求背景。");
     MessageDialog.show("背景信息窗口", message, "知道了");
   }
 

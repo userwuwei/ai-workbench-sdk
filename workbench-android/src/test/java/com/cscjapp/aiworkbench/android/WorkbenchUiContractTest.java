@@ -181,6 +181,21 @@ public final class WorkbenchUiContractTest {
   }
 
   @Test
+  public void contextUsageUsesTheFinalOutboundProjection() throws Exception {
+    String activity =
+        read("src/main/java/com/cscjapp/aiworkbench/android/AIWorkbenchActivity.java");
+    String viewModel =
+        read("src/main/java/com/cscjapp/aiworkbench/android/WorkbenchViewModel.java");
+    String refresh = methodBody(viewModel, "private void refreshContextUsage");
+
+    assertTrue(refresh.contains("engine.requestContextUsage()"));
+    assertTrue(!refresh.contains("engine.messages()"));
+    assertTrue(activity.contains("percent >= 78"));
+    assertTrue(activity.contains("percent >= 88"));
+    assertTrue(activity.contains("上轮缓存命中"));
+  }
+
+  @Test
   public void auraOptimizationPreservesVisualContractAndAllocatesOutsideDraw() throws Exception {
     String aura =
         read(

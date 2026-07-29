@@ -12,10 +12,14 @@ public final class AgentEnginePauseResumeTest {
   public void pausesBeforeTwentyFirstRequestAndResumesSameRunWithoutUserMessage() {
     AtomicInteger requests = new AtomicInteger();
     AtomicInteger toolExecutions = new AtomicInteger();
+    AtomicReference<List<AgentMessage>> twentiethRequest = new AtomicReference<>();
+    AtomicReference<List<AgentMessage>> twentyFirstRequest = new AtomicReference<>();
     LifecyclePolicy lifecycle = new LifecyclePolicy();
     ModelGateway gateway =
         (request, observer) -> {
           int current = requests.incrementAndGet();
+          if (current == 20) twentiethRequest.set(request.messages());
+          if (current == 21) twentyFirstRequest.set(request.messages());
           if (current == 22) {
             observer.onComplete(finalResponse("done"));
           } else {
@@ -55,6 +59,12 @@ public final class AgentEnginePauseResumeTest {
     assertEquals("done", observer.finalText.get());
     assertEquals(1, userMessageCount(engine.messages()));
     assertEquals(22, toolMessageCount(engine.messages(), "step"));
+    assertNotNull(twentiethRequest.get());
+    assertNotNull(twentyFirstRequest.get());
+    assertTrue(twentyFirstRequest.get().size() > twentiethRequest.get().size());
+    for (int index = 0; index < twentiethRequest.get().size(); index++) {
+      assertSame(twentiethRequest.get().get(index), twentyFirstRequest.get().get(index));
+    }
     assertEquals(1, lifecycle.finishedStates.size());
     assertEquals("task_completed", lifecycle.finishedStates.get(0));
     assertEquals(lifecycle.startedRunIds.get(0), lifecycle.finishedRunIds.get(0));

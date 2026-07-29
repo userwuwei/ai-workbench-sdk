@@ -9,6 +9,7 @@ import com.cscjapp.aiworkbench.core.AgentToolCall;
 import com.cscjapp.aiworkbench.core.ModelGateway;
 import com.cscjapp.aiworkbench.core.ModelRequest;
 import com.cscjapp.aiworkbench.core.ModelResponse;
+import com.cscjapp.aiworkbench.core.ModelUsage;
 import com.cscjapp.aiworkbench.core.ModelStreamDelta;
 import com.cscjapp.aiworkbench.core.ModelStreamObserver;
 import com.cscjapp.aiworkbench.core.ToolCallStreamDelta;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MediaType;
@@ -76,10 +78,38 @@ public final class OpenAIModelGateway implements ModelGateway {
       observer.onError(error);
       return Cancellable.NONE;
     }
-    JsonObject body = buildRequest(modelRequest);
-    String requestJson = gson.toJson(body);
     String url = chatUrl(endpoint.baseUrl());
+    String requestJson = gson.toJson(buildRequest(modelRequest, true));
     logRequest(modelRequest, url, requestIndex, requestJson.length());
+    AtomicBoolean terminal = new AtomicBoolean();
+    AtomicReference<Call> activeCall = new AtomicReference<>();
+    enqueue(
+        modelRequest,
+        observer,
+        endpoint,
+        url,
+        startedAt,
+        requestIndex,
+        true,
+        terminal,
+        activeCall);
+    return () -> {
+      Call call = activeCall.get();
+      if (call != null) call.cancel();
+    };
+  }
+
+  private void enqueue(
+      ModelRequest modelRequest,
+      ModelStreamObserver observer,
+      ModelEndpoint endpoint,
+      String url,
+      long startedAt,
+      int requestIndex,
+      boolean includeUsage,
+      AtomicBoolean terminal,
+      AtomicReference<Call> activeCall) {
+    String requestJson = gson.toJson(buildRequest(modelRequest, includeUsage));
     Request.Builder request =
         new Request.Builder()
             .url(url)
@@ -98,7 +128,7 @@ public final class OpenAIModelGateway implements ModelGateway {
       }
     }
     Call call = client.newCall(request.build());
-    AtomicBoolean terminal = new AtomicBoolean();
+    activeCall.set(call);
     call.enqueue(
         new Callback() {
           @Override
@@ -114,6 +144,23 @@ public final class OpenAIModelGateway implements ModelGateway {
             try (Response closeable = response) {
               if (!response.isSuccessful() || response.body() == null) {
                 String detail = response.body() == null ? "" : response.body().string();
+                if (includeUsage
+                    && response.code() == 400
+                    && unsupportedUsageOption(detail)
+                    && !terminal.get()) {
+                  logStream(requestIndex, "usage_fallback", "retry_without_stream_options=true");
+                  enqueue(
+                      modelRequest,
+                      observer,
+                      endpoint,
+                      url,
+                      startedAt,
+                      requestIndex,
+                      false,
+                      terminal,
+                      activeCall);
+                  return;
+                }
                 throw new IOException("模型请求失败 HTTP " + response.code() + safeDetail(detail));
               }
               String contentType = response.header("Content-Type", "");
@@ -151,14 +198,22 @@ public final class OpenAIModelGateway implements ModelGateway {
             }
           }
         });
-    return call::cancel;
   }
 
   private JsonObject buildRequest(ModelRequest request) {
+    return buildRequest(request, true);
+  }
+
+  private JsonObject buildRequest(ModelRequest request, boolean includeUsage) {
     JsonObject root = new JsonObject();
     root.addProperty("model", request.endpoint().modelId());
     root.addProperty("stream", true);
     root.addProperty("temperature", request.endpoint().temperature());
+    if (includeUsage) {
+      JsonObject streamOptions = new JsonObject();
+      streamOptions.addProperty("include_usage", true);
+      root.add("stream_options", streamOptions);
+    }
     JsonArray messages = new JsonArray();
     for (AgentMessage message : request.messages()) messages.add(messageJson(message));
     root.add("messages", messages);
@@ -227,6 +282,7 @@ public final class OpenAIModelGateway implements ModelGateway {
     long toolArgumentChars = 0L;
     boolean firstDeltaLogged = false;
     boolean doneReceived = false;
+    ModelUsage usage = ModelUsage.UNKNOWN;
     int ignoredHeartbeatCount = 0;
     BufferedReader reader =
         new BufferedReader(
@@ -265,7 +321,10 @@ public final class OpenAIModelGateway implements ModelGateway {
         ignoredHeartbeatCount++;
         continue;
       }
-      JsonArray choices = parsed.getAsJsonObject().getAsJsonArray("choices");
+      JsonObject event = parsed.getAsJsonObject();
+      ModelUsage eventUsage = parseUsage(event.get("usage"));
+      if (eventUsage.known()) usage = eventUsage;
+      JsonArray choices = event.getAsJsonArray("choices");
       if (choices == null || choices.size() == 0) continue;
       JsonObject choice = choices.get(0).getAsJsonObject();
       finishReason = string(choice, "finish_reason", finishReason);
@@ -372,7 +431,8 @@ public final class OpenAIModelGateway implements ModelGateway {
           startedAt,
           requestIndex,
           model);
-      observer.onComplete(new ModelResponse(content.toString(), finishReason, calls));
+      logUsage(requestIndex, model, usage);
+      observer.onComplete(new ModelResponse(content.toString(), finishReason, calls, usage));
     }
   }
 
@@ -384,6 +444,7 @@ public final class OpenAIModelGateway implements ModelGateway {
       int requestIndex,
       String model) {
     JsonObject root = JsonParser.parseString(raw).getAsJsonObject();
+    ModelUsage usage = parseUsage(root.get("usage"));
     JsonArray choices = root.getAsJsonArray("choices");
     if (choices == null || choices.size() == 0) {
       throw new IllegalArgumentException("模型响应缺少 choices");
@@ -424,8 +485,71 @@ public final class OpenAIModelGateway implements ModelGateway {
       List<AgentToolCall> toolCalls = buildCalls(builders);
       logResponse(
           content, reasoning, finishReason, toolCalls, startedAt, requestIndex, model);
-      observer.onComplete(new ModelResponse(content, finishReason, toolCalls));
+      logUsage(requestIndex, model, usage);
+      observer.onComplete(new ModelResponse(content, finishReason, toolCalls, usage));
     }
+  }
+
+  private void logUsage(int requestIndex, String model, ModelUsage usage) {
+    if (usage == null || !usage.known()) return;
+    log(
+        "model_usage",
+        "[模型用量][request="
+            + requestIndex
+            + "][model="
+            + model
+            + "] input="
+            + usage.inputTokens()
+            + ",cached="
+            + usage.cachedTokens()
+            + ",uncached="
+            + usage.uncachedTokens()
+            + ",cached_percent="
+            + usage.cachedPercent()
+            + ",output="
+            + usage.outputTokens()
+            + ",total="
+            + usage.totalTokens());
+  }
+
+  private static ModelUsage parseUsage(JsonElement raw) {
+    if (raw == null || !raw.isJsonObject()) return ModelUsage.UNKNOWN;
+    JsonObject usage = raw.getAsJsonObject();
+    long input = firstLong(usage, "prompt_tokens", "input_tokens");
+    long output = firstLong(usage, "completion_tokens", "output_tokens");
+    long total = firstLong(usage, "total_tokens");
+    long cached = nestedLong(usage, "prompt_tokens_details", "cached_tokens");
+    if (cached < 0L) cached = nestedLong(usage, "input_tokens_details", "cached_tokens");
+    if (cached < 0L) {
+      cached = firstLong(
+          usage, "prompt_cache_hit_tokens", "cached_tokens", "cache_read_input_tokens");
+    }
+    return new ModelUsage(input, cached, output, total);
+  }
+
+  private static long nestedLong(JsonObject source, String objectKey, String valueKey) {
+    return source != null && source.has(objectKey) && source.get(objectKey).isJsonObject()
+        ? firstLong(source.getAsJsonObject(objectKey), valueKey) : -1L;
+  }
+
+  private static long firstLong(JsonObject source, String... keys) {
+    if (source == null) return -1L;
+    for (String key : keys) {
+      try {
+        if (source.has(key) && !source.get(key).isJsonNull()) return source.get(key).getAsLong();
+      } catch (RuntimeException ignored) {
+      }
+    }
+    return -1L;
+  }
+
+  private static boolean unsupportedUsageOption(String detail) {
+    String value = detail == null ? "" : detail.toLowerCase();
+    return (value.contains("stream_options") || value.contains("include_usage"))
+        && (value.contains("unknown")
+            || value.contains("unsupported")
+            || value.contains("not support")
+            || value.contains("unrecognized"));
   }
 
   private void logResponse(

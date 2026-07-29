@@ -67,6 +67,65 @@ public class OpenAIModelGatewayTest {
   }
 
   @Test
+  public void requestsAndParsesOptionalCachedTokenUsage() throws Exception {
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "text/event-stream")
+            .setBody(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                    + "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":20,\"total_tokens\":1020,\"prompt_tokens_details\":{\"cached_tokens\":800}}}\n\n"
+                    + "data: [DONE]\n\n"));
+    CountDownLatch latch = new CountDownLatch(1);
+    List<ModelResponse> responses = new ArrayList<>();
+
+    new OpenAIModelGateway().stream(request(), new ModelStreamObserver() {
+      public void onDelta(String content, String reasoning) {}
+      public void onComplete(ModelResponse response) {
+        responses.add(response);
+        latch.countDown();
+      }
+      public void onError(Throwable error) { latch.countDown(); }
+    });
+
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertEquals(1000L, responses.get(0).usage().inputTokens());
+    assertEquals(800L, responses.get(0).usage().cachedTokens());
+    assertEquals(200L, responses.get(0).usage().uncachedTokens());
+    assertEquals(80, responses.get(0).usage().cachedPercent());
+    RecordedRequest recorded = server.takeRequest(3, TimeUnit.SECONDS);
+    assertNotNull(recorded);
+    assertTrue(recorded.getBody().readUtf8().contains("\"include_usage\":true"));
+  }
+
+  @Test
+  public void retriesWithoutUsageOptionWhenCompatibleProviderRejectsIt() throws Exception {
+    server.enqueue(new MockResponse().setResponseCode(400)
+        .setBody("{\"error\":\"unknown field stream_options\"}"));
+    server.enqueue(new MockResponse()
+        .setHeader("Content-Type", "text/event-stream")
+        .setBody("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+            + "data: [DONE]\n\n"));
+    CountDownLatch latch = new CountDownLatch(1);
+    List<ModelResponse> responses = new ArrayList<>();
+
+    new OpenAIModelGateway().stream(request(), new ModelStreamObserver() {
+      public void onDelta(String content, String reasoning) {}
+      public void onComplete(ModelResponse response) {
+        responses.add(response);
+        latch.countDown();
+      }
+      public void onError(Throwable error) { latch.countDown(); }
+    });
+
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertEquals("ok", responses.get(0).content());
+    RecordedRequest first = server.takeRequest(3, TimeUnit.SECONDS);
+    RecordedRequest second = server.takeRequest(3, TimeUnit.SECONDS);
+    assertTrue(first.getBody().readUtf8().contains("stream_options"));
+    assertFalse(second.getBody().readUtf8().contains("stream_options"));
+  }
+
+  @Test
   public void repairsOnlyOneTrailingToolArgumentBrace() {
     OpenAIModelGateway gateway = new OpenAIModelGateway();
 

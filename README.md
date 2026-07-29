@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.18'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.19'
 }
 ```
 

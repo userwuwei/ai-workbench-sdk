@@ -18,6 +18,7 @@ public final class AgentEngine implements Cancellable {
   private final PromptComposer prompts = new PromptComposer();
   private final List<AgentMessage> messages = new ArrayList<>();
   private final List<ToolResult> evidence = new ArrayList<>();
+  private final StableAgentRequestHistory requestHistory = new StableAgentRequestHistory();
   private final Executor executor;
   private final String sessionId, workspaceId;
   private volatile boolean deepThinking;
@@ -100,10 +101,16 @@ public final class AgentEngine implements Cancellable {
   public synchronized void restoreMessages(List<AgentMessage> restored) {
     messages.clear();
     messages.addAll(AgentHistory.sanitize(restored));
+    requestHistory.reset(messages, "");
   }
 
   public synchronized List<AgentMessage> messages() {
     return Collections.unmodifiableList(new ArrayList<>(messages));
+  }
+
+  /** Returns the exact estimated context selected for the latest outbound request. */
+  public synchronized RequestContextUsage requestContextUsage() {
+    return requestHistory.latestUsage();
   }
 
   public Cancellable submit(String demand, AgentObserver o) {
@@ -139,6 +146,7 @@ public final class AgentEngine implements Cancellable {
                 messages.set(0, AgentMessage.system(system));
               else messages.add(0, AgentMessage.system(system));
               messages.add(AgentMessage.user(demand));
+              requestHistory.reset(messages, demand);
             }
             round(demand, o, 0, runId);
           } catch (Throwable t) {
@@ -159,17 +167,19 @@ public final class AgentEngine implements Cancellable {
       return;
     }
     if (pauseBeforeRound(demand, o, n, runId)) return;
-    o.onState("model_running");
     ModelRequest req;
     synchronized (this) {
       List<ToolSpec> selectedTools = selectTools(n, runId);
+      StableAgentRequestHistory.Projection projection =
+          requestHistory.prepare(messages, selectedTools, demand);
       req =
           new ModelRequest(
               endpoint,
-              AgentHistory.forModelRequest(messages, 80, 120000),
+              projection.messages,
               selectedTools,
               deepThinking);
     }
+    o.onState("model_running");
     active =
         gateway.stream(
             req,
@@ -193,6 +203,7 @@ public final class AgentEngine implements Cancellable {
               public void onComplete(ModelResponse response) {
                 if (!isActive(runId)) return;
                 synchronized (AgentEngine.this) {
+                  requestHistory.recordUsage(response.usage());
                   messages.add(AgentMessage.assistant(response.content(), response.toolCalls()));
                 }
                 if (!response.toolCalls().isEmpty()) {

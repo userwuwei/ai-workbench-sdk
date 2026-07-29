@@ -19,6 +19,8 @@ import com.cscjapp.aiworkbench.core.AgentObserver;
 import com.cscjapp.aiworkbench.core.AgentToolCall;
 import com.cscjapp.aiworkbench.core.ModelStreamDelta;
 import com.cscjapp.aiworkbench.core.ModelGateway;
+import com.cscjapp.aiworkbench.core.ModelUsage;
+import com.cscjapp.aiworkbench.core.RequestContextUsage;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -60,18 +62,27 @@ final class WorkbenchViewModel extends ViewModel {
     final long messageTokens;
     final long toolsTokens;
     final long remainingTokens;
+    final long cachedTokens;
+    final long uncachedTokens;
     final int usedPercent;
+    final int cachedPercent;
+    final String projectionMode;
     final boolean restored;
 
     ContextUsageState(long usedTokens, long totalTokens, long messageTokens, long toolsTokens,
+        long cachedTokens, long uncachedTokens, int cachedPercent, String projectionMode,
         boolean restored) {
       this.usedTokens = Math.max(0L, usedTokens);
       this.totalTokens = Math.max(1L, totalTokens);
       this.messageTokens = Math.max(0L, messageTokens);
       this.toolsTokens = Math.max(0L, toolsTokens);
       this.remainingTokens = Math.max(0L, this.totalTokens - this.usedTokens);
+      this.cachedTokens = cachedTokens;
+      this.uncachedTokens = uncachedTokens;
       this.usedPercent =
           Math.max(0, Math.min(100, Math.round(this.usedTokens * 100f / this.totalTokens)));
+      this.cachedPercent = cachedPercent;
+      this.projectionMode = projectionMode == null ? "append_only" : projectionMode;
       this.restored = restored;
     }
   }
@@ -1314,47 +1325,22 @@ final class WorkbenchViewModel extends ViewModel {
 
   private void refreshContextUsage() {
     if (engine == null) return;
-    StringBuilder messagesText = new StringBuilder();
-    for (AgentMessage message : engine.messages()) {
-      messagesText.append(message.role()).append(':').append(message.content()).append('\n');
-      for (AgentToolCall call : message.toolCalls()) {
-        messagesText.append(call.name()).append(':').append(call.arguments().asMap()).append('\n');
-      }
+    RequestContextUsage usage = engine.requestContextUsage();
+    if (usage == null) {
+      contextUsage.postValue(null);
+      return;
     }
-    StringBuilder toolsText = new StringBuilder();
-    if (definition != null && definition.tools() != null) {
-      definition.tools().forEach(tool -> {
-        if (tool == null || tool.spec() == null) return;
-        toolsText.append(tool.spec().name()).append(':')
-            .append(tool.spec().description()).append(':')
-            .append(tool.spec().inputSchema()).append('\n');
-      });
-    }
-    long messageTokens = estimateTokens(messagesText);
-    long toolsTokens = estimateTokens(toolsText);
+    ModelUsage provider = usage.providerUsage();
     contextUsage.postValue(new ContextUsageState(
-        messageTokens + toolsTokens, 258_000L, messageTokens, toolsTokens, restoredSession));
-  }
-
-  private static long estimateTokens(CharSequence text) {
-    if (text == null || text.length() == 0) return 0L;
-    double tokens = 0d;
-    for (int i = 0; i < text.length(); i++) {
-      char c = text.charAt(i);
-      if (c <= 0x007F) tokens += Character.isWhitespace(c) ? 0.15d : 0.28d;
-      else if (isCjk(c)) tokens += 1.0d;
-      else tokens += 0.65d;
-    }
-    return (long) Math.ceil(tokens);
-  }
-
-  private static boolean isCjk(char c) {
-    Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
-    return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
-        || block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS_EXTENSION_A
-        || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS
-        || block == Character.UnicodeBlock.CJK_SYMBOLS_AND_PUNCTUATION
-        || block == Character.UnicodeBlock.HALFWIDTH_AND_FULLWIDTH_FORMS;
+        usage.inputTokens(),
+        usage.maximumInputTokens(),
+        usage.messageTokens(),
+        usage.toolTokens(),
+        provider.cachedTokens(),
+        provider.uncachedTokens(),
+        provider.cachedPercent(),
+        usage.projectionMode(),
+        restoredSession));
   }
 
   private void postItems(boolean persist) {

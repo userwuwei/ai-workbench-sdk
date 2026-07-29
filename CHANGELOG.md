@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.19
+
+- 模型请求上下文采用 258k 输入预算，在 78%/88% 高水位按完整工具事务进行非破坏性软/强压缩；canonical history、revision、evidence 和验证状态保持不变。
+- 同一压缩阶段内已发送事务冻结并只在尾部追加，移除 80 消息/120k 字符的常态滑窗及 latest write/full-read 的历史追溯改写；压缩后建立新的稳定缓存前缀。
+- OpenAI 兼容网关可记录 input/cached/uncached/output tokens，不支持 `stream_options.include_usage` 的服务自动回退；Android 上下文 UI 展示最终请求投影和 78%/88% 状态。
+
 ## 2.0.18
 
 - `quality_review` 在真实验证齐全后与 `recommended_next_action` 同轮可见，并提供不接收 `path` 的紧凑质量结论形状。
