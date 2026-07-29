@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.18
+
+- `quality_review` 在真实验证齐全后与 `recommended_next_action` 同轮可见，并提供不接收 `path` 的紧凑质量结论形状。
+- 模型只需提交 `passed`、`blocking_gaps` 与 `minimal_version_risk`；计划质量模式和 Browser 行为证据继续由 SDK 注入。
+- 过早或非法质量调用不再污染验证状态；真实质量 blocker 进入产品修复，缺少质量证据的重复 finalize 明确不可原样重试。
+
 ## 2.0.17
 
 - Browser Test 在 SDK 预检、规范化 Hash 与宿主执行之前统一解析入口路径；缺省、相对和绝对入口指向同一文件时产生相同执行 Hash。

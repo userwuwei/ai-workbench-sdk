@@ -172,6 +172,9 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("禁止修改产品迎合测试"));
     assertTrue(prompt.contains(
         "environment_failure 不能通过读取源码、修改产品、replan 或重复 finalize_task 解决"));
+    assertTrue(prompt.contains(
+        "recommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据"));
+    assertTrue(prompt.contains("不要读取源码、replan 或传入 path"));
   }
 
   @Test
@@ -201,6 +204,109 @@ public final class CodeAgentPresetTest {
     assertEquals("invalid_tool_arguments", output.get().errorCode());
     assertTrue(output.get().retryable());
     assertFalse(((ManagedCodePlanCoordinator) preset.toolPolicies().get(0)).hasPlan());
+  }
+
+  @Test
+  public void qualityReviewIsVisibleWithMinimalArgumentsAndInvalidCallsDoNotChangeState() {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("syntax_check", "browser_test")
+        .requireQualityReview("code_generation")
+        .build();
+    CodeLanguageProfile qualityProfile = CodeLanguageProfile.builder("quality")
+        .verificationContract(contract)
+        .build();
+    CodeAgentPreset preset = CodeAgentPreset.builder(qualityProfile)
+        .workspace(workspace)
+        .languageTools(Arrays.asList(tool("syntax_check"), tool("browser_test")))
+        .build();
+    ManagedCodePlanCoordinator coordinator =
+        (ManagedCodePlanCoordinator) preset.toolPolicies().get(0);
+    AgentRunContext run = new AgentRunContext(324L, "s", "workspace", "task");
+    coordinator.onRunStarted(run);
+    Map<String, Object> implement = step(
+        "implement", "备选文件未映射", "implement", "search_replace");
+    implement.put("file_refs", Collections.singletonList("optional.txt"));
+    coordinator.acceptPlan(
+        map(
+            "goal", "验证质量收尾",
+            "quality_mode", "interface_product",
+            "planned_files", Collections.singletonList(
+                map("path", "optional.txt", "action", "create")),
+            "steps", Arrays.asList(
+                implement,
+                step("verify", "验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "质量", "quality", "quality_review"))));
+
+    AgentTool quality = find(preset.tools(), CodeAgentToolNames.QUALITY_REVIEW);
+    ToolResult premature = execute(
+        quality, new ToolArguments(map("path", "main.txt")));
+    assertTrue(premature.isSuccess());
+    assertEquals(false, premature.data().get("passed"));
+    assertEquals("syntax_check", premature.data().get("recommended_next_action"));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "syntax_check", ToolResult.success(map("passed", true)));
+    ToolArguments browserArguments = new ToolArguments(
+        map("scenarios", Collections.singletonList(staticScenario("smoke"))));
+    ToolResult browser = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "browser_test",
+        browserArguments,
+        passingBrowser("smoke"));
+    assertEquals(CodeAgentToolNames.QUALITY_REVIEW,
+        browser.data().get("recommended_next_action"));
+
+    List<ToolSpec> registered = new ArrayList<>();
+    for (AgentTool tool : preset.tools()) registered.add(tool.spec());
+    Set<String> selected = selectedNames(coordinator.selectTools(
+        new AgentRoundContext(run, 1), registered));
+    assertTrue(selected.contains(CodeAgentToolNames.QUALITY_REVIEW));
+
+    ToolResult invalid = execute(
+        quality, new ToolArguments(map("path", "main.txt")));
+    assertEquals(ToolResult.Status.ERROR, invalid.status());
+    assertEquals("invalid_tool_arguments", invalid.errorCode());
+    assertEquals(CodeAgentToolNames.QUALITY_REVIEW,
+        invalid.data().get("recommended_next_action"));
+    assertTrue(invalid.message().contains("不要传 path"));
+    ToolResult ambiguousFailure = execute(
+        quality,
+        new ToolArguments(
+            map(
+                "passed", false,
+                "blocking_gaps", Collections.emptyList(),
+                "minimal_version_risk", false)));
+    assertEquals("invalid_tool_arguments", ambiguousFailure.errorCode());
+    assertTrue(ambiguousFailure.message().contains("必须给出 blocking_gaps"));
+    assertTrue(coordinator.hasCurrentEvidence("syntax_check"));
+    assertTrue(coordinator.hasCurrentEvidence("browser_test"));
+    assertFalse(coordinator.hasCurrentEvidence(CodeAgentToolNames.QUALITY_REVIEW));
+    assertTrue(selectedNames(coordinator.selectTools(
+        new AgentRoundContext(run, 2), registered))
+        .contains(CodeAgentToolNames.QUALITY_REVIEW));
+
+    ToolResult accepted = execute(
+        quality,
+        new ToolArguments(
+            map(
+                "passed", true,
+                "blocking_gaps", Collections.emptyList(),
+                "minimal_version_risk", false)));
+    assertTrue(accepted.isSuccess());
+    assertEquals(true, accepted.data().get("passed"));
+    assertEquals("interface_product", accepted.data().get("quality_mode"));
+    assertTrue(coordinator.hasCurrentEvidence(CodeAgentToolNames.QUALITY_REVIEW));
+    ToolPolicyDecision finalize = decision(
+        coordinator,
+        new ToolInvocation(
+            "finalize",
+            find(preset.tools(), CodeAgentToolNames.FINALIZE_TASK),
+            new ToolArguments(
+                map(
+                    "status", "completed",
+                    "completion_type", "code_generation",
+                    "summary", "done"))));
+    assertEquals(ToolPolicyDecision.Kind.PROCEED, finalize.kind());
   }
 
   @Test
@@ -570,6 +676,8 @@ public final class CodeAgentPresetTest {
         coordinator, new ToolInvocation("finalize-before-quality", finalize, completed));
     assertEquals("finalize_precondition_failed", beforeQuality.result().errorCode());
     assertEquals("quality_review", beforeQuality.result().data().get("missing_stage"));
+    assertFalse(beforeQuality.result().retryable());
+    assertTrue(beforeQuality.result().message().contains("重复 finalize_task 不会改变状态"));
 
     AgentTool quality = tool(CodeAgentToolNames.QUALITY_REVIEW);
     ToolArguments qualityArguments = new ToolArguments(
@@ -1342,9 +1450,16 @@ public final class CodeAgentPresetTest {
     Map<?, ?> schemaProperties = (Map<?, ?>) quality.inputSchema().get("properties");
     assertTrue(schemaProperties.containsKey("passed"));
     assertTrue(schemaProperties.containsKey("review_target"));
+    assertTrue(schemaProperties.containsKey("against_quality_bar"));
+    assertTrue(schemaProperties.containsKey("quality_mode"));
     assertTrue(schemaProperties.containsKey("dimension_reviews"));
     assertTrue(schemaProperties.containsKey("evidence_checked"));
     assertTrue(schemaProperties.containsKey("runtime_metric"));
+    assertEquals(
+        Arrays.asList("passed", "blocking_gaps", "minimal_version_risk"),
+        quality.inputSchema().get("required"));
+    assertTrue(quality.description().contains("不接收 path"));
+    assertTrue(quality.description().contains("\"passed\":true"));
     Map<?, ?> planProperties =
         (Map<?, ?>)
             find(preset.tools(), CodeAgentToolNames.PLAN_TASK)
@@ -1353,6 +1468,8 @@ public final class CodeAgentPresetTest {
                 .get("properties");
     assertTrue(planProperties.containsKey("task_type"));
     assertTrue(planProperties.containsKey("implementation_shape"));
+    assertTrue(String.valueOf(((Map<?, ?>) planProperties.get("planned_files"))
+        .get("description")).contains("不得填写备选文件"));
   }
 
   @Test
@@ -2213,13 +2330,14 @@ public final class CodeAgentPresetTest {
     assertFalse(duringQuality.contains("create_file"));
     assertFalse(duringQuality.contains("rewrite"));
 
-    coordinator.recordAndDecorate(
+    ToolResult qualityFailure = coordinator.recordAndDecorate(
         generation,
         CodeAgentToolNames.QUALITY_REVIEW,
         ToolResult.success(map(
             "passed", false,
             "blocking_gaps", Collections.singletonList("需要修复视觉问题"),
             "minimal_version_risk", false)));
+    assertEquals("search_replace", qualityFailure.data().get("recommended_next_action"));
     Set<String> afterQualityFailure = selectedNames(coordinator.selectTools(round, registered));
     assertTrue(afterQualityFailure.contains("search_replace"));
     assertFalse(afterQualityFailure.contains(CodeAgentToolNames.QUALITY_REVIEW));
@@ -3637,6 +3755,23 @@ public final class CodeAgentPresetTest {
         return Cancellable.NONE;
       }
     };
+  }
+
+  private static ToolResult execute(AgentTool tool, ToolArguments arguments) {
+    AtomicReference<ToolResult> result = new AtomicReference<>();
+    tool.execute(
+        null,
+        arguments,
+        new ToolCallback() {
+          @Override
+          public void onProgress(String stage, long current, long total, String message) {}
+
+          @Override
+          public void onComplete(ToolResult value) {
+            result.set(value);
+          }
+        });
+    return result.get();
   }
 
   private static ToolPolicyDecision decision(

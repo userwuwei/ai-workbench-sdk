@@ -162,6 +162,7 @@ public final class CodeAgentPreset {
 
   private static String workflowInstruction() {
     return "\nrecommended_next_action 是当前首选动作，不是其他安全工具的执行禁令；已知仍有计划内修改时，先完成当前编辑批次，再调用 syntax_check。"
+        + "\nrecommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据提交 passed、blocking_gaps、minimal_version_risk；不要读取源码、replan 或传入 path。"
         + "\n同一文件中已经确定的修改优先合并到一次 search_replace.replacements[]；受输出大小或独立锚点限制时，允许在 syntax_check 前连续执行多次 search_replace。"
         + "\n只有测试根因时优先修正测试，禁止修改产品迎合错误断言。任何新写入都会使旧 syntax_check、browser_test 和 quality_review 证据失效，必须基于最新 revision 重新验证。";
   }

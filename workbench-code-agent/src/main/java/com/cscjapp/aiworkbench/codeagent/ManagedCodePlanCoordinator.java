@@ -164,6 +164,16 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
+    // Completion evidence is authoritative even when an advisory implementation step did not
+    // map cleanly to history. Keep the recommended quality tool visible with its full schema.
+    if (verificationEvidenceReady("code_generation")
+        && qualityEvidenceRequired("code_generation")
+        && !hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)
+        && !CodeAgentToolNames.QUALITY_REVIEW.equals(verificationFailureTool)) {
+      allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
+      return ToolSelection.onlyNames(registeredTools, allowed);
+    }
+
     PlanStep pendingImplementation = currentStep();
     if (pendingImplementation != null
         && "implement".equals(pendingImplementation.phase)
@@ -193,15 +203,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           || hasReadyReadCoverage()) {
         addSearchReplace(allowed);
       }
-      return ToolSelection.onlyNames(registeredTools, allowed);
-    }
-
-    // Completion evidence is authoritative even when an advisory plan step did not map cleanly
-    // to the tool history. Once all real verification evidence exists, keep quality reachable.
-    if (verificationEvidenceReady("code_generation")
-        && qualityEvidenceRequired("code_generation")
-        && !hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)) {
-      allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
@@ -268,12 +269,16 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         boolean invalidBrowserEnvironment = "browser_test".equals(missingStage)
             && "browser_test".equals(verificationFailureTool)
             && "environment_failure".equals(verificationFailureKind);
+        boolean missingQuality = CodeAgentToolNames.QUALITY_REVIEW.equals(missingStage);
+        String message = invalidBrowserEnvironment
+            ? "browser_test 已执行但环境结果无效，未形成可信完成证据；原样重复 finalize_task 不会改变状态，请先按 recommended_next_action 修正验证调用。"
+            : missingQuality
+                ? "quality_review 尚未形成有效证据；重复 finalize_task 不会改变状态，请执行 recommended_next_action=quality_review。"
+                : "完成证据尚未齐全，请先执行当前缺失阶段。";
         callback.resolve(ToolPolicyDecision.error(
             "finalize_precondition_failed",
-            invalidBrowserEnvironment
-                ? "browser_test 已执行但环境结果无效，未形成可信完成证据；原样重复 finalize_task 不会改变状态，请先按 recommended_next_action 修正验证调用。"
-                : "完成证据尚未齐全，请先执行当前缺失阶段。",
-            !invalidBrowserEnvironment,
+            message,
+            !invalidBrowserEnvironment && !missingQuality,
             preconditionData("finalize_task", missingStage)));
       } else {
         callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
@@ -393,7 +398,11 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (capturedGeneration != generation || result == null) return result;
     ToolResult effective = normalizeManagedResult(
         toolName, arguments == null ? ToolArguments.empty() : arguments, result);
-    if (!CodeAgentToolNames.PLAN_TASK.equals(toolName)) {
+    boolean nonEvidenceQualityAttempt = CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
+        && ((!effective.isSuccess()
+                && "invalid_tool_arguments".equals(effective.errorCode()))
+            || !verificationEvidenceReady("code_generation"));
+    if (!CodeAgentToolNames.PLAN_TASK.equals(toolName) && !nonEvidenceQualityAttempt) {
       record(toolName, arguments == null ? ToolArguments.empty() : arguments, effective);
     }
     boolean contractResult = hasPlan()
@@ -514,21 +523,22 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           break;
         }
       }
+      boolean explicitQualityGap = Boolean.TRUE.equals(data.get("minimal_version_risk"))
+          || !emptyValue(data.get("blocking_gaps"))
+          || !emptyValue(data.get("claimed_but_unsupported"));
       boolean accepted = missingVerification.isEmpty()
           && Boolean.TRUE.equals(data.get("passed"))
-          && !Boolean.TRUE.equals(data.get("minimal_version_risk"))
-          && emptyValue(data.get("blocking_gaps"))
-          && emptyValue(data.get("claimed_but_unsupported"));
+          && !explicitQualityGap;
       if (!accepted) {
         data.put("passed", false);
         if (!missingVerification.isEmpty() && emptyValue(data.get("blocking_gaps"))) {
           data.put("blocking_gaps", Collections.singletonList(
               "当前 revision 尚未完成 " + missingVerification));
         }
-        if (text(data.get("recommended_next_action")).isEmpty()) {
-          data.put("recommended_next_action",
-              missingVerification.isEmpty() ? "quality_review" : missingVerification);
-        }
+        data.put("recommended_next_action",
+            !missingVerification.isEmpty()
+                ? missingVerification
+                : explicitQualityGap ? "search_replace" : "quality_review");
       }
     }
     if (CodeAgentToolNames.FINALIZE_TASK.equals(toolName)

@@ -22,7 +22,9 @@ final class CodeMetaToolSchemas {
     result.add(
         spec(
             CodeAgentToolNames.QUALITY_REVIEW,
-            "根据需求、计划和真实工具证据提交结构化质量自查；有阻塞项时继续修改。",
+            "基于当前 syntax/browser 证据提交结构化质量结论，不读取文件且不接收 path。通过时使用 "
+                + "{\"passed\":true,\"blocking_gaps\":[],"
+                + "\"minimal_version_risk\":false}。",
             qualitySchema(),
             extensions));
     result.add(
@@ -95,7 +97,8 @@ final class CodeMetaToolSchemas {
     properties.put("purpose", limitedString("文件职责。", 120));
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", "array");
-    schema.put("description", "预计创建或修改的文件；已有文件仍必须使用编辑工具。");
+    schema.put("description",
+        "确定会创建或修改的交付文件；不得填写备选文件，已有文件仍必须使用编辑工具。");
     schema.put("items", objectSchema(properties, Collections.singletonList("path")));
     schema.put("maxItems", 8);
     return schema;
@@ -152,12 +155,7 @@ final class CodeMetaToolSchemas {
     properties.put("verification_summary", string("真实验证结果摘要。"));
     return objectSchema(
         properties,
-        Arrays.asList(
-            "against_quality_bar",
-            "quality_mode",
-            "passed",
-            "blocking_gaps",
-            "minimal_version_risk"));
+        Arrays.asList("passed", "blocking_gaps", "minimal_version_risk"));
   }
 
   private static Map<String, Object> finalizeSchema() {
