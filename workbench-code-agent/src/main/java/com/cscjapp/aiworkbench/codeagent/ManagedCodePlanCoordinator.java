@@ -265,10 +265,15 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if (completionType.isEmpty()) completionType = "code_generation";
       if (!completionEvidenceReady(completionType)) {
         String missingStage = nextCompletionAction(completionType);
+        boolean invalidBrowserEnvironment = "browser_test".equals(missingStage)
+            && "browser_test".equals(verificationFailureTool)
+            && "environment_failure".equals(verificationFailureKind);
         callback.resolve(ToolPolicyDecision.error(
             "finalize_precondition_failed",
-            "完成证据尚未齐全，请先执行当前缺失阶段。",
-            true,
+            invalidBrowserEnvironment
+                ? "browser_test 已执行但环境结果无效，未形成可信完成证据；原样重复 finalize_task 不会改变状态，请先按 recommended_next_action 修正验证调用。"
+                : "完成证据尚未齐全，请先执行当前缺失阶段。",
+            !invalidBrowserEnvironment,
             preconditionData("finalize_task", missingStage)));
       } else {
         callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
@@ -435,14 +440,20 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       String resultHash = text(data.get("test_plan_hash"));
       if (!invocationHash.isEmpty() && isSha256(resultHash)
           && !invocationHash.equals(resultHash)) {
+        String entryPath = text(data.get("entry_path"));
+        String failureReason =
+            "browser_test 执行参数与校验参数不一致；原样重试 browser_test 或 finalize_task 不会解决问题";
+        if (!entryPath.isEmpty()) {
+          failureReason += "，请使用当前解析入口重新提交: " + entryPath;
+        }
         data.put("passed", false);
         data.put("failure_kind", "environment_failure");
-        data.put("failure_reason", "browser_test 返回的测试 Hash 与调用参数不一致");
+        data.put("failure_reason", failureReason);
         data.put("recommended_next_action", "browser_test");
         markCoverageIncomplete(data);
         Map<String, Object> diagnostic = new LinkedHashMap<>();
         diagnostic.put("reason", data.get("failure_reason"));
-        diagnostic.put("internal_retry_exhausted", false);
+        diagnostic.put("internal_retry_exhausted", true);
         data.put("environment_diagnostic", diagnostic);
       }
       String currentHash = invocationHash.isEmpty() ? resultHash : invocationHash;

@@ -170,6 +170,8 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("同时存在 reading_brief 与 test_retry_brief"));
     assertTrue(prompt.contains("只有纯产品失败要求保持"));
     assertTrue(prompt.contains("禁止修改产品迎合测试"));
+    assertTrue(prompt.contains(
+        "environment_failure 不能通过读取源码、修改产品、replan 或重复 finalize_task 解决"));
   }
 
   @Test
@@ -892,6 +894,63 @@ public final class CodeAgentPresetTest {
     assertTrue(String.valueOf(rejected.data().get("validation_issues"))
         .contains("regression_plan_changed"));
     assertNull(coordinator.preflightResult("browser_test", original));
+  }
+
+  @Test
+  public void mismatchedBrowserHashExplainsRecoveryAndRejectsImmediateFinalizeRetry() {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("browser_test", CodeToolRole.VERIFY);
+    roles.put("finalize_task", CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().defaultRequiredEvidence("browser_test").build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(323L, "s", "workspace", "task"));
+    coordinator.acceptPlan(map(
+        "goal", "验证页面",
+        "steps", Collections.singletonList(
+            step("verify", "验证", "verify", "browser_test"))));
+    AgentTool finalize = tool("finalize_task");
+    ToolArguments completed =
+        new ToolArguments(map("status", "completed", "summary", "done"));
+
+    ToolPolicyDecision neverExecuted = decision(
+        coordinator, new ToolInvocation("finalize-before-browser", finalize, completed));
+    assertTrue(neverExecuted.result().retryable());
+    assertEquals("browser_test", neverExecuted.result().data().get("missing_stage"));
+
+    ToolArguments arguments = new ToolArguments(map(
+        "entry_path", "/workspace/index.html",
+        "goal", "验证页面",
+        "scenarios", Collections.singletonList(staticScenario("smoke"))));
+    String mismatchedHash = String.join("", Collections.nCopies(64, "f"));
+    Map<String, Object> resultData =
+        new LinkedHashMap<>(passingBrowserWithHash(mismatchedHash, "smoke").data());
+    resultData.put("entry_path", "/workspace/index.html");
+
+    ToolResult mismatch = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "browser_test",
+        arguments,
+        ToolResult.success(resultData));
+
+    assertEquals(false, mismatch.data().get("passed"));
+    assertEquals("environment_failure", mismatch.data().get("failure_kind"));
+    assertEquals("browser_test", mismatch.data().get("recommended_next_action"));
+    assertTrue(String.valueOf(mismatch.data().get("failure_reason"))
+        .contains("原样重试 browser_test 或 finalize_task 不会解决问题"));
+    assertTrue(String.valueOf(mismatch.data().get("failure_reason"))
+        .contains("/workspace/index.html"));
+    assertEquals(true, ((Map<?, ?>) mismatch.data().get("environment_diagnostic"))
+        .get("internal_retry_exhausted"));
+
+    ToolPolicyDecision invalidEvidence = decision(
+        coordinator, new ToolInvocation("finalize-after-environment", finalize, completed));
+    assertEquals("finalize_precondition_failed", invalidEvidence.result().errorCode());
+    assertFalse(invalidEvidence.result().retryable());
+    assertEquals("browser_test", invalidEvidence.result().data().get("missing_stage"));
+    assertTrue(invalidEvidence.result().message().contains("原样重复 finalize_task"));
   }
 
   @Test

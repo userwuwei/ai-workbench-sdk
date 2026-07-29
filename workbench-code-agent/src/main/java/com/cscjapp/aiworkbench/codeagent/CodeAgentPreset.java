@@ -156,6 +156,7 @@ public final class CodeAgentPreset {
         + "\nselector、状态 token 和表达式必须逐字来自当前 revision，禁止凭记忆猜测。false_to_true 的条件必须在干净页面 baseline 为 false；动作后的关闭、消失或复位使用 eventually_true。精确文本仅用于用户明确要求的文案；数值状态优先使用独立数字节点、ARIA 或 data-*。"
         + "\n每个 interaction check 必须描述动作后可观察的终态；‘可见且可点击’只能作为静态检查，不能用动作前已经成立的条件硬凑 false_to_true。"
         + "\nsyntax 推荐 browser_test 时不得为方便测试提前改变产品行为；只有不存在独立 reading_brief 产品根因时，test_plan_invalid/test_expectation_mismatch 才只修正测试并重提 browser_test。"
+        + "\nenvironment_failure 不能通过读取源码、修改产品、replan 或重复 finalize_task 解决；只修正验证调用并执行 recommended_next_action。"
         + "\n同时存在 reading_brief 与 test_retry_brief 时，只按 reading_brief 修复未被阻断的产品根因，禁止修改产品迎合测试；产品修复并通过 syntax_check 后，在下一次 browser_test 中修正 test_retry_brief 指出的测试问题。只有纯产品失败要求保持 actions、wait_for 和 expectations 语义及 Hash 不变回归。quality_review/finalize 的已验证行为只能来自 verified_behavior_evidence 和 action/checkpoint trace。";
   }
 
