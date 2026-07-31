@@ -214,7 +214,8 @@ public final class CodeAgentPreset {
         + multiRegion
         + "\n4. 成功写入已经建立当前 revision；写入后有 old 就直接 search_replace，没有 old 才补一次有界读取或一次 read_plan。"
         + "\n5. read_plan.coverage_summary.ready_for_edit=true 后默认编辑或验证；为 false 时只补充明确列出的 missing evidence，禁止猜测 old。"
-        + "\n6. 仅在首次接触小文件且确实需要全局理解时，才使用 path-only 完整 read_file。";
+        + "\n6. 仅在首次接触小文件且确实需要全局理解时，才使用 path-only 完整 read_file。"
+        + "\n7. 当 read_file 返回 recommended_next_action=read_plan 时，下一步直接调用一次 read_plan 补齐当前任务所需的剩余证据，不要继续对同一文件调用 read_file。";
   }
 
   private static boolean hasTool(List<? extends AgentTool> tools, String name) {

@@ -25,6 +25,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private final List<Evidence> evidence = new ArrayList<>();
   private final Map<String, Long> pathRevisions = new LinkedHashMap<>();
   private final Map<String, ReadCoverage> readCoverageByPath = new LinkedHashMap<>();
+  private final Map<String, Integer> boundedReadCounts = new LinkedHashMap<>();
   private final Map<String, String> createdFileBindings = new LinkedHashMap<>();
   private final Set<String> unresolvedWritePaths = new LinkedHashSet<>();
   private Map<String, Object> currentState = Collections.emptyMap();
@@ -87,6 +88,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     evidence.clear();
     pathRevisions.clear();
     readCoverageByPath.clear();
+    boundedReadCounts.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
@@ -114,6 +116,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     evidence.clear();
     pathRevisions.clear();
     readCoverageByPath.clear();
+    boundedReadCounts.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
@@ -415,17 +418,26 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (!CodeAgentToolNames.PLAN_TASK.equals(toolName) && !nonEvidenceQualityAttempt) {
       record(toolName, arguments == null ? ToolArguments.empty() : arguments, effective);
     }
+    int boundedReadCount = boundedReadCount(toolName, arguments, effective);
+    boolean recommendReadPlan = boundedReadCount >= 2;
     boolean contractResult = hasPlan()
         && ("browser_test".equals(toolName)
             || "verify_web_project".equals(toolName)
             || CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
             || CodeAgentToolNames.FINALIZE_TASK.equals(toolName));
     boolean recoverableRetry = hasPlan() && recoverableSearchReplaceFailure(toolName, effective);
-    if ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan()) return effective;
+    if (!recommendReadPlan
+        && ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan())) return effective;
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
-    if (stateChanged || contractResult) data.put("plan_state", state());
+    if (hasPlan() && (stateChanged || contractResult)) data.put("plan_state", state());
     if (contractResult) decorateManagedResult(toolName, data);
-    if (lightweightSmokeRepairLimitReached()) {
+    if (recommendReadPlan) {
+      data.put("same_file_bounded_read_count", boundedReadCount);
+      data.put("recommended_next_action", "read_plan");
+      data.put("message", appendMessage(
+          text(data.get("message")),
+          "同一 revision 的该文件已完成两次局部读取。下一步调用一次 read_plan 收集当前修改所需的剩余证据；不要继续对该文件分段调用 read_file。"));
+    } else if (lightweightSmokeRepairLimitReached()) {
       data.put("repair_limit_reached", true);
       data.put("recommended_next_action", CodeAgentToolNames.FINALIZE_TASK);
     } else if (syntaxPendingBeforeBrowser()) {
@@ -445,6 +457,43 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           effective.errorCode(), effective.message(), effective.retryable(), data);
     }
     return effective;
+  }
+
+  private int boundedReadCount(
+      String toolName, ToolArguments arguments, ToolResult result) {
+    if (!"read_file".equals(toolName)
+        || result == null
+        || !result.isSuccess()
+        || !result.data().containsKey("content")
+        || !boundedRead(arguments, result.data())) return 0;
+    String path = canonicalEvidenceFile(text(firstValue(result.data(), "resolved_path", "path")));
+    if (path.isEmpty() && arguments != null) {
+      path = canonicalEvidenceFile(text(arguments.get("path")));
+    }
+    if (path.isEmpty()) return 0;
+    String sourceRevision = text(result.data().get("revision"));
+    if (sourceRevision.isEmpty()) sourceRevision = currentSourceRevision(path);
+    if (sourceRevision.isEmpty()) return 0;
+    String key = path + "\n" + sourceRevision;
+    return boundedReadCounts.merge(key, 1, Integer::sum);
+  }
+
+  private static boolean boundedRead(ToolArguments arguments, Map<String, Object> data) {
+    if (Boolean.TRUE.equals(data.get("full_file"))) return false;
+    String mode = text(data.get("mode"));
+    if ("full_file".equals(mode) || "summary".equals(mode)) return false;
+    if (Boolean.FALSE.equals(data.get("full_file")) || !mode.isEmpty()) return true;
+    if (arguments == null) return false;
+    return positiveInt(arguments.get("start_line")) > 0
+        || positiveInt(arguments.get("end_line")) > 0
+        || !text(arguments.get("target_function")).isEmpty()
+        || !text(arguments.get("target_class")).isEmpty()
+        || !text(arguments.get("target_method")).isEmpty();
+  }
+
+  private static String appendMessage(String current, String addition) {
+    if (current == null || current.trim().isEmpty()) return addition;
+    return current.trim() + "\n" + addition;
   }
 
   /** Kept package-compatible for tests and integrations compiled against the V2 internals. */

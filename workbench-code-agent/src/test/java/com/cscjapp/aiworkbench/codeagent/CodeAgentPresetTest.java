@@ -143,6 +143,8 @@ public final class CodeAgentPresetTest {
     assertTrue(present.contains("已有逐字准确的 old 锚点时，直接编辑或验证"));
     assertTrue(present.contains("只调用一次 read_plan"));
     assertTrue(present.contains("禁止猜测行号"));
+    assertTrue(present.contains(
+        "当 read_file 返回 recommended_next_action=read_plan 时，下一步直接调用一次 read_plan"));
     assertFalse(present.contains("优先只传 path 使用 read_file 完整读取"));
     assertTrue(legacy.contains("优先只传 path 使用 read_file 完整读取"));
     assertFalse(legacy.contains("最小充分证据"));
@@ -2002,6 +2004,88 @@ public final class CodeAgentPresetTest {
         generation, "browser_test", ToolResult.success(map("passed", true)));
     assertFalse(late.data().containsKey("plan_state"));
     assertFalse(coordinator.hasPlan());
+  }
+
+  @Test
+  public void secondBoundedReadOfSameFileAndRevisionRecommendsReadPlan() throws Exception {
+    File other = new File(root, "other.txt");
+    Files.write(other.toPath(), "other".getBytes(StandardCharsets.UTF_8));
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(
+            CodePlanningMode.ADAPTIVE,
+            CodeValidationContract.builder().build(),
+            roles,
+            workspace);
+    coordinator.onRunStarted(new AgentRunContext(12L, "session", "workspace", "task"));
+    long generation = coordinator.generation();
+    ToolArguments mainRange = new ToolArguments(map(
+        "path", "main.txt", "start_line", 1, "end_line", 1));
+    ToolArguments otherRange = new ToolArguments(map(
+        "path", "other.txt", "start_line", 1, "end_line", 1));
+
+    ToolResult first = coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        mainRange,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "before", "mode", "range",
+            "full_file", false, "revision", "revision-a")));
+    assertFalse(first.data().containsKey("same_file_bounded_read_count"));
+
+    ToolResult differentFile = coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        otherRange,
+        ToolResult.success(map(
+            "path", "other.txt", "content", "other", "mode", "range",
+            "full_file", false, "revision", "revision-a")));
+    assertFalse(differentFile.data().containsKey("same_file_bounded_read_count"));
+
+    ToolResult second = coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        mainRange,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "before", "mode", "range",
+            "full_file", false, "revision", "revision-a")));
+    assertEquals("before", second.data().get("content"));
+    assertEquals(2, second.data().get("same_file_bounded_read_count"));
+    assertEquals("read_plan", second.data().get("recommended_next_action"));
+    assertTrue(String.valueOf(second.data().get("message"))
+        .contains("不要继续对该文件分段调用 read_file"));
+    assertFalse(second.data().containsKey("plan_state"));
+
+    ToolResult newRevision = coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        mainRange,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "after", "mode", "range",
+            "full_file", false, "revision", "revision-b")));
+    assertFalse(newRevision.data().containsKey("same_file_bounded_read_count"));
+
+    ToolResult fullFile = coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map(
+            "path", "main.txt", "content", "after", "mode", "full_file",
+            "full_file", true, "revision", "revision-c")));
+    assertFalse(fullFile.data().containsKey("same_file_bounded_read_count"));
+
+    ToolResult summary = coordinator.recordAndDecorate(
+        generation,
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map(
+            "path", "main.txt", "content", "summary", "mode", "summary",
+            "full_file", false, "revision", "revision-c",
+            "recommended_next_action", "read_plan")));
+    assertFalse(summary.data().containsKey("same_file_bounded_read_count"));
+    assertEquals("read_plan", summary.data().get("recommended_next_action"));
   }
 
   @Test

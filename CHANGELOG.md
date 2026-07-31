@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.0.22
+
+- Code Agent 按文件路径与源码 revision 统计成功的局部 `read_file`；同一文件第二次及后续局部读取仍正常返回代码，并明确推荐下一步使用一次 `read_plan` 收集剩余证据。
+- 全文读取、结构摘要、失败调用和不同 revision 不计入局部读取次数；新增提示词规则与回归测试，避免模型继续对同一文件分段读取。
+
 ## 2.0.21
 
 - `search_replace` 由 40 行/3000 字符硬上限改为 `low/medium/high/critical` 风险分级；唯一命中的连续大区段可写入，大段清空、广覆盖显著缩减和多函数显著缩减以 `search_replace_destructive_change` 原子拒绝。
