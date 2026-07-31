@@ -3,9 +3,11 @@ package com.cscjapp.aiworkbench.model.openai;
 import com.cscjapp.aiworkbench.api.Cancellable;
 import com.cscjapp.aiworkbench.api.ModelEndpoint;
 import com.cscjapp.aiworkbench.api.ToolArguments;
+import com.cscjapp.aiworkbench.api.ToolArgumentMode;
 import com.cscjapp.aiworkbench.api.ToolSpec;
 import com.cscjapp.aiworkbench.core.AgentMessage;
 import com.cscjapp.aiworkbench.core.AgentToolCall;
+import com.cscjapp.aiworkbench.core.InvalidToolCall;
 import com.cscjapp.aiworkbench.core.ModelGateway;
 import com.cscjapp.aiworkbench.core.ModelRequest;
 import com.cscjapp.aiworkbench.core.ModelResponse;
@@ -20,6 +22,10 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.internal.Streams;
+import com.google.gson.stream.JsonReader;
+import com.google.gson.stream.JsonToken;
+import java.io.StringReader;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -34,6 +40,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.MediaType;
@@ -46,6 +54,7 @@ import okhttp3.Response;
 public final class OpenAIModelGateway implements ModelGateway {
   private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
   private static final long STREAM_GAP_LOG_THRESHOLD_MS = 1000L;
+  private static final Pattern JSON_COLUMN = Pattern.compile("\\bcolumn\\s+(\\d+)\\b");
   private final OkHttpClient client;
   private final Gson gson = new Gson();
   private final Gson prettyGson = new GsonBuilder().setPrettyPrinting().create();
@@ -224,6 +233,10 @@ public final class OpenAIModelGateway implements ModelGateway {
         function.addProperty("name", spec.name());
         function.addProperty("description", spec.description());
         function.add("parameters", gson.toJsonTree(spec.inputSchema()));
+        if (request.endpoint().toolArgumentMode() == ToolArgumentMode.STRICT
+            && spec.strictSchema()) {
+          function.addProperty("strict", true);
+        }
         JsonObject tool = new JsonObject();
         tool.addProperty("type", "function");
         tool.add("function", function);
@@ -422,17 +435,20 @@ public final class OpenAIModelGateway implements ModelGateway {
               + ignoredHeartbeatCount);
     }
     if (terminal.compareAndSet(false, true)) {
-      List<AgentToolCall> calls = buildCalls(callBuilders);
+      BuiltToolCalls calls = buildCalls(callBuilders);
       logResponse(
           content.toString(),
           reasoning.toString(),
           finishReason,
-          calls,
+          calls.valid,
+          calls.invalid,
           startedAt,
           requestIndex,
           model);
       logUsage(requestIndex, model, usage);
-      observer.onComplete(new ModelResponse(content.toString(), finishReason, calls, usage));
+      observer.onComplete(
+          new ModelResponse(
+              content.toString(), finishReason, calls.valid, calls.invalid, usage));
     }
   }
 
@@ -482,11 +498,19 @@ public final class OpenAIModelGateway implements ModelGateway {
     if (!streamDelta.isEmpty()) observer.onStreamDelta(streamDelta);
     if (terminal.compareAndSet(false, true)) {
       String finishReason = string(choice, "finish_reason", "stop");
-      List<AgentToolCall> toolCalls = buildCalls(builders);
+      BuiltToolCalls toolCalls = buildCalls(builders);
       logResponse(
-          content, reasoning, finishReason, toolCalls, startedAt, requestIndex, model);
+          content,
+          reasoning,
+          finishReason,
+          toolCalls.valid,
+          toolCalls.invalid,
+          startedAt,
+          requestIndex,
+          model);
       logUsage(requestIndex, model, usage);
-      observer.onComplete(new ModelResponse(content, finishReason, toolCalls, usage));
+      observer.onComplete(
+          new ModelResponse(content, finishReason, toolCalls.valid, toolCalls.invalid, usage));
     }
   }
 
@@ -557,6 +581,7 @@ public final class OpenAIModelGateway implements ModelGateway {
       String reasoning,
       String finishReason,
       List<AgentToolCall> toolCalls,
+      List<InvalidToolCall> invalidToolCalls,
       long startedAt,
       int requestIndex,
       String model) {
@@ -575,7 +600,9 @@ public final class OpenAIModelGateway implements ModelGateway {
             + "][reasoning_chars="
             + reasoning.length()
             + "][tool_calls="
-            + toolCalls.size()
+            + (toolCalls.size() + invalidToolCalls.size())
+            + "][invalid_tool_calls="
+            + invalidToolCalls.size()
             + "]");
     log(
         "model_response",
@@ -594,6 +621,21 @@ public final class OpenAIModelGateway implements ModelGateway {
               + toolCall.name()
               + "]"
               + readableJson(toolCall.arguments().asMap()));
+    }
+    for (InvalidToolCall toolCall : invalidToolCalls) {
+      log(
+          "model_response",
+          "[本轮模型返回][request="
+              + requestIndex
+              + "][invalid_tool_arguments][toolName="
+              + toolCall.name()
+              + "][offset="
+              + toolCall.errorOffset()
+              + "][escape="
+              + compactLogValue(toolCall.invalidEscape())
+              + "][argument_chars="
+              + toolCall.argumentChars()
+              + "]");
     }
   }
 
@@ -734,41 +776,100 @@ public final class OpenAIModelGateway implements ModelGateway {
     }
   }
 
-  private List<AgentToolCall> buildCalls(Map<Integer, ToolCallBuilder> builders) {
+  private BuiltToolCalls buildCalls(Map<Integer, ToolCallBuilder> builders) {
     List<Map.Entry<Integer, ToolCallBuilder>> entries = new ArrayList<>(builders.entrySet());
     entries.sort(Comparator.comparingInt(Map.Entry::getKey));
     List<AgentToolCall> calls = new ArrayList<>();
+    List<InvalidToolCall> invalidCalls = new ArrayList<>();
     for (Map.Entry<Integer, ToolCallBuilder> entry : entries) {
       ToolCallBuilder b = entry.getValue();
-      Map<String, Object> args = Collections.emptyMap();
-      if (b.arguments.length() > 0) {
-        args = parseToolArguments(b.arguments.toString());
-      }
+      String raw = b.arguments.toString();
+      ParsedToolArguments parsed = parseToolArguments(raw);
       String id = blank(b.id) ? "call-" + entry.getKey() : b.id;
-      calls.add(new AgentToolCall(id, b.name, new ToolArguments(args)));
+      if (parsed.error != null) {
+        invalidCalls.add(
+            new InvalidToolCall(
+                id,
+                b.name,
+                parsed.error.message,
+                parsed.error.invalidEscape,
+                parsed.error.offset,
+                raw.length()));
+      } else {
+        calls.add(new AgentToolCall(id, b.name, new ToolArguments(parsed.arguments)));
+      }
     }
-    return calls;
+    return new BuiltToolCalls(calls, invalidCalls);
   }
 
   @SuppressWarnings("unchecked")
-  Map<String, Object> parseToolArguments(String raw) {
+  private ParsedToolArguments parseToolArguments(String raw) {
     String source = raw == null ? "" : raw.trim();
+    if (source.isEmpty()) {
+      return ParsedToolArguments.invalid("参数为空", "", 0);
+    }
     try {
-      Map<String, Object> parsed = gson.fromJson(source, Map.class);
-      if (parsed != null) return parsed;
-    } catch (Exception ignored) {
-      // Attempt exactly one bounded repair below.
-    }
-    if (source.endsWith("}")) {
-      String candidate = source.substring(0, source.length() - 1).trim();
-      try {
-        Map<String, Object> repaired = gson.fromJson(candidate, Map.class);
-        if (repaired != null) return repaired;
-      } catch (Exception ignored) {
-        // Preserve the original bytes for a short explicit invalid_tool_arguments result.
+      JsonReader reader = new JsonReader(new StringReader(source));
+      reader.setLenient(false);
+      JsonElement parsed = Streams.parse(reader);
+      if (reader.peek() != JsonToken.END_DOCUMENT) {
+        return ParsedToolArguments.invalid("参数包含 JSON 对象之外的多余内容", "", -1);
       }
+      if (!parsed.isJsonObject()) {
+        return ParsedToolArguments.invalid("参数必须是 JSON 对象", "", 0);
+      }
+      Map<String, Object> values = gson.fromJson(parsed, Map.class);
+      return ParsedToolArguments.valid(values == null ? Collections.emptyMap() : values);
+    } catch (Exception error) {
+      InvalidEscape invalidEscape = firstInvalidEscape(source);
+      int offset = invalidEscape == null ? errorOffset(error) : invalidEscape.offset;
+      String token = invalidEscape == null ? "" : invalidEscape.token;
+      return ParsedToolArguments.invalid(compactParseError(error), token, offset);
     }
-    return Collections.singletonMap("__raw_arguments", raw == null ? "" : raw);
+  }
+
+  private static InvalidEscape firstInvalidEscape(String source) {
+    for (int index = 0; index < source.length(); index++) {
+      if (source.charAt(index) != '\\') continue;
+      if (index + 1 >= source.length()) return new InvalidEscape("\\<eof>", index);
+      char escaped = source.charAt(index + 1);
+      if ("\"\\/bfnrt".indexOf(escaped) >= 0) {
+        index++;
+        continue;
+      }
+      if (escaped != 'u') return new InvalidEscape("\\" + escaped, index);
+      if (index + 5 >= source.length()) {
+        String token = index + 2 < source.length() && source.charAt(index + 2) == '{'
+            ? "\\u{" : "\\u";
+        return new InvalidEscape(token, index);
+      }
+      for (int digit = index + 2; digit <= index + 5; digit++) {
+        if (Character.digit(source.charAt(digit), 16) < 0) {
+          String token = source.charAt(index + 2) == '{' ? "\\u{" : "\\u";
+          return new InvalidEscape(token, index);
+        }
+      }
+      index += 5;
+    }
+    return null;
+  }
+
+  private static int errorOffset(Exception error) {
+    String message = error == null ? "" : String.valueOf(error.getMessage());
+    Matcher matcher = JSON_COLUMN.matcher(message);
+    if (!matcher.find()) return -1;
+    try {
+      return Math.max(0, Integer.parseInt(matcher.group(1)) - 1);
+    } catch (NumberFormatException ignored) {
+      return -1;
+    }
+  }
+
+  private static String compactParseError(Exception error) {
+    String message = error == null ? "" : String.valueOf(error.getMessage()).trim();
+    int at = message.indexOf(" at line ");
+    if (at > 0) message = message.substring(0, at);
+    return message.isEmpty() ? "无法解析参数" : message;
   }
 
   private static String chatUrl(String baseUrl) {
@@ -811,6 +912,57 @@ public final class OpenAIModelGateway implements ModelGateway {
     if (blank(value)) return "";
     String compact = value.replace('\n', ' ').replace('\r', ' ').trim();
     return ": " + compact.substring(0, Math.min(compact.length(), 300));
+  }
+
+  private static final class BuiltToolCalls {
+    final List<AgentToolCall> valid;
+    final List<InvalidToolCall> invalid;
+
+    BuiltToolCalls(List<AgentToolCall> valid, List<InvalidToolCall> invalid) {
+      this.valid = Collections.unmodifiableList(new ArrayList<>(valid));
+      this.invalid = Collections.unmodifiableList(new ArrayList<>(invalid));
+    }
+  }
+
+  private static final class ParsedToolArguments {
+    final Map<String, Object> arguments;
+    final ToolArgumentError error;
+
+    private ParsedToolArguments(Map<String, Object> arguments, ToolArgumentError error) {
+      this.arguments = arguments;
+      this.error = error;
+    }
+
+    static ParsedToolArguments valid(Map<String, Object> arguments) {
+      return new ParsedToolArguments(arguments, null);
+    }
+
+    static ParsedToolArguments invalid(String message, String invalidEscape, int offset) {
+      return new ParsedToolArguments(
+          Collections.emptyMap(), new ToolArgumentError(message, invalidEscape, offset));
+    }
+  }
+
+  private static final class ToolArgumentError {
+    final String message;
+    final String invalidEscape;
+    final int offset;
+
+    ToolArgumentError(String message, String invalidEscape, int offset) {
+      this.message = message == null ? "" : message;
+      this.invalidEscape = invalidEscape == null ? "" : invalidEscape;
+      this.offset = offset;
+    }
+  }
+
+  private static final class InvalidEscape {
+    final String token;
+    final int offset;
+
+    InvalidEscape(String token, int offset) {
+      this.token = token;
+      this.offset = offset;
+    }
   }
 
   private static final class ToolCallBuilder {

@@ -3,6 +3,10 @@ package com.cscjapp.aiworkbench.model.openai;
 import static org.junit.Assert.*;
 import com.cscjapp.aiworkbench.api.*;
 import com.cscjapp.aiworkbench.core.*;
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
 import okhttp3.mockwebserver.MockResponse;
@@ -126,18 +130,110 @@ public class OpenAIModelGatewayTest {
   }
 
   @Test
-  public void repairsOnlyOneTrailingToolArgumentBrace() {
-    OpenAIModelGateway gateway = new OpenAIModelGateway();
+  public void rejectsMalformedArgumentsWithoutRepairingOrDispatchableFallback() throws Exception {
+    enqueueToolArguments("{\"path\":\"index.html\",\"content\":\"\\U0001f40d\"}");
 
-    Map<String, Object> repaired =
-        gateway.parseToolArguments("{\"goal\":\"repair\"}}");
-    assertEquals("repair", repaired.get("goal"));
-    assertFalse(repaired.containsKey("__raw_arguments"));
+    ModelResponse response = streamResponse(request());
 
-    Map<String, Object> malformed =
-        gateway.parseToolArguments("{\"goal\":\"repair\"}}}");
-    assertTrue(malformed.containsKey("__raw_arguments"));
-    assertEquals("{\"goal\":\"repair\"}}}", malformed.get("__raw_arguments"));
+    assertTrue(response.toolCalls().isEmpty());
+    assertEquals(1, response.invalidToolCalls().size());
+    InvalidToolCall invalid = response.invalidToolCalls().get(0);
+    assertEquals("create_file", invalid.name());
+    assertEquals("\\U", invalid.invalidEscape());
+    assertTrue(invalid.errorOffset() >= 0);
+    assertFalse(invalid.errorMessage().contains("path required"));
+  }
+
+  @Test
+  public void rejectsBraceAndCodePointEscapesInsteadOfRepairingThem() throws Exception {
+    enqueueToolArguments("{\"goal\":\"repair\"}}");
+    ModelResponse trailingBrace = streamResponse(request());
+    assertTrue(trailingBrace.toolCalls().isEmpty());
+    assertEquals(1, trailingBrace.invalidToolCalls().size());
+
+    enqueueToolArguments("{\"content\":\"\\u{1F40D}\"}");
+    ModelResponse codePointEscape = streamResponse(request());
+    assertTrue(codePointEscape.toolCalls().isEmpty());
+    assertEquals("\\u{", codePointEscape.invalidToolCalls().get(0).invalidEscape());
+  }
+
+  @Test
+  public void rejectsLenientJsonSyntax() throws Exception {
+    enqueueToolArguments("{'path':'index.html'}");
+    ModelResponse singleQuotes = streamResponse(request());
+    assertTrue(singleQuotes.toolCalls().isEmpty());
+    assertEquals(1, singleQuotes.invalidToolCalls().size());
+
+    enqueueToolArguments("{path:\"index.html\"}");
+    ModelResponse unquotedName = streamResponse(request());
+    assertTrue(unquotedName.toolCalls().isEmpty());
+    assertEquals(1, unquotedName.invalidToolCalls().size());
+  }
+
+  @Test
+  public void roundTripsUnicodeQuotesNewlinesTemplatesAndSourceBackslashes() throws Exception {
+    String content =
+        "🐍 \"quoted\"\nconst value = `x`;\nconst escaped = \"\\\\u{1F40D}\";";
+    Map<String, Object> arguments = new LinkedHashMap<>();
+    arguments.put("path", "src/index.html");
+    arguments.put("content", content);
+    arguments.put("file_role", "entry_source");
+    enqueueToolArguments(new Gson().toJson(arguments));
+
+    ModelResponse response = streamResponse(request());
+
+    assertTrue(response.invalidToolCalls().isEmpty());
+    assertArrayEquals(
+        content.getBytes(StandardCharsets.UTF_8),
+        response
+            .toolCalls()
+            .get(0)
+            .arguments()
+            .getString("content", "")
+            .getBytes(StandardCharsets.UTF_8));
+  }
+
+  @Test
+  public void sendsStrictOnlyWhenEndpointAndToolBothOptIn() throws Exception {
+    server.enqueue(stopResponse());
+    await(new OpenAIModelGateway(), request(ToolArgumentMode.STRICT, true));
+    JsonObject strictBody =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertTrue(
+        strictBody
+            .getAsJsonArray("tools")
+            .get(0)
+            .getAsJsonObject()
+            .getAsJsonObject("function")
+            .get("strict")
+            .getAsBoolean());
+
+    server.enqueue(stopResponse());
+    await(new OpenAIModelGateway(), request(ToolArgumentMode.BEST_EFFORT, true));
+    JsonObject bestEffortBody =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertFalse(
+        bestEffortBody
+            .getAsJsonArray("tools")
+            .get(0)
+            .getAsJsonObject()
+            .getAsJsonObject("function")
+            .has("strict"));
+
+    server.enqueue(stopResponse());
+    await(new OpenAIModelGateway(), request(ToolArgumentMode.STRICT, false));
+    JsonObject nonStrictToolBody =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertFalse(
+        nonStrictToolBody
+            .getAsJsonArray("tools")
+            .get(0)
+            .getAsJsonObject()
+            .getAsJsonObject("function")
+            .has("strict"));
   }
 
   @Test
@@ -458,11 +554,81 @@ public class OpenAIModelGatewayTest {
     assertTrue(errors.toString(), errors.isEmpty());
   }
 
+  private void enqueueToolArguments(String arguments) {
+    JsonObject function = new JsonObject();
+    function.addProperty("name", "create_file");
+    function.addProperty("arguments", arguments);
+    JsonObject call = new JsonObject();
+    call.addProperty("id", "call-invalid");
+    call.addProperty("type", "function");
+    call.add("function", function);
+    com.google.gson.JsonArray calls = new com.google.gson.JsonArray();
+    calls.add(call);
+    JsonObject message = new JsonObject();
+    message.addProperty("content", "");
+    message.add("tool_calls", calls);
+    JsonObject choice = new JsonObject();
+    choice.add("message", message);
+    choice.addProperty("finish_reason", "tool_calls");
+    com.google.gson.JsonArray choices = new com.google.gson.JsonArray();
+    choices.add(choice);
+    JsonObject root = new JsonObject();
+    root.add("choices", choices);
+    server.enqueue(
+        new MockResponse()
+            .setHeader("Content-Type", "application/json")
+            .setBody(new Gson().toJson(root)));
+  }
+
+  private ModelResponse streamResponse(ModelRequest request) throws Exception {
+    CountDownLatch latch = new CountDownLatch(1);
+    List<ModelResponse> responses = new ArrayList<>();
+    List<Throwable> errors = new ArrayList<>();
+    new OpenAIModelGateway()
+        .stream(
+            request,
+            new ModelStreamObserver() {
+              public void onDelta(String content, String reasoning) {}
+
+              public void onComplete(ModelResponse response) {
+                responses.add(response);
+                latch.countDown();
+              }
+
+              public void onError(Throwable error) {
+                errors.add(error);
+                latch.countDown();
+              }
+            });
+    assertTrue(latch.await(3, TimeUnit.SECONDS));
+    assertTrue(errors.toString(), errors.isEmpty());
+    assertEquals(1, responses.size());
+    return responses.get(0);
+  }
+
+  private static MockResponse stopResponse() {
+    return new MockResponse()
+        .setHeader("Content-Type", "text/event-stream")
+        .setBody(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n"
+                + "data: [DONE]\n\n");
+  }
+
   private ModelRequest request() {
+    return request(ToolArgumentMode.BEST_EFFORT, false);
+  }
+
+  private ModelRequest request(ToolArgumentMode mode, boolean strictSchema) {
     ModelEndpoint endpoint =
-        new ModelEndpoint(server.url("/v1").toString(), "secret", "test", 0.2, true, false);
+        new ModelEndpoint(
+            server.url("/v1").toString(), "secret", "test", 0.2, true, false, mode);
+    Map<String, Object> schema = new LinkedHashMap<>();
+    schema.put("type", "object");
+    schema.put("properties", Collections.emptyMap());
+    schema.put("required", Collections.emptyList());
+    schema.put("additionalProperties", false);
     ToolSpec spec =
-        new ToolSpec("create_file", "create", Collections.singletonMap("type", "object"));
+        new ToolSpec("create_file", "create", schema, strictSchema);
     return new ModelRequest(
         endpoint,
         Arrays.asList(AgentMessage.system("s"), AgentMessage.user("u")),

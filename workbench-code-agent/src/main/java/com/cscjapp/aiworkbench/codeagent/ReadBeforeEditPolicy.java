@@ -313,9 +313,6 @@ public final class ReadBeforeEditPolicy implements ToolPolicy, AgentRunLifecycle
         if (old.isEmpty()) return Collections.emptyList();
         anchors.add(old);
       }
-    } else {
-      String old = arguments.getString("old", "");
-      if (!old.isEmpty()) anchors.add(old);
     }
     return anchors;
   }

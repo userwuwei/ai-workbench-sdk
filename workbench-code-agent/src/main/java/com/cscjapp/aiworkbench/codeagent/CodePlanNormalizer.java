@@ -38,9 +38,22 @@ final class CodePlanNormalizer {
     List<Map<String, Object>> files = normalizeFiles(out.get("planned_files"));
     out.put("planned_files", files);
     List<String> verification = strings(out.get("verification_plan"), 6, 160);
-    if (verification.isEmpty()) verification.addAll(contract.requiredEvidence("code_generation"));
+    if (lightweightWebVerification()) {
+      verification.clear();
+      verification.add("verify_web_project");
+    } else if (verification.isEmpty()) {
+      verification.addAll(contract.requiredEvidence("code_generation"));
+    }
     out.put("verification_plan", verification);
     List<Map<String, Object>> steps = normalizeSteps(out.get("steps"));
+    if (lightweightWebVerification()) {
+      steps.removeIf(step -> "quality".equals(text(step.get("phase"))));
+      for (Map<String, Object> step : steps) {
+        if ("verify".equals(text(step.get("phase")))) {
+          step.put("required_tools", Collections.singletonList("verify_web_project"));
+        }
+      }
+    }
     addDefaults(steps, qualityMode, verificationTools(verification));
     mapImplementationFiles(steps, files);
     while (steps.size() > MAX_STEPS) mergeDuplicatePhase(steps);
@@ -248,7 +261,7 @@ final class CodePlanNormalizer {
     return out;
   }
 
-  private static void addDefaults(
+  private void addDefaults(
       List<Map<String, Object>> steps, String qualityMode, List<String> verificationTools) {
     List<Map<String, Object>> defaults = Arrays.asList(
         step("discover", "读取并确认真实上下文", "discover", Collections.emptyList()),
@@ -256,16 +269,26 @@ final class CodePlanNormalizer {
         step("verify", "执行真实验证", "verify", verificationTools),
         step("quality", "提交结构化质量自查", "quality", Collections.singletonList("quality_review")));
     if (steps.isEmpty()) {
-      steps.addAll(defaults.subList(0, "interface_product".equals(qualityMode) ? 4 : 3));
+      steps.addAll(defaults.subList(
+          0, qualityEnabled() && "interface_product".equals(qualityMode) ? 4 : 3));
       return;
     }
     Set<String> phases = phases(steps);
     for (Map<String, Object> candidate : defaults) {
       String phase = text(candidate.get("phase"));
-      if ("quality".equals(phase) && !"interface_product".equals(qualityMode)) continue;
+      if ("quality".equals(phase)
+          && (!qualityEnabled() || !"interface_product".equals(qualityMode))) continue;
       if (phases.add(phase)) steps.add(candidate);
     }
     while (steps.size() > MAX_STEPS) mergeDuplicatePhase(steps);
+  }
+
+  private boolean lightweightWebVerification() {
+    return contract.requiredEvidence("code_generation").contains("verify_web_project");
+  }
+
+  private boolean qualityEnabled() {
+    return !lightweightWebVerification() || contract.requiresAnyQualityReview();
   }
 
   @SuppressWarnings("unchecked")

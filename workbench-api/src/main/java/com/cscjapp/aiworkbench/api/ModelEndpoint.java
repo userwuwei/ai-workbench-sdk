@@ -7,6 +7,7 @@ public final class ModelEndpoint {
   private final double temperature;
   private final boolean nativeTools, deepThinking;
   private final ModelHeaderProvider headerProvider;
+  private final ToolArgumentMode toolArgumentMode;
 
   public ModelEndpoint(
       String baseUrl,
@@ -22,7 +23,8 @@ public final class ModelEndpoint {
         temperature,
         nativeTools,
         deepThinking,
-        endpoint -> Collections.emptyMap());
+        endpoint -> Collections.emptyMap(),
+        ToolArgumentMode.BEST_EFFORT);
   }
 
   public ModelEndpoint(
@@ -33,6 +35,45 @@ public final class ModelEndpoint {
       boolean nativeTools,
       boolean deepThinking,
       ModelHeaderProvider headerProvider) {
+    this(
+        baseUrl,
+        apiKey,
+        modelId,
+        temperature,
+        nativeTools,
+        deepThinking,
+        headerProvider,
+        ToolArgumentMode.BEST_EFFORT);
+  }
+
+  public ModelEndpoint(
+      String baseUrl,
+      String apiKey,
+      String modelId,
+      double temperature,
+      boolean nativeTools,
+      boolean deepThinking,
+      ToolArgumentMode toolArgumentMode) {
+    this(
+        baseUrl,
+        apiKey,
+        modelId,
+        temperature,
+        nativeTools,
+        deepThinking,
+        endpoint -> Collections.emptyMap(),
+        toolArgumentMode);
+  }
+
+  public ModelEndpoint(
+      String baseUrl,
+      String apiKey,
+      String modelId,
+      double temperature,
+      boolean nativeTools,
+      boolean deepThinking,
+      ModelHeaderProvider headerProvider,
+      ToolArgumentMode toolArgumentMode) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.modelId = modelId;
@@ -41,6 +82,8 @@ public final class ModelEndpoint {
     this.deepThinking = deepThinking;
     this.headerProvider =
         headerProvider == null ? endpoint -> Collections.emptyMap() : headerProvider;
+    this.toolArgumentMode =
+        toolArgumentMode == null ? ToolArgumentMode.BEST_EFFORT : toolArgumentMode;
   }
 
   public String baseUrl() {
@@ -69,5 +112,9 @@ public final class ModelEndpoint {
 
   public ModelHeaderProvider headerProvider() {
     return headerProvider;
+  }
+
+  public ToolArgumentMode toolArgumentMode() {
+    return toolArgumentMode;
   }
 }

@@ -45,12 +45,17 @@ public final class CodeAgentPreset {
 
     boolean hasGoalDrivenReadPlan = hasTool(builder.languageTools, "read_plan");
     boolean hasBrowserTest = hasTool(builder.languageTools, "browser_test");
+    boolean hasLightweightWebVerify = hasTool(builder.languageTools, "verify_web_project");
+    boolean hasQualityReview =
+        !hasLightweightWebVerify || builder.profile.verificationContract().requiresAnyQualityReview();
     List<PromptContributor> prompts = new ArrayList<>();
     prompts.add(
         commonPrompt(
             builder.planningMode,
             hasGoalDrivenReadPlan,
             hasBrowserTest,
+            hasLightweightWebVerify,
+            hasQualityReview,
             builder.convergentReadPrompt));
     if (!builder.profile.languageRules().isEmpty()) {
       prompts.add(
@@ -68,6 +73,7 @@ public final class CodeAgentPreset {
     List<AgentTool> combinedTools = new ArrayList<>();
     for (ToolSpec spec :
         CodeMetaToolSchemas.create(builder.profile.metaToolExtensions())) {
+      if (!hasQualityReview && CodeAgentToolNames.QUALITY_REVIEW.equals(spec.name())) continue;
       combinedTools.add(new CodeMetaTool(spec, planCoordinator));
     }
     combinedTools.addAll(builder.languageTools);
@@ -122,6 +128,8 @@ public final class CodeAgentPreset {
       CodePlanningMode planningMode,
       boolean hasGoalDrivenReadPlan,
       boolean hasBrowserTest,
+      boolean hasLightweightWebVerify,
+      boolean hasQualityReview,
       boolean convergentReadPrompt) {
     return context -> {
       boolean nativeTools = !Boolean.FALSE.equals(context.runtime().get("native_tools"));
@@ -133,20 +141,32 @@ public final class CodeAgentPreset {
           "你运行在通用 Code Agent 中。"
               + protocol
               + planningInstruction(planningMode)
+              + "\n工具参数必须是严格 JSON；源码反斜杠必须在外层 JSON 中再次转义。"
+              + "禁止在 JSON 层直接输出 \\UXXXXXXXX 或 \\u{...}，优先使用原始 Unicode 字符。"
               + "\n文件工具选择是强制协议：create_file 只用于当前项目尚不存在的新路径；已有文件的修复、优化、重构、重新布局、视觉升级和大范围调整都必须使用 search_replace。"
               + editEvidenceInstruction(convergentReadPrompt)
-              + workflowInstruction()
+              + workflowInstruction(hasQualityReview)
               + readPlanningInstruction(hasGoalDrivenReadPlan, convergentReadPrompt)
+              + lightweightWebVerificationInstruction(hasLightweightWebVerify)
               + browserVerificationInstruction(hasBrowserTest)
               + "\n已经生成完整文件内容不构成使用 create_file 的理由；planned_files 只表示任务涉及的文件，不表示允许重新创建；不得为了修改已有文件向 create_file 传入 overwrite。"
               + "\n只有运行时明确声明 precreated_entry_replace_allowed 的指定预创建入口，首次完整生成时才允许对已存在路径调用 create_file；该例外不授权其他文件。"
               + "\n工具失败、验证失败或质量 blocker 必须真实修复后重试，禁止虚构通过。"
-              + "\n完成前执行适用的真实验证和 quality_review，最后调用 finalize_task。"
+              + (hasQualityReview
+                  ? "\n完成前执行适用的真实验证和 quality_review，最后调用 finalize_task。"
+                  : "\n完成前执行适用的真实验证，随后直接调用 finalize_task。")
               + "\n无法继续或确实需要用户输入时，也必须通过 finalize_task 返回真实状态。";
       return Collections.singletonList(
           new PromptSection(
               "code_agent_protocol", PromptPhase.BASE, 0, 5000, content));
     };
+  }
+
+  private static String lightweightWebVerificationInstruction(boolean available) {
+    if (!available) return "";
+    return "\nverify_web_project 是默认的组合验证：只传 entry_path；宿主自行执行语法检查，并在页面改动时进行一次 load-only WebView 冒烟。"
+        + "\n不要生成浏览器场景、点击步骤、Canvas/Audio 断言或完整业务流程。smoke_status=passed 只表示加载冒烟通过；smoke_status=unavailable 可继续完成，但最终说明未形成浏览器证据。"
+        + "\n验证失败后最多进行一次产品修复和一次重新验证；非阻塞 warnings 不触发修复循环。";
   }
 
   private static String browserVerificationInstruction(boolean available) {
@@ -160,15 +180,19 @@ public final class CodeAgentPreset {
         + "\n同时存在 reading_brief 与 test_retry_brief 时，只按 reading_brief 修复未被阻断的产品根因，禁止修改产品迎合测试；产品修复并通过 syntax_check 后，在下一次 browser_test 中修正 test_retry_brief 指出的测试问题。只有纯产品失败要求保持 actions、wait_for 和 expectations 语义及 Hash 不变回归。quality_review/finalize 的已验证行为只能来自 verified_behavior_evidence 和 action/checkpoint trace。";
   }
 
-  private static String workflowInstruction() {
-    return "\nrecommended_next_action 是当前首选动作，不是其他安全工具的执行禁令；已知仍有计划内修改时，先完成当前编辑批次，再调用 syntax_check。"
-        + "\nrecommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据提交 passed、blocking_gaps、minimal_version_risk；不要读取源码、replan 或传入 path。"
-        + "\n同一文件中已经确定的修改优先合并到一次 search_replace.replacements[]；受输出大小或独立锚点限制时，允许在 syntax_check 前连续执行多次 search_replace。"
-        + "\n只有测试根因时优先修正测试，禁止修改产品迎合错误断言。任何新写入都会使旧 syntax_check、browser_test 和 quality_review 证据失效，必须基于最新 revision 重新验证。";
+  private static String workflowInstruction(boolean hasQualityReview) {
+    return "\nrecommended_next_action 是当前首选动作，不是其他安全工具的执行禁令；已知仍有计划内修改时，先完成当前编辑批次，再调用验证工具。"
+        + (hasQualityReview
+            ? "\nrecommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据提交 passed、blocking_gaps、minimal_version_risk；不要读取源码、replan 或传入 path。"
+            : "")
+        + "\n同一文件中已经确定的修改优先合并到一次 search_replace.replacements[]；受输出大小或独立锚点限制时，允许在验证前连续执行多次 search_replace。"
+        + (hasQualityReview
+            ? "\n只有测试根因时优先修正测试，禁止修改产品迎合错误断言。任何新写入都会使旧 syntax_check、browser_test 和 quality_review 证据失效，必须基于最新 revision 重新验证。"
+            : "\n任何新写入都会使旧验证证据失效，必须基于最新 revision 重新验证。");
   }
 
   private static String editEvidenceInstruction(boolean convergent) {
-    String searchReplaceContract = " search_replace.old 推荐使用当前 revision 中 2～6 行的精确短窗口，不得超过 40 行或 3000 字符；单行 substring 仅在 expected_matches=1 且唯一命中时可用，重复文本必须分别增加上下文。预检已返回 candidate_windows/preferred_retry_old 时，直接修正整批 replacements，不为同一缺口重新读取。";
+    String searchReplaceContract = " search_replace.replacements[].old 推荐使用当前 revision 中 2～6 行的精确短窗口，不得超过 40 行或 3000 字符；每项必须唯一命中，重复文本必须分别增加上下文。预检已返回 candidate_windows/preferred_retry_old 时，直接修正整批 replacements，不为同一缺口重新读取。";
     if (!convergent) {
       return "\n修改已有文件前先读取真实内容；同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。" + searchReplaceContract;
     }
@@ -222,6 +246,7 @@ public final class CodeAgentPreset {
     roles.put("search_replace", CodeToolRole.EDIT);
     roles.put("rewrite", CodeToolRole.EDIT);
     roles.put("syntax_check", CodeToolRole.VERIFY);
+    roles.put("verify_web_project", CodeToolRole.VERIFY);
     roles.put("browser_test", CodeToolRole.VERIFY);
     roles.put(CodeAgentToolNames.PLAN_TASK, CodeToolRole.PLAN);
     roles.put(CodeAgentToolNames.QUALITY_REVIEW, CodeToolRole.QUALITY);

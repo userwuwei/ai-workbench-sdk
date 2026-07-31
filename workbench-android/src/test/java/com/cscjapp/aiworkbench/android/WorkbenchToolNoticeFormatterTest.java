@@ -1,5 +1,6 @@
 package com.cscjapp.aiworkbench.android;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import com.cscjapp.aiworkbench.api.ToolArguments;
@@ -38,6 +39,24 @@ public final class WorkbenchToolNoticeFormatterTest {
         "browser_test", ToolArguments.empty(), ToolResult.success(data), "/project");
     assertTrue(notice.contains("浏览器测试失败"));
     assertTrue(notice.contains("horizontal_overflow"));
+  }
+
+  @Test
+  public void invalidToolJsonDoesNotInventAFileFailure() {
+    ToolResult result = ToolResult.error(
+        "invalid_tool_arguments",
+        "工具参数 JSON 非法：非法转义 \\\\U（位置 12）",
+        true,
+        Collections.singletonMap("error_offset", 12));
+
+    String notice = WorkbenchToolNoticeFormatter.build(
+        "create_file", ToolArguments.empty(), result, "/project");
+
+    assertTrue(notice.contains("工具参数 JSON 非法"));
+    assertTrue(notice.contains("工具：create_file"));
+    assertTrue(notice.contains("非法转义"));
+    assertFalse(notice.contains("未知文件"));
+    assertFalse(notice.contains("path required"));
   }
 
   private static Map<String, Object> map(Object... values) {

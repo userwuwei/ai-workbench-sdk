@@ -32,20 +32,8 @@ final class CodeMetaTool implements AgentTool {
 
   @Override
   public Cancellable execute(
-      ToolContext context, ToolArguments arguments, ToolCallback callback) {
+    ToolContext context, ToolArguments arguments, ToolCallback callback) {
     ToolArguments safeArguments = arguments == null ? ToolArguments.empty() : arguments;
-    if (CodeAgentToolNames.PLAN_TASK.equals(spec.name())
-        && safeArguments.has("__raw_arguments")) {
-      Map<String, Object> data = new LinkedHashMap<>();
-      data.put("operation", spec.name());
-      callback.onComplete(
-          ToolResult.error(
-              "invalid_tool_arguments",
-              "plan_task 参数不是有效的 JSON 对象，请使用更短的合法参数重试。",
-              true,
-              data));
-      return Cancellable.NONE;
-    }
     if (CodeAgentToolNames.QUALITY_REVIEW.equals(spec.name())) {
       String issue = qualityArgumentsIssue(safeArguments);
       if (!issue.isEmpty()) {
@@ -54,7 +42,7 @@ final class CodeMetaTool implements AgentTool {
         data.put("recommended_next_action", CodeAgentToolNames.QUALITY_REVIEW);
         callback.onComplete(
             ToolResult.error(
-                "invalid_tool_arguments",
+                "invalid_quality_arguments",
                 issue + "；请直接提交 {\"passed\":true,\"blocking_gaps\":[],"
                     + "\"minimal_version_risk\":false}，不要传 path。",
                 true,

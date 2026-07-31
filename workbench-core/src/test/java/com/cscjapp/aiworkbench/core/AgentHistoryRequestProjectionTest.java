@@ -291,7 +291,6 @@ public class AgentHistoryRequestProjectionTest {
       failure.put("status", "failed");
       failure.put("error_code", index == 0
           ? "search_replace_old_too_large" : "search_replace_context_invalid");
-      failure.put("expected_matches", 1);
       failure.put("actual_matches", index);
       failure.put("matched_lines", Collections.singletonList(index + 10));
       failure.put("candidate_windows", Collections.singletonList(candidate));

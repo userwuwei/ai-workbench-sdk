@@ -45,6 +45,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private String pendingBrowserRegressionPlanId = "";
   private String pendingBrowserRegressionPlanHash = "";
   private List<Map<String, Object>> browserVerifiedBehaviorEvidence = new ArrayList<>();
+  private int lightweightSmokeRepairCount;
 
   ManagedCodePlanCoordinator(
       CodePlanningMode mode,
@@ -96,6 +97,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
+    lightweightSmokeRepairCount = 0;
     clearInteractionContract();
   }
 
@@ -122,6 +124,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
+    lightweightSmokeRepairCount = 0;
     clearInteractionContract();
   }
 
@@ -191,7 +194,11 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
 
     if (!verificationFailureTool.isEmpty()) {
-      if (mixedBrowserFailure()) {
+      if (lightweightSmokeRepairLimitReached()) {
+        LinkedHashSet<String> finalizeOnly = new LinkedHashSet<>();
+        finalizeOnly.add(CodeAgentToolNames.FINALIZE_TASK);
+        return ToolSelection.onlyNames(registeredTools, finalizeOnly);
+      } else if (mixedBrowserFailure()) {
         addSearchReplace(allowed);
         allowed.add("browser_test");
       } else if (verificationFailureHasProductRoot) {
@@ -266,11 +273,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       if (completionType.isEmpty()) completionType = "code_generation";
       if (!completionEvidenceReady(completionType)) {
         String missingStage = nextCompletionAction(completionType);
+        boolean smokeRepairExhausted = lightweightSmokeRepairLimitReached();
         boolean invalidBrowserEnvironment = "browser_test".equals(missingStage)
             && "browser_test".equals(verificationFailureTool)
             && "environment_failure".equals(verificationFailureKind);
         boolean missingQuality = CodeAgentToolNames.QUALITY_REVIEW.equals(missingStage);
-        String message = invalidBrowserEnvironment
+        String message = smokeRepairExhausted
+            ? "verify_web_project 重新验证后仍存在产品错误，已达到一次修复上限；请通过 finalize_task 返回 blocked 状态和真实错误。"
+            : invalidBrowserEnvironment
             ? "browser_test 已执行但环境结果无效，未形成可信完成证据；原样重复 finalize_task 不会改变状态，请先按 recommended_next_action 修正验证调用。"
             : missingQuality
                 ? "quality_review 尚未形成有效证据；重复 finalize_task 不会改变状态，请执行 recommended_next_action=quality_review。"
@@ -278,7 +288,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         callback.resolve(ToolPolicyDecision.error(
             "finalize_precondition_failed",
             message,
-            !invalidBrowserEnvironment && !missingQuality,
+            !smokeRepairExhausted && !invalidBrowserEnvironment && !missingQuality,
             preconditionData("finalize_task", missingStage)));
       } else {
         callback.resolve(ToolPolicyDecision.proceed(invocation.arguments()));
@@ -400,13 +410,14 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         toolName, arguments == null ? ToolArguments.empty() : arguments, result);
     boolean nonEvidenceQualityAttempt = CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
         && ((!effective.isSuccess()
-                && "invalid_tool_arguments".equals(effective.errorCode()))
+                && "invalid_quality_arguments".equals(effective.errorCode()))
             || !verificationEvidenceReady("code_generation"));
     if (!CodeAgentToolNames.PLAN_TASK.equals(toolName) && !nonEvidenceQualityAttempt) {
       record(toolName, arguments == null ? ToolArguments.empty() : arguments, effective);
     }
     boolean contractResult = hasPlan()
         && ("browser_test".equals(toolName)
+            || "verify_web_project".equals(toolName)
             || CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
             || CodeAgentToolNames.FINALIZE_TASK.equals(toolName));
     boolean recoverableRetry = hasPlan() && recoverableSearchReplaceFailure(toolName, effective);
@@ -414,7 +425,10 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
     if (stateChanged || contractResult) data.put("plan_state", state());
     if (contractResult) decorateManagedResult(toolName, data);
-    if (syntaxPendingBeforeBrowser()) {
+    if (lightweightSmokeRepairLimitReached()) {
+      data.put("repair_limit_reached", true);
+      data.put("recommended_next_action", CodeAgentToolNames.FINALIZE_TASK);
+    } else if (syntaxPendingBeforeBrowser()) {
       data.put("recommended_next_action", "syntax_check");
     } else if ("browser_test".equals(toolName)
         && verificationFailureHasProductRoot) {
@@ -695,6 +709,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
         && !Boolean.FALSE.equals(data.get("passed"))
         && !Boolean.FALSE.equals(data.get("changed"));
     boolean mutated = writeMutated(data) || validSuccess;
+    boolean repairsLightweightSmoke =
+        "verify_web_project".equals(verificationFailureTool)
+            && "product_code_failure".equals(verificationFailureKind);
     if (!validSuccess) {
       // A failed or partially-applied write is not completion evidence. If it did mutate the
       // file, however, it creates a new revision: previous verification/quality evidence is
@@ -712,6 +729,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return;
     }
     advanceRevision(write.path);
+    if (repairsLightweightSmoke) lightweightSmokeRepairCount++;
     recoverableEditPath = "";
     recoveryReadReady = false;
     verificationFailureTool = "";
@@ -759,6 +777,9 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (role == CodeToolRole.VERIFY) {
       if ("browser_test".equals(toolName)) {
         return captureBrowserTransaction(arguments, data);
+      }
+      if ("verify_web_project".equals(toolName)) {
+        return validLightweightWebEvidence(data);
       }
       return Boolean.TRUE.equals(data.get("passed"));
     }
@@ -827,12 +848,17 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (kind.isEmpty()) kind = "product_code_failure";
     boolean browserFailure = "browser_test".equals(toolName);
+    boolean lightweightSmokeFailure = "verify_web_project".equals(toolName);
     verificationFailureHasTestRoot = browserFailure
         && hasIndependentBrowserTestFailure(result.data());
     verificationFailureHasProductRoot = browserFailure
         && (hasExplicitBrowserProductFailure(result.data())
             || ("product_code_failure".equals(kind)
                 && !verificationFailureHasTestRoot));
+    if (lightweightSmokeFailure) {
+      verificationFailureHasTestRoot = false;
+      verificationFailureHasProductRoot = "product_code_failure".equals(kind);
+    }
     if ("environment_failure".equals(kind)) {
       verificationFailureHasProductRoot = false;
       verificationFailureHasTestRoot = false;
@@ -1001,6 +1027,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private boolean qualityEvidenceRequired(String completionType) {
+    if (lightweightWebVerification() && !contract.requiresAnyQualityReview()) return false;
     if (contract.requiresQualityReview(completionType)
         || "interface_product".equals(qualityMode())) return true;
     for (PlanStep step : steps) if ("quality".equals(step.phase)) return true;
@@ -1018,6 +1045,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private String nextCompletionAction(String completionType) {
     if (mode == CodePlanningMode.FORCE && !hasPlan()) return CodeAgentToolNames.PLAN_TASK;
+    if (lightweightSmokeRepairLimitReached()) return CodeAgentToolNames.FINALIZE_TASK;
     if (syntaxPendingBeforeBrowser()) return "syntax_check";
     if (!verificationFailureTool.isEmpty()) return verificationFailureTool;
     if (verificationEvidenceReady(completionType)
@@ -1049,6 +1077,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
       return "search_replace";
     }
     if (syntaxPendingBeforeBrowser()) return "syntax_check";
+    if (lightweightSmokeRepairLimitReached()) return CodeAgentToolNames.FINALIZE_TASK;
     if (!verificationFailureTool.isEmpty()
         && !retryBrowserPlanWithoutCodeRead()
         && (hasRoleAtRevision(CodeToolRole.CREATE)
@@ -1143,11 +1172,17 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     if (current == null) return CodeAgentToolNames.FINALIZE_TASK;
     if (!declaredVerificationTools(current).isEmpty()) {
       String missing = nextMissingVerificationTool();
-      return missing.isEmpty() ? CodeAgentToolNames.QUALITY_REVIEW : missing;
+      return missing.isEmpty()
+          ? (qualityEvidenceRequired("code_generation")
+              ? CodeAgentToolNames.QUALITY_REVIEW : CodeAgentToolNames.FINALIZE_TASK)
+          : missing;
     }
     if ("verify".equals(current.phase)) {
       String missing = nextMissingVerificationTool();
-      return missing.isEmpty() ? "browser_test" : missing;
+      return missing.isEmpty()
+          ? (lightweightWebVerification()
+              ? CodeAgentToolNames.FINALIZE_TASK : "browser_test")
+          : missing;
     }
     if ("quality".equals(current.phase)) return CodeAgentToolNames.QUALITY_REVIEW;
     if ("discover".equals(current.phase)) return "read_file";
@@ -1158,6 +1193,23 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     if (!current.requiredTools.isEmpty()) return canonicalToolName(current.requiredTools.get(0));
     return CodeAgentToolNames.PLAN_TASK;
+  }
+
+  private boolean lightweightWebVerification() {
+    return contract.requiredEvidence("code_generation").contains("verify_web_project");
+  }
+
+  private boolean lightweightSmokeRepairLimitReached() {
+    return "verify_web_project".equals(verificationFailureTool)
+        && "product_code_failure".equals(verificationFailureKind)
+        && lightweightSmokeRepairCount >= 1;
+  }
+
+  private static boolean validLightweightWebEvidence(Map<String, Object> data) {
+    if (!Boolean.TRUE.equals(data.get("passed"))) return false;
+    if (!"passed".equals(text(data.get("syntax_status")))) return false;
+    String smoke = text(data.get("smoke_status"));
+    return "passed".equals(smoke) || "skipped".equals(smoke) || "unavailable".equals(smoke);
   }
 
   private void addRoles(Set<String> output, CodeToolRole... accepted) {

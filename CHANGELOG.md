@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.20
+
+- 工具协议新增 Endpoint `STRICT/BEST_EFFORT` 与 Tool Schema 双重开关；严格工具向兼容网关发送 `strict:true`，旧构造方式继续默认非严格。
+- 非法工具参数不再修补尾括号或降级为 `__raw_arguments`，而是在 Dispatcher 之前形成精确错误；兼容接口最多纠错一次，严格接口直接报告 Provider 协议异常。
+- `create_file/search_replace` 收敛为严格 Schema，移除单条替换、`expected_matches` 等旧参数分支；默认轻量 Web 验证与完整 Browser 验收继续隔离。
+
 ## 2.0.19
 
 - 模型请求上下文采用 258k 输入预算，在 78%/88% 高水位按完整工具事务进行非破坏性软/强压缩；canonical history、revision、evidence 和验证状态保持不变。

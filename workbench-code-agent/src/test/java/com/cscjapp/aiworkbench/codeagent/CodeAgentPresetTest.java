@@ -163,7 +163,7 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("禁止添加无因果点击凑交互"));
     assertTrue(prompt.contains("recommended_next_action"));
     assertTrue(prompt.contains("不是其他安全工具的执行禁令"));
-    assertTrue(prompt.contains("允许在 syntax_check 前连续执行多次 search_replace"));
+    assertTrue(prompt.contains("允许在验证前连续执行多次 search_replace"));
     assertTrue(prompt.contains("逐字来自当前 revision"));
     assertTrue(prompt.contains("动作后的关闭、消失或复位使用 eventually_true"));
     assertTrue(prompt.contains("‘可见且可点击’只能作为静态检查"));
@@ -175,35 +175,6 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains(
         "recommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据"));
     assertTrue(prompt.contains("不要读取源码、replan 或传入 path"));
-  }
-
-  @Test
-  public void malformedNativePlanArgumentsFailBeforeNormalization() {
-    CodeAgentPreset preset =
-        CodeAgentPreset.builder(profile(""))
-            .workspace(workspace)
-            .build();
-    AgentTool plan = find(preset.tools(), CodeAgentToolNames.PLAN_TASK);
-    AtomicReference<ToolResult> output = new AtomicReference<>();
-
-    plan.execute(
-        null,
-        new ToolArguments(map("__raw_arguments", "{\"goal\":\"repair\"}}")),
-        new ToolCallback() {
-          @Override
-          public void onProgress(String stage, long current, long total, String message) {}
-
-          @Override
-          public void onComplete(ToolResult result) {
-            output.set(result);
-          }
-        });
-
-    assertNotNull(output.get());
-    assertEquals(ToolResult.Status.ERROR, output.get().status());
-    assertEquals("invalid_tool_arguments", output.get().errorCode());
-    assertTrue(output.get().retryable());
-    assertFalse(((ManagedCodePlanCoordinator) preset.toolPolicies().get(0)).hasPlan());
   }
 
   @Test
@@ -265,7 +236,7 @@ public final class CodeAgentPresetTest {
     ToolResult invalid = execute(
         quality, new ToolArguments(map("path", "main.txt")));
     assertEquals(ToolResult.Status.ERROR, invalid.status());
-    assertEquals("invalid_tool_arguments", invalid.errorCode());
+    assertEquals("invalid_quality_arguments", invalid.errorCode());
     assertEquals(CodeAgentToolNames.QUALITY_REVIEW,
         invalid.data().get("recommended_next_action"));
     assertTrue(invalid.message().contains("不要传 path"));
@@ -276,7 +247,7 @@ public final class CodeAgentPresetTest {
                 "passed", false,
                 "blocking_gaps", Collections.emptyList(),
                 "minimal_version_risk", false)));
-    assertEquals("invalid_tool_arguments", ambiguousFailure.errorCode());
+    assertEquals("invalid_quality_arguments", ambiguousFailure.errorCode());
     assertTrue(ambiguousFailure.message().contains("必须给出 blocking_gaps"));
     assertTrue(coordinator.hasCurrentEvidence("syntax_check"));
     assertTrue(coordinator.hasCurrentEvidence("browser_test"));
@@ -3515,6 +3486,140 @@ public final class CodeAgentPresetTest {
     engine.submit("explain", observer(output));
     assertEquals("done", output.get());
     return rounds.get();
+  }
+
+  @Test
+  public void lightweightWebVerificationRemovesDeepSchemaPromptAndQualityRound() {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("verify_web_project")
+        .build();
+    CodeLanguageProfile lightweight = CodeLanguageProfile.builder("html")
+        .verificationContract(contract)
+        .build();
+    CodeAgentPreset preset = CodeAgentPreset.builder(lightweight)
+        .workspace(workspace)
+        .languageTools(Collections.singletonList(tool("verify_web_project")))
+        .build();
+
+    Set<String> names = new LinkedHashSet<>();
+    for (AgentTool candidate : preset.tools()) names.add(candidate.spec().name());
+    String prompt = preset.promptContributors().get(0)
+        .contribute(new PromptContext("workspace", "task", Collections.emptyMap()))
+        .get(0).content();
+
+    assertTrue(names.contains("verify_web_project"));
+    assertFalse(names.contains(CodeAgentToolNames.QUALITY_REVIEW));
+    assertTrue(prompt.contains("load-only WebView 冒烟"));
+    assertFalse(prompt.contains("false_to_true"));
+    assertFalse(prompt.contains("recommended_next_action=quality_review"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void lightweightPlanDropsLegacyQualityStepEvenForInterfaceProduct() {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("verify_web_project")
+        .build();
+    Map<String, Object> normalized = new CodePlanNormalizer(contract).normalize(
+        map(
+            "goal", "烟花页面",
+            "quality_mode", "interface_product",
+            "verification_plan", Arrays.asList("syntax_check", "browser_test"),
+            "steps", Arrays.asList(
+                step("implement", "实现", "implement", "search_replace"),
+                step("verify", "旧完整验证", "verify", "syntax_check", "browser_test"),
+                step("quality", "旧质量轮次", "quality", "quality_review"))));
+
+    List<Map<String, Object>> steps = (List<Map<String, Object>>) normalized.get("steps");
+    assertEquals(
+        Collections.singletonList("verify_web_project"),
+        normalized.get("verification_plan"));
+    assertEquals(
+        Collections.singletonList("verify_web_project"),
+        findStep(steps, "verify").get("required_tools"));
+    assertFalse(steps.stream().anyMatch(step -> "quality".equals(step.get("phase"))));
+  }
+
+  @Test
+  public void lightweightCompositeEvidenceAcceptsUnavailableAndCapsProductRepair() {
+    CodeValidationContract contract = CodeValidationContract.builder()
+        .defaultRequiredEvidence("verify_web_project")
+        .build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("verify_web_project", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    AgentRunContext run = new AgentRunContext(900L, "s", "workspace", "task");
+    coordinator.onRunStarted(run);
+    coordinator.acceptPlan(map(
+        "goal", "轻量验证",
+        "planned_files", Collections.singletonList(map("path", "main.txt", "action", "edit")),
+        "steps", Arrays.asList(
+            step("implement", "实现", "implement", "search_replace"),
+            step("verify", "验证", "verify", "verify_web_project"))));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "content", "before")));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+
+    ToolResult unavailable = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "verify_web_project",
+        ToolArguments.empty(),
+        ToolResult.success(map(
+            "passed", true,
+            "syntax_status", "passed",
+            "smoke_status", "unavailable",
+            "browser_evidence_formed", false)));
+    assertTrue(coordinator.hasCurrentEvidence("verify_web_project"));
+    assertTrue(coordinator.completionEvidenceReady("code_generation"));
+    assertEquals(CodeAgentToolNames.FINALIZE_TASK,
+        unavailable.data().get("recommended_next_action"));
+
+    // A new write invalidates the successful evidence and starts a fresh product-failure path.
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+    ToolResult firstFailure = ToolResult.success(map(
+        "passed", false,
+        "syntax_status", "failed",
+        "smoke_status", "not_started",
+        "failure_kind", "product_code_failure"));
+    coordinator.recordAndDecorate(
+        coordinator.generation(), "verify_web_project", ToolArguments.empty(), firstFailure);
+
+    List<ToolSpec> registered = Arrays.asList(
+        tool("read_file").spec(),
+        tool("search_replace").spec(),
+        tool("verify_web_project").spec(),
+        tool(CodeAgentToolNames.FINALIZE_TASK).spec());
+    assertTrue(selectedNames(coordinator.selectTools(
+        new AgentRoundContext(run, 1), registered)).contains("search_replace"));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+    ToolResult secondFailure = coordinator.recordAndDecorate(
+        coordinator.generation(), "verify_web_project", ToolArguments.empty(), firstFailure);
+    Set<String> afterRetry = selectedNames(coordinator.selectTools(
+        new AgentRoundContext(run, 2), registered));
+    assertEquals(Collections.singleton(CodeAgentToolNames.FINALIZE_TASK), afterRetry);
+    assertEquals(Boolean.TRUE, secondFailure.data().get("repair_limit_reached"));
+    assertEquals(CodeAgentToolNames.FINALIZE_TASK,
+        secondFailure.data().get("recommended_next_action"));
   }
 
   private CodeLanguageProfile profile(String rules) {

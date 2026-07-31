@@ -31,6 +31,7 @@ public final class AgentEngine implements Cancellable {
   private volatile AgentRunContext activeRunContext;
   private volatile PausedContinuation pausedContinuation;
   private int authorizedRoundLimit;
+  private int invalidToolArgumentFailures;
 
   public AgentEngine(
       WorkbenchDefinition d,
@@ -121,6 +122,7 @@ public final class AgentEngine implements Cancellable {
     clearPausedContinuation();
     synchronized (this) {
       authorizedRoundLimit = initialAuthorizedRoundLimit();
+      invalidToolArgumentFailures = 0;
     }
     AgentRunContext runContext = new AgentRunContext(runId, sessionId, workspaceId, demand);
     activeRunContext = runContext;
@@ -202,6 +204,11 @@ public final class AgentEngine implements Cancellable {
 
               public void onComplete(ModelResponse response) {
                 if (!isActive(runId)) return;
+                if (!response.invalidToolCalls().isEmpty()) {
+                  handleInvalidToolCall(
+                      demand, o, n, response.invalidToolCalls().get(0), runId);
+                  return;
+                }
                 synchronized (AgentEngine.this) {
                   requestHistory.recordUsage(response.usage());
                   messages.add(AgentMessage.assistant(response.content(), response.toolCalls()));
@@ -232,6 +239,66 @@ public final class AgentEngine implements Cancellable {
                 validateAndFinish(demand, o, n, response.content(), "task_completed", runId);
               }
             });
+  }
+
+  private void handleInvalidToolCall(
+      String demand,
+      AgentObserver observer,
+      int round,
+      InvalidToolCall invalid,
+      long runId) {
+    if (!isActive(runId)) return;
+    boolean strict =
+        endpoint != null && endpoint.toolArgumentMode() == ToolArgumentMode.STRICT;
+    int failureCount;
+    synchronized (this) {
+      failureCount = ++invalidToolArgumentFailures;
+    }
+    boolean retryable = !strict && failureCount == 1;
+    String detail = invalidToolArgumentDetail(invalid);
+    Map<String, Object> data = new LinkedHashMap<>();
+    data.put("operation", invalid.name());
+    data.put("argument_chars", invalid.argumentChars());
+    if (invalid.errorOffset() >= 0) data.put("error_offset", invalid.errorOffset());
+    if (!invalid.invalidEscape().isEmpty()) {
+      data.put("invalid_escape", invalid.invalidEscape());
+    }
+    data.put("attempt", failureCount);
+    ToolResult result =
+        ToolResult.error("invalid_tool_arguments", detail, retryable, data);
+    observer.onToolStarted(invalid.id(), invalid.name(), ToolArguments.empty());
+    observer.onToolCompleted(invalid.id(), invalid.name(), result);
+    if (retryable) {
+      synchronized (this) {
+        messages.add(AgentMessage.user(invalidToolArgumentFeedback(invalid)));
+      }
+      round(demand, observer, round + 1, runId);
+      return;
+    }
+    finishRun(runId, strict ? "provider_protocol_error" : "invalid_tool_arguments");
+    observer.onError(
+        new IllegalStateException(
+            strict ? "Provider 严格工具协议异常：" + detail : detail));
+  }
+
+  private static String invalidToolArgumentDetail(InvalidToolCall invalid) {
+    StringBuilder message = new StringBuilder("工具参数 JSON 非法");
+    if (!invalid.invalidEscape().isEmpty()) {
+      message.append("：非法转义 ").append(invalid.invalidEscape());
+    } else if (!invalid.errorMessage().isEmpty()) {
+      message.append("：").append(invalid.errorMessage());
+    }
+    if (invalid.errorOffset() >= 0) {
+      message.append("（位置 ").append(invalid.errorOffset()).append("）");
+    }
+    return message.toString();
+  }
+
+  private static String invalidToolArgumentFeedback(InvalidToolCall invalid) {
+    return invalidToolArgumentDetail(invalid)
+        + "。请重新生成完整工具调用；参数必须是严格 JSON。"
+        + "源码反斜杠必须在外层 JSON 中再次转义；禁止在 JSON 层直接使用"
+        + " \\UXXXXXXXX 或 \\u{...}，可优先使用原始 Unicode 字符。";
   }
 
   private List<ToolSpec> selectTools(int round, long runId) {

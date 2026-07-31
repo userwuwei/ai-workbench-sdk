@@ -15,10 +15,13 @@ public final class CreateFileTool extends AbstractFileTool {
         ToolSchemas.object(
             new String[][] {
               {"path", "string", "目标路径"},
-              {"content", "string", "新文件的完整内容"}
+              {"content", "string", "新文件的完整内容"},
+              {"file_role", "string", "entry_source/module_source/asset/test_source"}
             },
             "path",
-            "content"));
+            "content",
+            "file_role"),
+        true);
   }
 
   ToolResult run(ToolArguments a) throws Exception {

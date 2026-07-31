@@ -50,6 +50,9 @@ public class FileToolsTest {
     ToolSpec spec = new CreateFileTool(ws).spec();
     Map<?, ?> properties = (Map<?, ?>) spec.inputSchema().get("properties");
     assertTrue(spec.description().contains("尚不存在"));
+    assertTrue(spec.strictSchema());
+    assertEquals(Boolean.FALSE, spec.inputSchema().get("additionalProperties"));
+    assertEquals(Arrays.asList("path", "content", "file_role"), spec.inputSchema().get("required"));
     assertFalse(properties.containsKey("overwrite"));
   }
 
@@ -91,7 +94,39 @@ public class FileToolsTest {
     Map<?, ?> properties = (Map<?, ?>) spec.inputSchema().get("properties");
     assertTrue(spec.description().contains("已有文件"));
     assertTrue(spec.description().contains("唯一编辑工具"));
+    assertTrue(spec.strictSchema());
+    assertEquals(Boolean.FALSE, spec.inputSchema().get("additionalProperties"));
+    assertEquals(Arrays.asList("path", "replacements"), spec.inputSchema().get("required"));
     assertTrue(properties.containsKey("replacements"));
+    assertFalse(properties.containsKey("old"));
+    assertFalse(properties.containsKey("new"));
+    assertFalse(properties.containsKey("expected_matches"));
+
+    Map<?, ?> replacements = (Map<?, ?>) properties.get("replacements");
+    Map<?, ?> item = (Map<?, ?>) replacements.get("items");
+    Map<?, ?> itemProperties = (Map<?, ?>) item.get("properties");
+    assertEquals(Boolean.FALSE, item.get("additionalProperties"));
+    assertEquals(Arrays.asList("old", "new"), item.get("required"));
+    assertEquals(new LinkedHashSet<>(Arrays.asList("old", "new")),
+        new LinkedHashSet<>(itemProperties.keySet()));
+  }
+
+  @Test
+  public void searchReplaceRejectsRemovedTopLevelShapeWithoutWriting() throws Exception {
+    ws.writeAtomic("main.txt", "before", false);
+
+    try {
+      new SearchReplaceTool(ws).run(
+          new ToolArguments()
+              .with("path", "main.txt")
+              .with("old", "before")
+              .with("new", "after"));
+      fail();
+    } catch (IllegalArgumentException expected) {
+      assertEquals("replacements_required", expected.getMessage());
+    }
+
+    assertEquals("before", ws.read("main.txt"));
   }
 
   @Test
@@ -165,7 +200,6 @@ public class FileToolsTest {
     Map<String, Object> item = new LinkedHashMap<>();
     item.put("old", oldText);
     item.put("new", newText);
-    item.put("expected_matches", 1);
     return item;
   }
 }

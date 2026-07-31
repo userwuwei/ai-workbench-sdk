@@ -12,7 +12,6 @@ public final class SearchReplaceTool extends AbstractFileTool {
     Map<String, Object> replacementProperties = new LinkedHashMap<>();
     replacementProperties.put("old", property("string", "逐字复制自最新读取证据的旧文本"));
     replacementProperties.put("new", property("string", "替换后的新文本"));
-    replacementProperties.put("expected_matches", property("integer", "期望命中次数，默认 1"));
     Map<String, Object> replacement = new LinkedHashMap<>();
     replacement.put("type", "object");
     replacement.put("properties", replacementProperties);
@@ -22,21 +21,20 @@ public final class SearchReplaceTool extends AbstractFileTool {
     replacements.put("type", "array");
     replacements.put("description", "同一文件多个非重叠修改点应在一次调用中原子提交");
     replacements.put("items", replacement);
+    replacements.put("minItems", 1);
     Map<String, Object> properties = new LinkedHashMap<>();
     properties.put("path", property("string", "已存在的目标路径"));
-    properties.put("old", property("string", "单个替换简写：旧文本"));
-    properties.put("new", property("string", "单个替换简写：新文本"));
-    properties.put("expected_matches", property("integer", "单个替换期望命中次数，默认 1"));
     properties.put("replacements", replacements);
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", "object");
     schema.put("properties", properties);
-    schema.put("required", Collections.singletonList("path"));
+    schema.put("required", Arrays.asList("path", "replacements"));
     schema.put("additionalProperties", false);
     return new ToolSpec(
         "search_replace",
         "修改任何已有文件的唯一编辑工具，包括修复、重构、布局和样式升级；多个修改点使用 replacements[]",
-        schema);
+        schema,
+        true);
   }
 
   ToolResult run(ToolArguments a) throws Exception {
@@ -48,9 +46,9 @@ public final class SearchReplaceTool extends AbstractFileTool {
       Replacement item = requested.get(index);
       if (item.old.isEmpty()) throw new IllegalArgumentException("search_text_empty:" + index);
       List<Integer> matches = matches(c, item.old);
-      if (matches.size() != item.expectedMatches) {
+      if (matches.size() != 1) {
         throw new IllegalArgumentException(
-            "search_match_count:" + index + ":expected=" + item.expectedMatches + ":actual=" + matches.size());
+            "search_match_count:" + index + ":expected=1:actual=" + matches.size());
       }
       for (Integer start : matches) {
         resolved.add(new ResolvedReplacement(start, item.old, item.newValue));
@@ -95,15 +93,8 @@ public final class SearchReplaceTool extends AbstractFileTool {
         result.add(
             new Replacement(
                 text(item.get("old")),
-                text(item.get("new")),
-                integer(item.get("expected_matches"), 1)));
+                text(item.get("new"))));
       }
-    } else {
-      result.add(
-          new Replacement(
-              arguments.getString("old", ""),
-              arguments.getString("new", ""),
-              arguments.getInt("expected_matches", 1)));
     }
     if (result.isEmpty()) throw new IllegalArgumentException("replacements_required");
     return result;
@@ -125,24 +116,13 @@ public final class SearchReplaceTool extends AbstractFileTool {
     return value == null ? "" : String.valueOf(value);
   }
 
-  private static int integer(Object value, int fallback) {
-    if (value instanceof Number) return ((Number) value).intValue();
-    try {
-      return value == null ? fallback : Integer.parseInt(String.valueOf(value));
-    } catch (Exception ignored) {
-      return fallback;
-    }
-  }
-
   private static final class Replacement {
     final String old;
     final String newValue;
-    final int expectedMatches;
 
-    Replacement(String old, String newValue, int expectedMatches) {
+    Replacement(String old, String newValue) {
       this.old = old;
       this.newValue = newValue;
-      this.expectedMatches = Math.max(1, expectedMatches);
     }
   }
 

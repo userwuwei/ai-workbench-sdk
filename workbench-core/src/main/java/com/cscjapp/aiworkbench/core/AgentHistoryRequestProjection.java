@@ -199,7 +199,6 @@ final class AgentHistoryRequestProjection {
           "failed_index",
           "status",
           "error_code",
-          "expected_matches",
           "actual_matches",
           "original_matches",
           "matched_lines",
@@ -258,8 +257,7 @@ final class AgentHistoryRequestProjection {
         "failed_index",
         "source",
         "start_line",
-        "end_line",
-        "expected_matches");
+        "end_line");
     for (String key : new String[] {
         "old", "snippet", "preferred_old", "retry_template", "instruction"
     }) {
@@ -576,11 +574,8 @@ final class AgentHistoryRequestProjection {
     if ("create_file".equals(tool)) {
       addString(payloads, arguments.get("content"));
     } else if ("search_replace".equals(tool)) {
-      addString(payloads, arguments.get("old"));
-      addString(payloads, arguments.get("new"));
       collectFields(payloads, arguments.get("replacements"), "old", "new");
     } else if ("rewrite".equals(tool)) {
-      addString(payloads, arguments.get("content"));
       collectFields(payloads, arguments.get("units"), "content");
     }
     StringBuilder joined = new StringBuilder();
@@ -653,9 +648,6 @@ final class AgentHistoryRequestProjection {
         Map<?, ?> unit = (Map<?, ?>) item;
         output.add(new RepairUnit(index, unit, payloadKey, value(unit.get(payloadKey))));
       }
-    } else if ((failedIndexes.isEmpty() || failedIndexes.contains(0))
-        && !appliedIndexes.contains(0)) {
-      output.add(new RepairUnit(0, source, payloadKey, value(source.get(payloadKey))));
     }
     return output;
   }
@@ -668,9 +660,6 @@ final class AgentHistoryRequestProjection {
       anchor.put("old_sha256", sha256(old));
       if (old.length() > MAX_RETRY_TEXT_CHARS) anchor.put("old_truncated", true);
     }
-    Object expected = replacement.get("expected_matches");
-    if (expected != null) anchor.put("expected_matches", expected);
-    copyScalar(replacement, anchor, "summary", 240);
   }
 
   private static void addRepairPayload(

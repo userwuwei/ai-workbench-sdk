@@ -705,6 +705,215 @@ public class AgentCoreTest {
     assertEquals("done", finalText.get());
   }
 
+  @Test
+  public void bestEffortInvalidArgumentsRetryOnceWithoutDispatching() {
+    AtomicInteger rounds = new AtomicInteger();
+    AtomicInteger executions = new AtomicInteger();
+    AtomicInteger policyChecks = new AtomicInteger();
+    AtomicInteger invalidNotices = new AtomicInteger();
+    AtomicReference<String> finalText = new AtomicReference<>();
+    ModelGateway gateway =
+        (request, observer) -> {
+          int round = rounds.incrementAndGet();
+          if (round == 1) {
+            observer.onComplete(invalidResponse("call-invalid", "\\U", 42));
+          } else {
+            observer.onComplete(
+                new ModelResponse(
+                    "",
+                    "tool_calls",
+                    Collections.singletonList(
+                        new AgentToolCall(
+                            "call-final",
+                            "finalize_task",
+                            new ToolArguments(map("status", "completed", "summary", "done"))))));
+          }
+          return Cancellable.NONE;
+        };
+    WorkbenchDefinition base =
+        definition(
+            Arrays.asList(countingTool("create_file", executions), tool("finalize_task", true)),
+            Collections.emptyList());
+    ToolPolicy policy =
+        new ToolPolicy() {
+          public boolean supports(ToolInvocation invocation) {
+            policyChecks.incrementAndGet();
+            return false;
+          }
+
+          public Cancellable evaluate(
+              ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+            throw new AssertionError("invalid arguments must not reach policies");
+          }
+        };
+    WorkbenchDefinition routed = withPolicies(base, Collections.singletonList(policy));
+    AgentEngine engine =
+        new AgentEngine(
+            routed,
+            gateway,
+            new ModelEndpoint(
+                "http://localhost",
+                "",
+                "m",
+                0,
+                true,
+                false,
+                ToolArgumentMode.BEST_EFFORT),
+            noopDecisions(),
+            Runnable::run,
+            "s",
+            "w",
+            false,
+            4);
+
+    engine.submit(
+        "task",
+        recordingObserver(
+            finalText,
+            new AtomicReference<>(),
+            invalidNotices));
+
+    assertEquals(2, rounds.get());
+    assertEquals(0, executions.get());
+    assertEquals(1, policyChecks.get()); // Only finalize_task enters the dispatcher.
+    assertEquals(1, invalidNotices.get());
+    assertEquals("done", finalText.get());
+    assertTrue(
+        engine.messages().stream()
+            .anyMatch(
+                message ->
+                    message.role() == AgentMessage.Role.USER
+                        && message.content().contains("禁止在 JSON 层直接使用")));
+    assertFalse(
+        engine.messages().stream()
+            .anyMatch(
+                message ->
+                    message.role() == AgentMessage.Role.TOOL
+                        && "call-invalid".equals(message.toolCallId())));
+  }
+
+  @Test
+  public void bestEffortStopsAfterSecondInvalidArgumentsAndStrictStopsImmediately() {
+    AtomicInteger bestEffortRounds = new AtomicInteger();
+    ModelGateway invalidGateway =
+        (request, observer) -> {
+          bestEffortRounds.incrementAndGet();
+          observer.onComplete(invalidResponse("call-invalid", "\\u{", 17));
+          return Cancellable.NONE;
+        };
+    AtomicReference<Throwable> bestEffortError = new AtomicReference<>();
+    AtomicInteger bestEffortNotices = new AtomicInteger();
+    AgentEngine bestEffort =
+        new AgentEngine(
+            definition(Collections.singletonList(countingTool("create_file", new AtomicInteger())),
+                Collections.emptyList()),
+            invalidGateway,
+            new ModelEndpoint(
+                "http://localhost",
+                "",
+                "m",
+                0,
+                true,
+                false,
+                ToolArgumentMode.BEST_EFFORT),
+            noopDecisions(),
+            Runnable::run,
+            "s",
+            "w",
+            false,
+            5);
+
+    bestEffort.submit(
+        "task",
+        recordingObserver(
+            new AtomicReference<>(), bestEffortError, bestEffortNotices));
+
+    assertEquals(2, bestEffortRounds.get());
+    assertEquals(2, bestEffortNotices.get());
+    assertNotNull(bestEffortError.get());
+
+    AtomicInteger strictRounds = new AtomicInteger();
+    AtomicReference<Throwable> strictError = new AtomicReference<>();
+    AgentEngine strict =
+        new AgentEngine(
+            definition(Collections.singletonList(countingTool("create_file", new AtomicInteger())),
+                Collections.emptyList()),
+            (request, observer) -> {
+              strictRounds.incrementAndGet();
+              observer.onComplete(invalidResponse("call-strict", "\\U", 9));
+              return Cancellable.NONE;
+            },
+            new ModelEndpoint(
+                "http://localhost", "", "m", 0, true, false, ToolArgumentMode.STRICT),
+            noopDecisions(),
+            Runnable::run,
+            "s",
+            "w",
+            false,
+            5);
+
+    strict.submit(
+        "task",
+        recordingObserver(new AtomicReference<>(), strictError, new AtomicInteger()));
+
+    assertEquals(1, strictRounds.get());
+    assertNotNull(strictError.get());
+    assertTrue(strictError.get().getMessage().contains("工具参数 JSON 非法"));
+  }
+
+  private static ModelResponse invalidResponse(
+      String callId, String invalidEscape, int offset) {
+    return new ModelResponse(
+        "",
+        "tool_calls",
+        Collections.singletonList(
+            new AgentToolCall(
+                "call-valid-alongside-invalid",
+                "create_file",
+                new ToolArguments(map("path", "must-not-be-written.txt", "content", "blocked")))),
+        Collections.singletonList(
+            new InvalidToolCall(
+                callId,
+                "create_file",
+                "Invalid escape sequence",
+                invalidEscape,
+                offset,
+                100)));
+  }
+
+  private static WorkbenchDefinition withPolicies(
+      WorkbenchDefinition base, List<ToolPolicy> policies) {
+    return new WorkbenchDefinition() {
+      public String id() { return base.id(); }
+      public String displayName() { return base.displayName(); }
+      public List<PromptContributor> promptContributors() { return base.promptContributors(); }
+      public List<ContextProvider> contextProviders() { return base.contextProviders(); }
+      public List<AgentTool> tools() { return base.tools(); }
+      public List<ToolPolicy> toolPolicies() { return policies; }
+      public List<TaskValidator> validators() { return base.validators(); }
+      public WorkbenchHost host() { return base.host(); }
+    };
+  }
+
+  private static AgentObserver recordingObserver(
+      AtomicReference<String> finalText,
+      AtomicReference<Throwable> error,
+      AtomicInteger invalidNotices) {
+    return new AgentObserver() {
+      public void onState(String state) {}
+      public void onDelta(String content, String reasoning) {}
+      public void onToolStarted(String id, String name, ToolArguments arguments) {}
+      public void onToolProgress(
+          String id, String stage, long current, long total, String message) {}
+      public void onToolCompleted(String id, String name, ToolResult result) {
+        if ("invalid_tool_arguments".equals(result.errorCode())) invalidNotices.incrementAndGet();
+      }
+      public void onValidation(ValidationResult result) {}
+      public void onFinal(String content) { finalText.set(content); }
+      public void onError(Throwable throwable) { error.set(throwable); }
+    };
+  }
+
   private static AgentTool tool(String name, boolean terminal) {
     return new AgentTool() {
       public ToolSpec spec() {

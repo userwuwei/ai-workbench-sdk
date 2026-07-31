@@ -328,12 +328,15 @@ final class WorkbenchViewModel extends ViewModel {
     if (item != null) {
       item.content = "正在基于当前工具结果继续处理。";
       item.actionEnabled = false;
-      item.actionVisible = true;
-      item.actionText = "正在继续处理";
+      item.actionVisible = false;
+      item.actionText = "";
+      item.actionId = "";
       postItems(true);
     }
+    pausedInteractionSummary = null;
     running.setValue(true);
     if (engine.resumePausedRun()) return true;
+    pausedInteractionSummary = item;
     running.setValue(false);
     markPauseActionInvalid("运行检查点已失效，请发送新的需求继续处理。", true);
     return false;
@@ -1269,8 +1272,6 @@ final class WorkbenchViewModel extends ViewModel {
     item.statusLevel = success ? WorkbenchUiItem.STATUS_SUCCESS : WorkbenchUiItem.STATUS_ERROR;
     item.errorState = !success;
     if (success && "search_replace".equals(name) && args != null) {
-      String oldText = args.getString("old", "");
-      String newText = args.getString("new", "");
       int replacementCount = 0;
       Object replacements = args.get("replacements");
       if (replacements instanceof List) {
@@ -1285,19 +1286,11 @@ final class WorkbenchViewModel extends ViewModel {
           replacementCount++;
         }
         if (batchDiff.length() > 0) {
-          oldText = "";
-          newText = "";
           item.diffVisible = true;
           item.diffTitle = path.isEmpty() ? "代码变更" : new File(path).getName();
           item.diffMeta = replacementCount + " 处精确替换";
           item.diffText = batchDiff.toString().trim();
         }
-      }
-      if (!oldText.isEmpty() || !newText.isEmpty()) {
-        item.diffVisible = true;
-        item.diffTitle = path.isEmpty() ? "代码变更" : new File(path).getName();
-        item.diffMeta = "精确替换";
-        item.diffText = diff(oldText, newText);
       }
     }
     state.add(item);

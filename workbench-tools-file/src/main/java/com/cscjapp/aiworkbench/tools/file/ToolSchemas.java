@@ -17,6 +17,7 @@ final class ToolSchemas {
     }
     schema.put("properties", props);
     schema.put("required", Arrays.asList(required));
+    schema.put("additionalProperties", false);
     return schema;
   }
 }

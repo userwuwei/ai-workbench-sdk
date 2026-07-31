@@ -173,6 +173,10 @@ public final class WorkbenchUiContractTest {
     assertTrue(viewModel.contains("继续生成"));
     assertTrue(continueRun.contains("engine.isPaused()"));
     assertTrue(continueRun.contains("engine.resumePausedRun()"));
+    assertTrue(continueRun.contains("item.actionVisible = false"));
+    assertTrue(
+        continueRun.indexOf("pausedInteractionSummary = null")
+            < continueRun.indexOf("engine.resumePausedRun()"));
     assertTrue(!continueRun.contains("engine.submit("));
     assertTrue(click.contains("ACTION_CONTINUE_MODEL_INTERACTION.equals(item.actionId)"));
     assertTrue(click.contains("viewModel.continuePausedRun()"));

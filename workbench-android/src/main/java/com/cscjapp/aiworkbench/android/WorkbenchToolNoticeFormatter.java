@@ -14,6 +14,12 @@ final class WorkbenchToolNoticeFormatter {
   static String build(String tool, ToolArguments args, ToolResult result, String workspaceId) {
     Map<String, Object> data = result == null ? Collections.emptyMap() : result.data();
     boolean success = result != null && result.isSuccess();
+    if (result != null && "invalid_tool_arguments".equals(result.errorCode())) {
+      StringBuilder invalid = new StringBuilder("工具参数 JSON 非法");
+      if (!empty(tool)) invalid.append("\n工具：").append(tool);
+      if (!empty(result.message())) invalid.append("\n原因：").append(result.message());
+      return invalid.toString();
+    }
     String path = displayPath(args == null ? "" : args.getString("path",
         args.getString("entry_path", "")), workspaceId);
     if ("list_dir".equals(tool)) {

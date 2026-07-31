@@ -49,6 +49,11 @@ public final class CodeValidationContract {
     return qualityReviewTypes.contains(safe(completionType));
   }
 
+  /** Returns whether any completion type explicitly opts into a standalone quality round. */
+  public boolean requiresAnyQualityReview() {
+    return !qualityReviewTypes.isEmpty();
+  }
+
   public boolean requiresManagedPlan(String completionType) {
     return managedPlanTypes.contains(safe(completionType));
   }
