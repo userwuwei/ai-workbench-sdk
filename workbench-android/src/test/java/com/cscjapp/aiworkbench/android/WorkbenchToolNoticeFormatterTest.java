@@ -42,6 +42,22 @@ public final class WorkbenchToolNoticeFormatterTest {
   }
 
   @Test
+  public void highRiskSearchReplaceSuccessAnnouncesRequiredVerification() {
+    String notice = WorkbenchToolNoticeFormatter.build(
+        "search_replace",
+        new ToolArguments(map("path", "/project/src/app.js")),
+        ToolResult.success(map(
+            "applied_count", 1,
+            "risk_level", "high",
+            "requires_verification", true)),
+        "/project");
+
+    assertTrue(notice.contains("已完成 1 项操作"));
+    assertTrue(notice.contains("本次涉及较大连续代码段"));
+    assertTrue(notice.contains("接下来将执行项目验证"));
+  }
+
+  @Test
   public void invalidToolJsonDoesNotInventAFileFailure() {
     ToolResult result = ToolResult.error(
         "invalid_tool_arguments",

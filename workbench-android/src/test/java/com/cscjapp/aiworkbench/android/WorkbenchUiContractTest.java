@@ -200,6 +200,24 @@ public final class WorkbenchUiContractTest {
   }
 
   @Test
+  public void recoverableSearchReplaceFailureReusesOnlyTheReasonCardAsWarning() throws Exception {
+    String viewModel =
+        read("src/main/java/com/cscjapp/aiworkbench/android/WorkbenchViewModel.java");
+    String render = methodBody(viewModel, "private void renderWriteResult");
+    String recoverable = methodBody(
+        viewModel, "private static boolean recoverableUnwrittenSearchReplace");
+
+    assertTrue(render.contains("recoverableUnwrittenSearchReplace(name, result)"));
+    assertTrue(render.contains("currentReason.title = \"修改尚未写入\""));
+    assertTrue(render.contains("正在根据当前源码调整修改范围"));
+    assertTrue(render.contains("WorkbenchUiItem.STATUS_WARNING"));
+    assertTrue(render.indexOf("return;") < render.indexOf("WorkbenchUiItem.editNotice"));
+    assertTrue(recoverable.contains("result.retryable()"));
+    assertTrue(recoverable.contains("Boolean.FALSE.equals"));
+    assertTrue(recoverable.contains("startsWith(\"search_replace_\")"));
+  }
+
+  @Test
   public void auraOptimizationPreservesVisualContractAndAllocatesOutsideDraw() throws Exception {
     String aura =
         read(

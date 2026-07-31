@@ -116,8 +116,15 @@ final class AgentHistoryRequestProjection {
         ? Collections.emptySet() : failedIndexes(data);
     Set<Integer> appliedIndexes = completedIndexes(data);
     if (repair) {
+      boolean compactRiskPayload = "search_replace".equals(call.name())
+          && string(result.get("error_code")).contains("destructive_change");
       addRetryAnchors(
-          compactArguments, call.name(), source, failedIndexes, appliedIndexes);
+          compactArguments,
+          call.name(),
+          source,
+          failedIndexes,
+          appliedIndexes,
+          compactRiskPayload);
     }
 
     JsonObject compactResult = new JsonObject();
@@ -150,6 +157,9 @@ final class AgentHistoryRequestProjection {
         "total_lines",
         "content_hash",
         "plan_state");
+    if ("search_replace".equals(call.name())) {
+      copySearchReplaceRiskEvidence(data, compactData);
+    }
     if (repair) {
       copyJson(
           data,
@@ -207,6 +217,12 @@ final class AgentHistoryRequestProjection {
           "maximum_old_line_count",
           "maximum_old_char_count",
           "too_large_old",
+          "risk_level",
+          "risk_reasons",
+          "deletion_risk",
+          "scope_coverage_ratio",
+          "retained_ratio",
+          "function_definition_count",
           "suggested_strategy",
           "conflict_type",
           "conflict_with_index");
@@ -232,6 +248,43 @@ final class AgentHistoryRequestProjection {
     copyBoundedSearchReplaceCandidates(source, target, "copyable_old_candidates");
     copyBoundedSearchReplaceCandidates(source, target, "preferred_retry_old");
     return true;
+  }
+
+  private static void copySearchReplaceRiskEvidence(JsonObject source, JsonObject target) {
+    if (source == null || target == null) return;
+    copyJson(
+        source,
+        target,
+        "too_large_old",
+        "risk_level",
+        "risk_reasons",
+        "deletion_risk",
+        "scope_coverage_ratio",
+        "retained_ratio",
+        "high_risk_replacement_indexes",
+        "requires_verification");
+    JsonElement rawResults = source.get("results");
+    if (rawResults == null || !rawResults.isJsonArray()) return;
+    JsonArray summaries = new JsonArray();
+    for (JsonElement rawResult : rawResults.getAsJsonArray()) {
+      JsonObject result = object(rawResult);
+      if (result == null) continue;
+      JsonObject summary = new JsonObject();
+      copyJson(
+          result,
+          summary,
+          "index",
+          "status",
+          "too_large_old",
+          "risk_level",
+          "risk_reasons",
+          "deletion_risk",
+          "scope_coverage_ratio",
+          "retained_ratio",
+          "function_definition_count");
+      if (summary.size() > 0) summaries.add(summary);
+    }
+    if (summaries.size() > 0) target.add("results", summaries);
   }
 
   private static void copyBoundedSearchReplaceCandidates(
@@ -289,9 +342,13 @@ final class AgentHistoryRequestProjection {
         JsonObject data = result == null ? null : object(result.get("data"));
         if (isWriteTool(call.name())
             && result != null
-            && successfulWithoutPartialFailure(result, data)
-            && GSON.toJson(call.arguments().asMap()).length() <= MAX_REPAIR_PAYLOAD_CHARS) {
-          latest = call.id();
+            && successfulWithoutPartialFailure(result, data)) {
+          if (requiresRiskProjection(call.name(), data)) {
+            latest = "";
+          } else if (GSON.toJson(call.arguments().asMap()).length()
+              <= MAX_REPAIR_PAYLOAD_CHARS) {
+            latest = call.id();
+          }
         } else if ("browser_test".equals(call.name())
             && result != null
             && "success".equalsIgnoreCase(string(result.get("status")))
@@ -302,6 +359,15 @@ final class AgentHistoryRequestProjection {
       }
     }
     return latest.isEmpty() ? Collections.emptySet() : Collections.singleton(latest);
+  }
+
+  private static boolean requiresRiskProjection(String toolName, JsonObject data) {
+    if (!"search_replace".equals(toolName) || data == null) return false;
+    String level = string(data.get("risk_level")).toLowerCase(Locale.US);
+    return "high".equals(level)
+        || "critical".equals(level)
+        || booleanValue(data.get("requires_verification"))
+        || nonEmpty(data.get("high_risk_replacement_indexes"));
   }
 
   private static Set<String> preservedFullReadCalls(List<AgentMessage> messages) {
@@ -592,7 +658,8 @@ final class AgentHistoryRequestProjection {
       String tool,
       Map<String, Object> source,
       Set<Integer> failedIndexes,
-      Set<Integer> appliedIndexes) {
+      Set<Integer> appliedIndexes,
+      boolean compactLargePayload) {
     List<RepairUnit> units = repairUnits(tool, source, failedIndexes, appliedIndexes);
     long encodedChars = 0L;
     int payloadChars = 0;
@@ -602,7 +669,8 @@ final class AgentHistoryRequestProjection {
       encodedChars += encodedChars(unit.payload);
       payloadDigest.append(unit.payload.length()).append(':').append(unit.payload).append(';');
     }
-    boolean keepExact = encodedChars <= MAX_REPAIR_PAYLOAD_CHARS;
+    boolean keepExact = encodedChars <= MAX_REPAIR_PAYLOAD_CHARS
+        && (!compactLargePayload || encodedChars <= MAX_RETRY_TEXT_CHARS);
     List<Map<String, Object>> anchors = new ArrayList<>();
     for (RepairUnit unit : units) {
       if (anchors.size() >= MAX_RETRY_ITEMS) break;

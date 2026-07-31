@@ -1266,6 +1266,20 @@ final class WorkbenchViewModel extends ViewModel {
 
   private void renderWriteResult(String name, ToolArguments args, ToolResult result) {
     boolean success = result != null && result.isSuccess();
+    if (recoverableUnwrittenSearchReplace(name, result)) {
+      if (currentReason != null) {
+        currentReason.title = "修改尚未写入";
+        replaceReasonContent("正在根据当前源码调整修改范围\n原因："
+            + resultMessage(result, "search_replace 预检失败"));
+        currentReason.statusLevel = WorkbenchUiItem.STATUS_WARNING;
+        currentReason.errorState = false;
+        currentReason.showProgressCounter = false;
+        currentReason.detailContent = formatMap(result.data());
+        currentReason.detailExpandable = !currentReason.detailContent.isEmpty();
+        deactivateReasonAura(currentReason);
+      }
+      return;
+    }
     String path = resolvePath(args, result);
     WorkbenchUiItem item = WorkbenchUiItem.editNotice(success ? "已修改文件" : "文件修改失败", "");
     item.content = WorkbenchToolNoticeFormatter.build(name, args, result, request.workspaceId());
@@ -1300,6 +1314,18 @@ final class WorkbenchViewModel extends ViewModel {
       currentReason.errorState = item.errorState;
       deactivateReasonAura(currentReason);
     }
+  }
+
+  private static boolean recoverableUnwrittenSearchReplace(String name, ToolResult result) {
+    if (!"search_replace".equals(name)
+        || result == null
+        || result.isSuccess()
+        || !result.retryable()
+        || !Boolean.FALSE.equals(result.data().get("current_file_changed"))) {
+      return false;
+    }
+    String errorCode = result.errorCode() == null ? "" : result.errorCode().trim();
+    return errorCode.startsWith("search_replace_");
   }
 
   private void renderToolResult(String name, ToolArguments args, ToolResult result) {

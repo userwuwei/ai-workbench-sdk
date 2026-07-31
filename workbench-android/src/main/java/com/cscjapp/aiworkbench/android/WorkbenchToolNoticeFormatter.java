@@ -105,6 +105,10 @@ final class WorkbenchToolNoticeFormatter {
     value.append("\n编辑文件：").append(path);
     int total = number(data, "total_lines", -1);
     if (total >= 0) value.append("\n当前文件：").append(total).append(" 行");
+    if ("high".equalsIgnoreCase(string(data.get("risk_level")))
+        && Boolean.TRUE.equals(data.get("requires_verification"))) {
+      value.append("\n本次涉及较大连续代码段，接下来将执行项目验证");
+    }
     return value.toString();
   }
 

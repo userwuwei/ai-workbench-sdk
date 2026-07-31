@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.21
+
+- `search_replace` 由 40 行/3000 字符硬上限改为 `low/medium/high/critical` 风险分级；唯一命中的连续大区段可写入，大段清空、广覆盖显著缩减和多函数显著缩减以 `search_replace_destructive_change` 原子拒绝。
+- Code Agent 提示词改为默认推荐 2～6 行精确窗口，允许来自当前 revision 且唯一命中的连续函数/语义区段；恢复路径同时兼容新 `destructive_change` 与旧 `old_too_large` 错误码。
+- ToolResult 可返回每项风险信息及顶层 `high_risk_replacement_indexes/requires_verification`；历史压缩保留有界风险摘要，Android 工作台将可恢复的零写入结果收敛为单张 warning Reason 卡，high-risk 成功卡明确提示后续项目验证。
+
 ## 2.0.20
 
 - 工具协议新增 Endpoint `STRICT/BEST_EFFORT` 与 Tool Schema 双重开关；严格工具向兼容网关发送 `strict:true`，旧构造方式继续默认非严格。

@@ -10,7 +10,7 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.20'
+    implementation 'com.github.userwuwei.ai-workbench-sdk:workbench-starter:2.0.21'
 }
 ```
 
@@ -87,6 +87,10 @@ Code Agent 通用层提供：
 - 自适应精简受管计划：简单任务直接执行，复杂任务通过短 `plan_task` 按真实工具证据推进。
 - `ADAPTIVE / FORCE / SKIP` 三种规划模式；宿主也可通过 `code_agent_planning_mode` 启动参数选择。
 - 新写入会使旧验证和质量证据失效；验证期间仍保持 `search_replace` 可达，只有 Validator 通过后计划才会完成。
+
+`search_replace` 入参仍严格限定为 `path + replacements[{old,new}]`。默认推荐使用当前 revision 中 2～6 行的唯一精确窗口；整体替换连续函数或语义区段时可以使用更大窗口。新版宿主将 40 行/3000 字符视为风险阈值而非硬上限：`low/medium/high` 可在整批预检通过后原子写入，`critical` 以可恢复的 `search_replace_destructive_change` 零写入返回。SDK 同时兼容旧宿主的 `search_replace_old_too_large`。
+
+宿主可在每项结果中返回 `too_large_old / risk_level / risk_reasons / deletion_risk`，并在顶层返回 `risk_level / risk_reasons / high_risk_replacement_indexes / requires_verification`。SDK 历史投影保留这些有界风险摘要，但不重复携带已压缩的大段替换文本。
 
 `read_file` 与目标驱动的 `read_plan` 在代码轮次中保持可达：单个连续缺口使用一次有界 `read_file`，多个区域、调用链或状态流使用一次 `read_plan`。后者返回文件 `revision`、非空 `evidence[]`，并以 `coverage_summary.ready_for_edit=true` 表示证据已覆盖；同 revision 的完整证据不会被后续局部片段降级。
 

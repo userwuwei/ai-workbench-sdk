@@ -18,6 +18,106 @@ import org.junit.Test;
 
 public class AgentHistoryRequestProjectionTest {
   @Test
+  public void highRiskSearchReplaceKeepsOnlyRiskSummaryUntilVerification() {
+    String source = javascript(120);
+    ToolArguments arguments = searchReplaceArguments("/project/src/script.js", source);
+    Map<String, Object> item = map(
+        "index", 0,
+        "status", "success",
+        "too_large_old", true,
+        "risk_level", "high",
+        "risk_reasons", Arrays.asList("old_over_40_lines", "scope_coverage_ge_70pct"),
+        "deletion_risk", false,
+        "scope_coverage_ratio", 0.75d,
+        "retained_ratio", 0.82d,
+        "function_definition_count", 1,
+        "old_preview", source);
+    Map<String, Object> data = successData("/project/src/script.js", source);
+    data.put("risk_level", "high");
+    data.put("risk_reasons", Arrays.asList("old_over_40_lines", "scope_coverage_ge_70pct"));
+    data.put("high_risk_replacement_indexes", Collections.singletonList(0));
+    data.put("requires_verification", true);
+    data.put("results", Collections.singletonList(item));
+    List<AgentMessage> history = writeTurn(arguments, ToolResult.success(data));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    ToolArguments compact = projected.get(0).toolCalls().get(0).arguments();
+    assertEquals("successful_write_compacted",
+        compact.getString("request_projection", ""));
+    assertFalse(compact.asMap().toString().contains(source));
+    JsonObject compactData = JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject().getAsJsonObject("data");
+    assertEquals("high", compactData.get("risk_level").getAsString());
+    assertTrue(compactData.get("requires_verification").getAsBoolean());
+    assertEquals(0, compactData.getAsJsonArray("high_risk_replacement_indexes")
+        .get(0).getAsInt());
+    assertEquals("scope_coverage_ge_70pct",
+        compactData.getAsJsonArray("risk_reasons").get(1).getAsString());
+    JsonObject risk = compactData.getAsJsonArray("results").get(0).getAsJsonObject();
+    assertTrue(risk.get("too_large_old").getAsBoolean());
+    assertFalse(risk.get("deletion_risk").getAsBoolean());
+    assertEquals(0.75d, risk.get("scope_coverage_ratio").getAsDouble(), 0.0001d);
+    assertFalse(projected.get(1).content().contains("old_preview"));
+    assertFalse(projected.get(1).content().contains(source));
+  }
+
+  @Test
+  public void destructiveSearchReplaceKeepsRiskEvidenceWithoutRepeatingLargePayload() {
+    String replacementSource = javascript(100);
+    ToolArguments arguments = searchReplaceArguments(
+        "/project/src/script.js", replacementSource);
+    Map<String, Object> failure = map(
+        "failed_index", 0,
+        "error_code", "search_replace_destructive_change",
+        "risk_level", "critical",
+        "risk_reasons", Arrays.asList(
+            "scope_coverage_ge_70pct", "replacement_retains_le_30pct"),
+        "deletion_risk", false,
+        "scope_coverage_ratio", 0.9d,
+        "retained_ratio", 0.2d,
+        "function_definition_count", 2);
+    Map<String, Object> data = map(
+        "path", "/project/src/script.js",
+        "current_file_changed", false,
+        "applied_count", 0,
+        "risk_level", "critical",
+        "risk_reasons", Arrays.asList(
+            "scope_coverage_ge_70pct", "replacement_retains_le_30pct"),
+        "deletion_risk", false,
+        "scope_coverage_ratio", 0.9d,
+        "retained_ratio", 0.2d,
+        "requires_verification", false,
+        "recommended_next_action", "search_replace",
+        "failures", Collections.singletonList(failure));
+    List<AgentMessage> history = writeTurn(
+        arguments,
+        ToolResult.error(
+            "search_replace_destructive_change", "destructive", true, data));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    ToolArguments compact = projected.get(0).toolCalls().get(0).arguments();
+    Map<String, Object> anchor = retryAnchor(compact, 0);
+    assertFalse(anchor.containsKey("new"));
+    assertEquals(Boolean.TRUE, anchor.get("new_truncated"));
+    assertTrue(anchor.containsKey("new_head_preview"));
+    assertFalse(compact.asMap().toString().contains(replacementSource));
+    JsonObject compactResult = JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject();
+    JsonObject compactData = compactResult.getAsJsonObject("data");
+    assertEquals("search_replace_destructive_change",
+        compactResult.get("error_code").getAsString());
+    assertEquals("critical", compactData.get("risk_level").getAsString());
+    assertEquals(0.2d, compactData.get("retained_ratio").getAsDouble(), 0.0001d);
+    JsonObject compactFailure = compactData.getAsJsonArray("failures")
+        .get(0).getAsJsonObject();
+    assertEquals(2, compactFailure.get("function_definition_count").getAsInt());
+    assertEquals("replacement_retains_le_30pct",
+        compactFailure.getAsJsonArray("risk_reasons").get(1).getAsString());
+  }
+
+  @Test
   public void successfulLargeSearchReplaceIsProjectedWithoutChangingFullHistory() {
     String source = javascript(432);
     ToolArguments arguments = searchReplaceArguments("/project/src/script.js", source);

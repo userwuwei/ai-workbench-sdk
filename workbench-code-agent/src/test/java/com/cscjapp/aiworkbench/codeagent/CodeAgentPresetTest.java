@@ -105,7 +105,9 @@ public final class CodeAgentPresetTest {
     assertTrue(common.contains("planned_files 只表示任务涉及的文件"));
     assertTrue(common.contains("search_replace.replacements[]"));
     assertTrue(common.contains("2～6 行"));
-    assertTrue(common.contains("40 行或 3000 字符"));
+    assertTrue(common.contains("连续函数或语义区段"));
+    assertTrue(common.contains("可以使用更大窗口"));
+    assertFalse(common.contains("不得超过 40 行或 3000 字符"));
     assertTrue(common.contains("唯一命中"));
     assertTrue(common.contains("不为同一缺口重新读取"));
     assertFalse(common.contains("create_file 用于写入模型已经生成的完整内容"));
@@ -2203,6 +2205,7 @@ public final class CodeAgentPresetTest {
             "read_file", "read_plan", "search_replace", "plan_task", "finalize_task")),
         selectedNames(coordinator.selectTools(round, registered)));
     for (String errorCode : Arrays.asList(
+        "search_replace_destructive_change",
         "search_replace_old_too_large",
         "search_replace_context_invalid",
         "search_replace_precheck_failed",
