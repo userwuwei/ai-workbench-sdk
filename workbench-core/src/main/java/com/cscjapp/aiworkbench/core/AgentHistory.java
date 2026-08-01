@@ -4,7 +4,9 @@ import com.google.gson.Gson;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /** Keeps persisted/request history protocol-valid and bounded. */
@@ -223,6 +225,63 @@ public final class AgentHistory {
     if (system != null) result.add(system);
     result.add(AgentMessage.user(COMPLETED_TASK_HISTORY_PREFIX + "\n" + joined));
     return Collections.unmodifiableList(result);
+  }
+
+  /** Builds the history carried across an explicit new-task submission. */
+  static List<AgentMessage> prepareForNewTask(List<AgentMessage> source) {
+    List<AgentMessage> safe = sanitize(source);
+    if (safe.isEmpty()) return safe;
+    AgentMessage system =
+        safe.get(0).role() == AgentMessage.Role.SYSTEM ? safe.get(0) : null;
+    List<String> summaries = new ArrayList<>();
+    String pendingDemand = "";
+    for (int index = system == null ? 0 : 1; index < safe.size(); index++) {
+      AgentMessage message = safe.get(index);
+      if (message.role() == AgentMessage.Role.USER) {
+        String content = message.content().trim();
+        if (content.startsWith(COMPLETED_TASK_HISTORY_PREFIX)) {
+          summaries.add(trim(content.substring(COMPLETED_TASK_HISTORY_PREFIX.length()), 6000));
+        } else if (!internalFeedback(content)) {
+          pendingDemand = trim(content, 300);
+        }
+        continue;
+      }
+      if (message.role() != AgentMessage.Role.ASSISTANT || message.toolCalls().isEmpty()) continue;
+      Map<String, AgentMessage> results = new LinkedHashMap<>();
+      int cursor = index + 1;
+      while (cursor < safe.size() && safe.get(cursor).role() == AgentMessage.Role.TOOL) {
+        AgentMessage result = safe.get(cursor++);
+        results.put(result.toolCallId(), result);
+      }
+      for (AgentToolCall call : message.toolCalls()) {
+        if (!successfulCompletedFinalize(call, results.get(call.id()))) continue;
+        summaries.add(summary(pendingDemand, call.arguments()));
+        pendingDemand = "";
+      }
+    }
+    List<AgentMessage> result = new ArrayList<>();
+    if (system != null) result.add(system);
+    String joined = joinSummaries(summaries, 10000);
+    if (!joined.isEmpty()) {
+      result.add(AgentMessage.user(COMPLETED_TASK_HISTORY_PREFIX + "\n" + joined));
+    }
+    return Collections.unmodifiableList(result);
+  }
+
+  private static boolean successfulCompletedFinalize(
+      AgentToolCall call, AgentMessage resultMessage) {
+    if (call == null
+        || resultMessage == null
+        || !"finalize_task".equals(call.name())
+        || !"completed".equals(call.arguments().getString("status", ""))) return false;
+    try {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> result =
+          GSON.fromJson(resultMessage.content(), Map.class);
+      return result != null && "success".equalsIgnoreCase(String.valueOf(result.get("status")));
+    } catch (RuntimeException ignored) {
+      return false;
+    }
   }
 
   private static boolean endsWithCompletedFinalize(List<AgentMessage> messages) {

@@ -140,6 +140,8 @@ public final class CodeAgentPreset {
       String content =
           "你运行在通用 Code Agent 中。"
               + protocol
+              + "\n当前 demand 是本次新 run 的唯一执行目标；历史中的已完成任务摘要仅作项目背景，禁止恢复旧计划或继续旧需求。"
+              + "当前模型请求中的工具列表是本阶段唯一合法工具，只能调用其中的工具。"
               + singleGenerationInstruction()
               + planningInstruction(planningMode)
               + "\n工具参数必须是严格 JSON；源码反斜杠必须在外层 JSON 中再次转义。"
@@ -168,8 +170,8 @@ public final class CodeAgentPreset {
         + "禁止在 reasoning 中生成、引用、复述、检查或修改源码、伪代码、diff、工具 JSON，"
         + "以及 old/new/content/replacements 等工具参数。"
         + "证据和计划满足后立即调用工具；一个模型响应只生成一个代码写入调用，源码只能生成一次并直接写入工具参数。"
-        + "当本轮已通过 named tool_choice 指定写工具时，reasoning 最多只写一句抽象目标，"
-        + "禁止代码围栏、源码、伪代码、diff 和 old/new/content/replacements 草稿，直接输出指定工具参数。"
+        + "当本轮已通过 named tool_choice 指定工具时，reasoning 最多只写一句抽象目标并直接输出指定工具参数；"
+        + "若为写工具，禁止代码围栏、源码、伪代码、diff 和 old/new/content/replacements 草稿。"
         + "写入前不进行代码级自检；写入后使用真实验证工具检查，并且只根据真实失败修复。";
   }
 
@@ -192,7 +194,7 @@ public final class CodeAgentPreset {
   }
 
   private static String workflowInstruction(boolean hasQualityReview) {
-    return "\nrecommended_next_action 是当前首选动作，不是其他安全工具的执行禁令；已知仍有计划内修改时，先完成当前编辑批次，再调用验证工具。"
+    return "\nrecommended_next_action 只是当前首选建议；当前请求实际提供的工具列表才是本阶段合法边界。已知仍有计划内修改时，先完成当前编辑批次，再调用验证工具。"
         + (hasQualityReview
             ? "\nrecommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据提交 passed、blocking_gaps、minimal_version_risk；不要读取源码、replan 或传入 path。"
             : "")

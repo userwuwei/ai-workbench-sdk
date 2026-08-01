@@ -387,10 +387,15 @@ final class AgentHistoryRequestProjection {
         results.put(result.toolCallId(), result);
       }
       for (AgentToolCall call : message.toolCalls()) {
-        if (!"read_file".equals(call.name())) continue;
         AgentMessage resultMessage = results.get(call.id());
         JsonObject result = resultMessage == null ? null : parseObject(resultMessage.content());
         JsonObject data = result == null ? null : object(result.get("data"));
+        String writtenPath = successfulWritePath(call, result, data);
+        if (!writtenPath.isEmpty()) {
+          latestByPath.remove(writtenPath);
+          continue;
+        }
+        if (!"read_file".equals(call.name())) continue;
         if (result == null
             || !"success".equalsIgnoreCase(string(result.get("status")))
             || data == null
@@ -418,10 +423,16 @@ final class AgentHistoryRequestProjection {
         results.put(result.toolCallId(), result);
       }
       for (AgentToolCall call : message.toolCalls()) {
-        if (!"read_plan".equals(call.name())) continue;
         AgentMessage resultMessage = results.get(call.id());
         JsonObject result = resultMessage == null ? null : parseObject(resultMessage.content());
         JsonObject data = result == null ? null : object(result.get("data"));
+        String writtenPath = successfulWritePath(call, result, data);
+        if (!writtenPath.isEmpty()) {
+          String prefix = writtenPath + "\n";
+          latestByPathRevision.keySet().removeIf(key -> key.startsWith(prefix));
+          continue;
+        }
+        if (!"read_plan".equals(call.name())) continue;
         if (result == null
             || !"success".equalsIgnoreCase(string(result.get("status")))
             || data == null
@@ -437,6 +448,17 @@ final class AgentHistoryRequestProjection {
     return latestByPathRevision.isEmpty()
         ? Collections.emptySet()
         : new LinkedHashSet<>(latestByPathRevision.values());
+  }
+
+  private static String successfulWritePath(
+      AgentToolCall call, JsonObject result, JsonObject data) {
+    if (call == null
+        || !isWriteTool(call.name())
+        || result == null
+        || !successfulWithoutPartialFailure(result, data)) return "";
+    String path = data == null ? "" : string(data.get("path"));
+    if (path.isEmpty()) path = call.arguments().getString("path", "");
+    return path;
   }
 
   private static boolean hasEvidenceContent(JsonObject data) {

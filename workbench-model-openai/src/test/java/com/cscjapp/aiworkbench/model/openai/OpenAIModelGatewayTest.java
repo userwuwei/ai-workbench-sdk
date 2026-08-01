@@ -406,7 +406,7 @@ public class OpenAIModelGatewayTest {
 
     new OpenAIModelGateway(logger)
         .stream(
-            request(),
+            request(ToolArgumentMode.BEST_EFFORT, false, false, "create_file"),
             new ModelStreamObserver() {
               public void onDelta(String content, String reasoning) {}
 
@@ -422,6 +422,8 @@ public class OpenAIModelGatewayTest {
     assertTrue(latch.await(3, TimeUnit.SECONDS));
     String requestEvent = firstEvent(events, "model_request");
     assertTrue(requestEvent.contains("[模型请求][request=1][stage=initial][model=test]"));
+    assertTrue(requestEvent.contains("required_tool=create_file"));
+    assertTrue(requestEvent.contains("parallel_tool_calls=false"));
     assertTrue(requestEvent.contains("serialized_chars="));
     assertTrue(requestEvent.contains("[message=1][role=user]\nu"));
     assertFalse(requestEvent.contains("body="));

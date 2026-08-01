@@ -42,6 +42,10 @@ final class ManagedCodePlanCoordinator
   private String directWritePath = "";
   private String directWriteRevision = "";
   private String directWriteTool = "";
+  private final LinkedHashSet<String> roundRegisteredToolNames = new LinkedHashSet<>();
+  private final LinkedHashSet<String> lastVisibleToolNames = new LinkedHashSet<>();
+  private String lastRequiredToolName = "";
+  private boolean roundToolSelectionRecorded;
   private boolean interactionRequired;
   private List<String> requiredInteractionCheckIds = new ArrayList<>();
   private List<String> browserScenarioIds = new ArrayList<>();
@@ -108,6 +112,7 @@ final class ManagedCodePlanCoordinator
     recoveryReadReady = false;
     recoverableEditHasCandidate = false;
     clearDirectWrite();
+    clearRoundToolSelection();
     lightweightSmokeRepairCount = 0;
     clearInteractionContract();
   }
@@ -139,6 +144,7 @@ final class ManagedCodePlanCoordinator
     recoveryReadReady = false;
     recoverableEditHasCandidate = false;
     clearDirectWrite();
+    clearRoundToolSelection();
     lightweightSmokeRepairCount = 0;
     clearInteractionContract();
   }
@@ -146,10 +152,10 @@ final class ManagedCodePlanCoordinator
   @Override
   public synchronized ToolSelection selectTools(
       AgentRoundContext context, List<ToolSpec> registeredTools) {
-    String requiredWrite = requiredWriteToolForCurrentState();
-    if (!requiredWrite.isEmpty()) {
-      return ToolSelection.onlyNames(
-          registeredTools, Collections.singletonList(requiredWrite));
+    String requiredTool = requiredStageToolForCurrentState();
+    if (!requiredTool.isEmpty()) {
+      return rememberSelection(
+          registeredTools, Collections.singletonList(requiredTool), requiredTool);
     }
 
     LinkedHashSet<String> allowed = new LinkedHashSet<>();
@@ -163,7 +169,7 @@ final class ManagedCodePlanCoordinator
     if (!hasPlan()) {
       allowed.add("list_dir");
       if (mode == CodePlanningMode.FORCE) {
-        return ToolSelection.onlyNames(registeredTools, allowed);
+        return rememberSelection(registeredTools, allowed, "");
       }
       if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
         String missingVerification = nextMissingContractVerification("code_generation");
@@ -175,17 +181,16 @@ final class ManagedCodePlanCoordinator
       } else if (hasReadyReadCoverage()) {
         addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
       }
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
-    // Once a managed plan declares edits to an existing file, keep the atomic exact-anchor
-    // editor model-visible throughout implementation, verification and quality. ToolSelection
-    // is advisory; a later write will invalidate stale verification evidence by revision.
+    // Recovery rounds can still expose an exact-anchor editor alongside the read evidence needed
+    // to repair a real failed write. Deterministic healthy stages returned above stay singleton.
     if (planUsesSearchReplace()) addSearchReplace(allowed);
 
     if (!recoverableEditPath.isEmpty()) {
       addSearchReplace(allowed);
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
     // Completion evidence is authoritative even when an advisory implementation step did not
@@ -195,7 +200,7 @@ final class ManagedCodePlanCoordinator
         && !hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)
         && !CodeAgentToolNames.QUALITY_REVIEW.equals(verificationFailureTool)) {
       allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
     PlanStep pendingImplementation = currentStep();
@@ -206,19 +211,20 @@ final class ManagedCodePlanCoordinator
       if (!requiresReadCoverage(pendingImplementation) || hasReadyReadCoverage()) {
         addImplementationTools(allowed, pendingImplementation);
       }
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
     if (syntaxPendingBeforeBrowser()) {
       allowed.add("syntax_check");
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
     if (!verificationFailureTool.isEmpty()) {
       if (lightweightSmokeRepairLimitReached()) {
         LinkedHashSet<String> finalizeOnly = new LinkedHashSet<>();
         finalizeOnly.add(CodeAgentToolNames.FINALIZE_TASK);
-        return ToolSelection.onlyNames(registeredTools, finalizeOnly);
+        return rememberSelection(
+            registeredTools, finalizeOnly, CodeAgentToolNames.FINALIZE_TASK);
       } else if (mixedBrowserFailure()) {
         addSearchReplace(allowed);
         allowed.add("browser_test");
@@ -231,14 +237,14 @@ final class ManagedCodePlanCoordinator
           || hasReadyReadCoverage()) {
         addSearchReplace(allowed);
       }
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
     if (hasRoleAtRevision(CodeToolRole.CREATE) || hasRoleAtRevision(CodeToolRole.EDIT)) {
       String missingVerification = nextMissingVerificationTool();
       if (!missingVerification.isEmpty()) allowed.add(missingVerification);
       else if (qualityRequired()) allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
     PlanStep current = currentStep();
@@ -263,10 +269,10 @@ final class ManagedCodePlanCoordinator
           allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
         }
       }
-      return ToolSelection.onlyNames(registeredTools, allowed);
+      return rememberSelection(registeredTools, allowed, "");
     }
 
-    return ToolSelection.onlyNames(registeredTools, allowed);
+    return rememberSelection(registeredTools, allowed, "");
   }
 
   @Override
@@ -276,7 +282,64 @@ final class ManagedCodePlanCoordinator
 
   @Override
   public synchronized String requiredToolName(AgentRoundContext context) {
-    return requiredWriteToolForCurrentState();
+    return lastRequiredToolName;
+  }
+
+  private ToolSelection rememberSelection(
+      List<ToolSpec> registeredTools, Collection<String> names, String requiredTool) {
+    ToolSelection selection = ToolSelection.onlyNames(registeredTools, names);
+    roundRegisteredToolNames.clear();
+    if (registeredTools != null) {
+      for (ToolSpec tool : registeredTools) {
+        if (tool != null) roundRegisteredToolNames.add(tool.name());
+      }
+    }
+    lastVisibleToolNames.clear();
+    for (ToolSpec tool : selection.tools()) lastVisibleToolNames.add(tool.name());
+    lastRequiredToolName = requiredTool == null ? "" : requiredTool;
+    roundToolSelectionRecorded = true;
+    return selection;
+  }
+
+  private void clearRoundToolSelection() {
+    roundRegisteredToolNames.clear();
+    lastVisibleToolNames.clear();
+    lastRequiredToolName = "";
+    roundToolSelectionRecorded = false;
+  }
+
+  private String requiredStageToolForCurrentState() {
+    String write = requiredWriteToolForCurrentState();
+    if (!write.isEmpty()) return write;
+    if (lightweightSmokeRepairLimitReached()) return CodeAgentToolNames.FINALIZE_TASK;
+    if (!verificationFailureTool.isEmpty()) return "";
+    if (hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)
+        && completionEvidenceReady("code_generation")) {
+      return CodeAgentToolNames.FINALIZE_TASK;
+    }
+
+    if (hasPlan()) {
+      PlanStep current = currentStep();
+      if (current != null
+          && ("discover".equals(current.phase) || "implement".equals(current.phase))) return "";
+    } else if (!hasRoleAtRevision(CodeToolRole.CREATE)
+        && !hasRoleAtRevision(CodeToolRole.EDIT)
+        && !hasRoleAtRevision(CodeToolRole.VERIFY)
+        && !hasRoleAtRevision(CodeToolRole.QUALITY)) {
+      return "";
+    }
+
+    if (syntaxPendingBeforeBrowser()) return "syntax_check";
+    String missingVerification = hasPlan()
+        ? nextMissingVerificationTool()
+        : nextMissingContractVerification("code_generation");
+    if (!missingVerification.isEmpty()) return missingVerification;
+    if (qualityEvidenceRequired("code_generation")
+        && !hasCurrentTool(CodeAgentToolNames.QUALITY_REVIEW)) {
+      return CodeAgentToolNames.QUALITY_REVIEW;
+    }
+    return completionEvidenceReady("code_generation")
+        ? CodeAgentToolNames.FINALIZE_TASK : "";
   }
 
   private String requiredWriteToolForCurrentState() {
@@ -332,6 +395,7 @@ final class ManagedCodePlanCoordinator
     if (invocation == null) return false;
     String toolName = invocation.tool().spec().name();
     CodeToolRole role = role(toolName);
+    if (unexpectedToolCall(toolName)) return true;
     if (CodeAgentToolNames.FINALIZE_TASK.equals(toolName)) {
       return "completed".equals(text(invocation.arguments().get("status")));
     }
@@ -345,6 +409,18 @@ final class ManagedCodePlanCoordinator
   public synchronized Cancellable evaluate(
       ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
     String toolName = invocation.tool().spec().name();
+    if (unexpectedToolCall(toolName)) {
+      Map<String, Object> data = new LinkedHashMap<>();
+      data.put("attempted_tool", toolName);
+      data.put("visible_tools", new ArrayList<>(lastVisibleToolNames));
+      data.put("required_tool", lastRequiredToolName);
+      callback.resolve(ToolPolicyDecision.error(
+          "unexpected_tool_call",
+          "该工具未在当前 Code Agent 阶段暴露；请只调用本轮可见工具。",
+          true,
+          data));
+      return Cancellable.NONE;
+    }
     if (CodeAgentToolNames.FINALIZE_TASK.equals(toolName)
         && "completed".equals(text(invocation.arguments().get("status")))) {
       String completionType = text(invocation.arguments().get("completion_type"));
@@ -378,6 +454,12 @@ final class ManagedCodePlanCoordinator
         "当前任务要求在首次写入前调用 plan_task 建立短计划。",
         true));
     return Cancellable.NONE;
+  }
+
+  private boolean unexpectedToolCall(String toolName) {
+    return roundToolSelectionRecorded
+        && roundRegisteredToolNames.contains(toolName)
+        && !lastVisibleToolNames.contains(toolName);
   }
 
   synchronized long generation() {

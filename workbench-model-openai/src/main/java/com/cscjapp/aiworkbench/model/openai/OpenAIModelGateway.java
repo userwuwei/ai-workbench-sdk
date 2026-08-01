@@ -119,6 +119,7 @@ public final class OpenAIModelGateway implements ModelGateway {
       AtomicBoolean terminal,
       AtomicReference<Call> activeCall) {
     String requestJson = gson.toJson(buildRequest(modelRequest, includeUsage));
+    StringBuilder reasoning = new StringBuilder();
     Request.Builder request =
         new Request.Builder()
             .url(url)
@@ -143,6 +144,7 @@ public final class OpenAIModelGateway implements ModelGateway {
           @Override
           public void onFailure(Call ignored, IOException error) {
             if (terminal.compareAndSet(false, true)) {
+              logInterruptedReasoning(requestIndex, reasoning);
               logError(error, startedAt, requestIndex, endpoint.modelId());
               observer.onError(error);
             }
@@ -189,7 +191,8 @@ public final class OpenAIModelGateway implements ModelGateway {
                     terminal,
                     startedAt,
                     requestIndex,
-                    endpoint.modelId());
+                    endpoint.modelId(),
+                    reasoning);
               } else {
                 parseJsonResponse(
                     response.body().string(),
@@ -201,6 +204,7 @@ public final class OpenAIModelGateway implements ModelGateway {
               }
             } catch (Throwable error) {
               if (terminal.compareAndSet(false, true)) {
+                logInterruptedReasoning(requestIndex, reasoning);
                 logError(error, startedAt, requestIndex, endpoint.modelId());
                 observer.onError(error);
               }
@@ -290,10 +294,10 @@ public final class OpenAIModelGateway implements ModelGateway {
       AtomicBoolean terminal,
       long startedAt,
       int requestIndex,
-      String model)
+      String model,
+      StringBuilder reasoning)
       throws IOException {
     StringBuilder content = new StringBuilder();
-    StringBuilder reasoning = new StringBuilder();
     Map<Integer, ToolCallBuilder> callBuilders = new LinkedHashMap<>();
     String finishReason = "";
     String loggedFinishReason = "";
@@ -666,6 +670,13 @@ public final class OpenAIModelGateway implements ModelGateway {
             + message);
   }
 
+  private void logInterruptedReasoning(int requestIndex, StringBuilder reasoning) {
+    if (reasoning.length() > 0) {
+      log("model_response", "[本轮模型返回][request=" + requestIndex
+          + "][reasoning][interrupted]" + reasoning);
+    }
+  }
+
   private void logStream(int requestIndex, String event, String detail) {
     log(
         "model_stream",
@@ -736,6 +747,10 @@ public final class OpenAIModelGateway implements ModelGateway {
         .append(request.tools().size())
         .append(", deep_thinking=")
         .append(request.deepThinking())
+        .append(", required_tool=")
+        .append(request.requiredToolName().isEmpty() ? "auto" : request.requiredToolName())
+        .append(", parallel_tool_calls=")
+        .append(request.allowMultipleToolCalls())
         .append(", serialized_chars=")
         .append(Math.max(0, serializedChars));
     if (!request.tools().isEmpty()) {

@@ -171,10 +171,12 @@ public final class AgentEnginePauseResumeTest {
   public void newSubmissionSupersedesPausedRunBeforeStartingAnotherRun() {
     AtomicInteger requests = new AtomicInteger();
     AtomicInteger executions = new AtomicInteger();
+    AtomicReference<List<AgentMessage>> secondInitialRequest = new AtomicReference<>();
     LifecyclePolicy lifecycle = new LifecyclePolicy();
     ModelGateway gateway =
         (request, observer) -> {
           int current = requests.incrementAndGet();
+          if (current == 21) secondInitialRequest.set(request.messages());
           observer.onComplete(stepResponse("step-" + current));
           return Cancellable.NONE;
         };
@@ -193,6 +195,10 @@ public final class AgentEnginePauseResumeTest {
     assertNotEquals(firstRunId, (long) lifecycle.startedRunIds.get(1));
     assertEquals(Collections.singletonList(firstRunId), lifecycle.finishedRunIds);
     assertEquals(Collections.singletonList("superseded"), lifecycle.finishedStates);
+    assertNotNull(secondInitialRequest.get());
+    assertEquals(1, userMessageCount(secondInitialRequest.get()));
+    assertEquals("second", secondInitialRequest.get().get(1).content());
+    assertEquals(0, toolMessageCount(secondInitialRequest.get(), "step"));
   }
 
   private static AgentEngine engine(

@@ -246,6 +246,38 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
+  public void successfulWriteInvalidatesOldFullReadButKeepsLaterRevisionRead() {
+    ToolArguments readArguments = new ToolArguments(map("path", "/project/src/script.js"));
+    Map<String, Object> oldRead = map(
+        "path", "/project/src/script.js", "content", "old full source",
+        "revision", "old", "mode", "full_file", "full_file", true);
+    Map<String, Object> newRead = map(
+        "path", "/project/src/script.js", "content", "new full source",
+        "revision", "new", "mode", "full_file", "full_file", true);
+    ToolArguments writeArguments = new ToolArguments(map(
+        "path", "/project/src/script.js",
+        "replacements", Collections.singletonList(map("old", "old", "new", "new"))));
+    List<AgentMessage> history = Arrays.asList(
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("old-read", "read_file", readArguments))),
+        AgentMessage.tool("old-read", "read_file", ToolResultCodec.toJson(ToolResult.success(oldRead))),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("write", "search_replace", writeArguments))),
+        AgentMessage.tool("write", "search_replace", ToolResultCodec.toJson(ToolResult.success(
+            map("path", "/project/src/script.js", "changed", true)))),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("new-read", "read_file", readArguments))),
+        AgentMessage.tool("new-read", "read_file", ToolResultCodec.toJson(ToolResult.success(newRead))));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    assertFalse(JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject().getAsJsonObject("data").has("content"));
+    assertEquals("new full source", JsonParser.parseString(projected.get(5).content())
+        .getAsJsonObject().getAsJsonObject("data").get("content").getAsString());
+  }
+
+  @Test
   public void createAndRewriteKeepRoleCountsAndHashes() {
     String content = javascript(180);
     Map<String, Object> create = new LinkedHashMap<>();
@@ -755,6 +787,39 @@ public class AgentHistoryRequestProjectionTest {
     assertTrue(latest.getAsJsonArray("evidence").toString().contains("function render"));
     assertTrue(latest.has("edit_anchor_pack"));
     assertEquals("goal_driven_read_compacted", latest.get("history_projection").getAsString());
+  }
+
+  @Test
+  public void successfulWriteInvalidatesOldReadPlanEvidenceUntilCurrentRevisionIsRead() {
+    ToolArguments planArguments = new ToolArguments(map("path", "/project/app.js", "goal", "inspect"));
+    Map<String, Object> oldPlan = map(
+        "mode", "goal_driven_evidence_batch", "path", "/project/app.js", "revision", "old",
+        "evidence", Collections.singletonList(map("evidence_id", "old", "content", "old evidence")));
+    Map<String, Object> newPlan = map(
+        "mode", "goal_driven_evidence_batch", "path", "/project/app.js", "revision", "new",
+        "evidence", Collections.singletonList(map("evidence_id", "new", "content", "new evidence")));
+    ToolArguments writeArguments = new ToolArguments(map(
+        "path", "/project/app.js",
+        "replacements", Collections.singletonList(map("old", "old", "new", "new"))));
+    List<AgentMessage> history = Arrays.asList(
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("old-plan", "read_plan", planArguments))),
+        AgentMessage.tool("old-plan", "read_plan", ToolResultCodec.toJson(ToolResult.success(oldPlan))),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("write", "search_replace", writeArguments))),
+        AgentMessage.tool("write", "search_replace", ToolResultCodec.toJson(ToolResult.success(
+            map("path", "/project/app.js", "changed", true)))),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("new-plan", "read_plan", planArguments))),
+        AgentMessage.tool("new-plan", "read_plan", ToolResultCodec.toJson(ToolResult.success(newPlan))));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    assertFalse(JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject().getAsJsonObject("data").has("evidence"));
+    assertTrue(JsonParser.parseString(projected.get(5).content())
+        .getAsJsonObject().getAsJsonObject("data").getAsJsonArray("evidence")
+        .toString().contains("new evidence"));
   }
 
   @Test

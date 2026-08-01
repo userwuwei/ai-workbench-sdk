@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.26
+
+- `submit()` 作为新任务边界，仅保留 System Prompt 与真实成功的已完成任务摘要；旧未完成计划、工具协议、源码证据和重复需求不再进入新 run，暂停恢复仍沿用原 run。
+- Code Agent 的实现、验证、质量与完成阶段统一为单一可见工具和同名 named `tool_choice`；当前请求未暴露的 Code Agent 工具返回 `unexpected_tool_call` 且不执行真实工具。
+- 成功写入后立即压缩同路径旧 revision 的全文与 `read_plan` evidence；模型请求日志增加 `required_tool` 与 `parallel_tool_calls`，并保留完整 reasoning 的正常与中止日志。
+
 ## 2.0.23
 
 - `read_plan` 以当前 revision 中的真实完整证据块判定多信号覆盖；未完成结果返回 `evidence_frontier`，只有存在未返回的真实源码候选时才给出增量 `next_read_plan_delta` 与 `read_plan` 建议。

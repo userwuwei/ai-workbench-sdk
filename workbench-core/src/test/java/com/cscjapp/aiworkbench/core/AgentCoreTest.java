@@ -681,6 +681,60 @@ public class AgentCoreTest {
   }
 
   @Test
+  public void newTaskProjectionDropsUnfinishedProtocolAndDuplicateDemands() {
+    AgentMessage readCall = AgentMessage.assistant(
+        "",
+        Collections.singletonList(new AgentToolCall(
+            "read", "read_file", new ToolArguments(Collections.singletonMap("path", "main.txt")))));
+    List<AgentMessage> source = Arrays.asList(
+        AgentMessage.system("system"),
+        AgentMessage.user(AgentHistory.COMPLETED_TASK_HISTORY_PREFIX + "\n- 状态：completed"),
+        AgentMessage.user("旧需求"),
+        AgentMessage.user("旧需求"),
+        readCall,
+        AgentMessage.tool("read", "read_file", "{\"status\":\"success\",\"data\":{\"content\":\"full source\"}}"));
+
+    List<AgentMessage> projected = AgentHistory.prepareForNewTask(source);
+
+    assertEquals(2, projected.size());
+    assertEquals(AgentMessage.Role.SYSTEM, projected.get(0).role());
+    assertTrue(projected.get(1).content().contains("状态：completed"));
+    assertFalse(projected.get(1).content().contains("旧需求"));
+    assertFalse(projected.get(1).content().contains("full source"));
+  }
+
+  @Test
+  public void newTaskProjectionKeepsOnlyActuallySuccessfulCompletedFinalizes() {
+    Map<String, Object> completed = new LinkedHashMap<>();
+    completed.put("status", "completed");
+    completed.put("summary", "完成居中修复");
+    Map<String, Object> rejected = new LinkedHashMap<>();
+    rejected.put("status", "completed");
+    rejected.put("summary", "未被接受的旧任务");
+    List<AgentMessage> source = Arrays.asList(
+        AgentMessage.system("system"),
+        AgentMessage.user("修复居中"),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("done", "finalize_task", new ToolArguments(completed)))),
+        AgentMessage.tool("done", "finalize_task", "{\"status\":\"success\"}"),
+        AgentMessage.user("后续未完成需求"),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("rejected", "finalize_task", new ToolArguments(rejected)))),
+        AgentMessage.tool("rejected", "finalize_task", "{\"status\":\"error\"}"),
+        AgentMessage.user("仍未完成"));
+
+    List<AgentMessage> projected = AgentHistory.prepareForNewTask(source);
+
+    assertEquals(2, projected.size());
+    String summary = projected.get(1).content();
+    assertTrue(summary.contains("修复居中"));
+    assertTrue(summary.contains("完成居中修复"));
+    assertFalse(summary.contains("后续未完成需求"));
+    assertFalse(summary.contains("未被接受的旧任务"));
+    assertFalse(summary.contains("仍未完成"));
+  }
+
+  @Test
   public void nativeModeRequiresRegisteredTerminalToolInsteadOfAcceptingPlainText() {
     AtomicInteger rounds = new AtomicInteger();
     ModelGateway gateway =
