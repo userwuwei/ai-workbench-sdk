@@ -26,7 +26,6 @@ final class ManagedCodePlanCoordinator
   private final List<Evidence> evidence = new ArrayList<>();
   private final Map<String, Long> pathRevisions = new LinkedHashMap<>();
   private final Map<String, ReadCoverage> readCoverageByPath = new LinkedHashMap<>();
-  private final Map<String, Integer> boundedReadCounts = new LinkedHashMap<>();
   private final Map<String, ReadPlanSnapshot> readPlanSnapshots = new LinkedHashMap<>();
   private final Map<String, String> createdFileBindings = new LinkedHashMap<>();
   private final Set<String> unresolvedWritePaths = new LinkedHashSet<>();
@@ -98,7 +97,6 @@ final class ManagedCodePlanCoordinator
     evidence.clear();
     pathRevisions.clear();
     readCoverageByPath.clear();
-    boundedReadCounts.clear();
     readPlanSnapshots.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
@@ -130,7 +128,6 @@ final class ManagedCodePlanCoordinator
     evidence.clear();
     pathRevisions.clear();
     readCoverageByPath.clear();
-    boundedReadCounts.clear();
     readPlanSnapshots.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
@@ -178,15 +175,9 @@ final class ManagedCodePlanCoordinator
             && !hasRoleAtRevision(CodeToolRole.QUALITY)) {
           allowed.add(CodeAgentToolNames.QUALITY_REVIEW);
         }
-      } else if (hasReadyReadCoverage()) {
-        addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
       }
       return rememberSelection(registeredTools, allowed, "");
     }
-
-    // Recovery rounds can still expose an exact-anchor editor alongside the read evidence needed
-    // to repair a real failed write. Deterministic healthy stages returned above stay singleton.
-    if (planUsesSearchReplace()) addSearchReplace(allowed);
 
     if (!recoverableEditPath.isEmpty()) {
       addSearchReplace(allowed);
@@ -208,7 +199,7 @@ final class ManagedCodePlanCoordinator
         && "implement".equals(pendingImplementation.phase)
         && stepDeclaresWrite(pendingImplementation)
         && !implementationWriteSatisfied(pendingImplementation)) {
-      if (!requiresReadCoverage(pendingImplementation) || hasReadyReadCoverage()) {
+      if (writeEvidenceReady(pendingImplementation)) {
         addImplementationTools(allowed, pendingImplementation);
       }
       return rememberSelection(registeredTools, allowed, "");
@@ -256,7 +247,7 @@ final class ManagedCodePlanCoordinator
       } else if ("discover".equals(current.phase)) {
         allowed.add("list_dir");
       } else if ("implement".equals(current.phase)) {
-        if (!requiresReadCoverage(current) || hasReadyReadCoverage()) {
+        if (writeEvidenceReady(current)) {
           addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
         }
       } else if ("verify".equals(current.phase)) {
@@ -354,7 +345,7 @@ final class ManagedCodePlanCoordinator
     if (current == null
         || !"implement".equals(current.phase)
         || implementationWriteSatisfied(current)
-        || (requiresReadCoverage(current) && !hasReadyReadCoverage())) return "";
+        || !writeEvidenceReady(current)) return "";
     return nextPendingImplementationTool(current);
   }
 
@@ -583,8 +574,6 @@ final class ManagedCodePlanCoordinator
     boolean directWriteActivated = activateDirectWriteIfReady(toolName, arguments, effective);
     settleDirectWriteAfterWrite(toolName, effective);
     boolean directWritePending = !activeDirectWriteTool().isEmpty();
-    int boundedReadCount = boundedReadCount(toolName, arguments, effective);
-    boolean recommendReadPlan = boundedReadCount >= 2;
     boolean goalDrivenReadPlan = isGoalDrivenReadPlan(toolName, effective);
     boolean contractResult = hasPlan()
         && ("browser_test".equals(toolName)
@@ -593,7 +582,6 @@ final class ManagedCodePlanCoordinator
             || CodeAgentToolNames.FINALIZE_TASK.equals(toolName));
     boolean recoverableRetry = hasPlan() && recoverableSearchReplaceFailure(toolName, effective);
     if (!goalDrivenReadPlan
-        && !recommendReadPlan
         && !directWriteActivated
         && !directWritePending
         && ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan())) return effective;
@@ -603,12 +591,6 @@ final class ManagedCodePlanCoordinator
     if (contractResult) decorateManagedResult(toolName, data);
     if (goalDrivenReadPlan) {
       decorateReadPlanRecommendation(data);
-    } else if (recommendReadPlan) {
-      data.put("same_file_bounded_read_count", boundedReadCount);
-      data.put("recommended_next_action", "read_plan");
-      data.put("message", appendMessage(
-          text(data.get("message")),
-          "同一 revision 的该文件已完成两次局部读取。下一步调用一次 read_plan 收集当前修改所需的剩余证据；不要继续对该文件分段调用 read_file。"));
     } else if (lightweightSmokeRepairLimitReached()) {
       data.put("repair_limit_reached", true);
       data.put("recommended_next_action", CodeAgentToolNames.FINALIZE_TASK);
@@ -657,6 +639,12 @@ final class ManagedCodePlanCoordinator
     String key = path.isEmpty() || sourceRevision.isEmpty() ? "" : path + "\n" + sourceRevision;
     if (!key.isEmpty()) previous = readPlanSnapshots.get(key);
 
+    LinkedHashSet<String> cumulativeEvidence = previous == null
+        ? new LinkedHashSet<>() : new LinkedHashSet<>(previous.evidenceHashes);
+    LinkedHashSet<String> cumulativeCovered = previous == null
+        ? new LinkedHashSet<>() : new LinkedHashSet<>(previous.coveredRequirementIds);
+    LinkedHashSet<String> cumulativeUnresolved = previous == null
+        ? new LinkedHashSet<>() : new LinkedHashSet<>(previous.unresolvedRequirementIds);
     LinkedHashSet<String> newEvidence = new LinkedHashSet<>(evidenceHashes);
     LinkedHashSet<String> repeatedEvidence = new LinkedHashSet<>();
     LinkedHashSet<String> newlyResolved = new LinkedHashSet<>(covered);
@@ -677,7 +665,12 @@ final class ManagedCodePlanCoordinator
     progress.put("has_new_information", hasNewInformation);
     data.put("plan_progress", progress);
     if (!key.isEmpty()) {
-      readPlanSnapshots.put(key, new ReadPlanSnapshot(evidenceHashes, covered, unresolved));
+      cumulativeEvidence.addAll(evidenceHashes);
+      cumulativeCovered.addAll(covered);
+      cumulativeUnresolved.addAll(unresolved);
+      cumulativeUnresolved.removeAll(cumulativeCovered);
+      readPlanSnapshots.put(
+          key, new ReadPlanSnapshot(cumulativeEvidence, cumulativeCovered, cumulativeUnresolved));
     }
   }
 
@@ -738,38 +731,6 @@ final class ManagedCodePlanCoordinator
     return output;
   }
 
-  private int boundedReadCount(
-      String toolName, ToolArguments arguments, ToolResult result) {
-    if (!"read_file".equals(toolName)
-        || result == null
-        || !result.isSuccess()
-        || !result.data().containsKey("content")
-        || !boundedRead(arguments, result.data())) return 0;
-    String path = canonicalEvidenceFile(text(firstValue(result.data(), "resolved_path", "path")));
-    if (path.isEmpty() && arguments != null) {
-      path = canonicalEvidenceFile(text(arguments.get("path")));
-    }
-    if (path.isEmpty()) return 0;
-    String sourceRevision = text(result.data().get("revision"));
-    if (sourceRevision.isEmpty()) sourceRevision = currentSourceRevision(path);
-    if (sourceRevision.isEmpty()) return 0;
-    String key = path + "\n" + sourceRevision;
-    return boundedReadCounts.merge(key, 1, Integer::sum);
-  }
-
-  private static boolean boundedRead(ToolArguments arguments, Map<String, Object> data) {
-    if (Boolean.TRUE.equals(data.get("full_file"))) return false;
-    String mode = text(data.get("mode"));
-    if ("full_file".equals(mode) || "summary".equals(mode)) return false;
-    if (Boolean.FALSE.equals(data.get("full_file")) || !mode.isEmpty()) return true;
-    if (arguments == null) return false;
-    return positiveInt(arguments.get("start_line")) > 0
-        || positiveInt(arguments.get("end_line")) > 0
-        || !text(arguments.get("target_function")).isEmpty()
-        || !text(arguments.get("target_class")).isEmpty()
-        || !text(arguments.get("target_method")).isEmpty();
-  }
-
   private static String appendMessage(String current, String addition) {
     if (current == null || current.trim().isEmpty()) return addition;
     return current.trim() + "\n" + addition;
@@ -778,19 +739,8 @@ final class ManagedCodePlanCoordinator
   private boolean activateDirectWriteIfReady(
       String toolName, ToolArguments arguments, ToolResult result) {
     if (hasPlan() || result == null || !result.isSuccess()) return false;
-    boolean ready;
-    if ("read_plan".equals(toolName)) {
-      ready = validReadPlan(result.data());
-    } else if ("read_file".equals(toolName)) {
-      String mode = text(result.data().get("mode"));
-      ready = result.data().containsKey("content")
-          && !"summary".equals(mode)
-          && (Boolean.TRUE.equals(result.data().get("full_file"))
-              || "full_file".equals(mode)
-              || Boolean.TRUE.equals(result.data().get("complete")));
-    } else {
-      return false;
-    }
+    if (!"read_plan".equals(toolName) && !"read_file".equals(toolName)) return false;
+    boolean ready = writableReadEvidence(toolName, result.data());
     if (!ready || role("search_replace") != CodeToolRole.EDIT) return false;
     String path = canonicalEvidenceFile(text(firstValue(
         result.data(), "resolved_path", "path")));
@@ -1097,7 +1047,9 @@ final class ManagedCodePlanCoordinator
             pathRevisions.getOrDefault(path, 0L),
             true));
       }
-      recordReadCoverage(paths, result.data());
+      if (writableReadEvidence(toolName, result.data())) {
+        recordReadCoverage(paths, result.data());
+      }
     } else {
       evidence.add(
           new Evidence(toolName, role, "", "", generation, planSequence, revision, true));
@@ -1216,6 +1168,16 @@ final class ManagedCodePlanCoordinator
       if (raw instanceof Map && ((Map<?, ?>) raw).containsKey("content")) return true;
     }
     return false;
+  }
+
+  private static boolean writableReadEvidence(String toolName, Map<String, Object> data) {
+    if ("read_plan".equals(toolName)) return validReadPlan(data);
+    if (!"read_file".equals(toolName) || !data.containsKey("content")) return false;
+    String mode = text(data.get("mode"));
+    return !"summary".equals(mode)
+        && (Boolean.TRUE.equals(data.get("full_file"))
+            || "full_file".equals(mode)
+            || Boolean.TRUE.equals(data.get("complete")));
   }
 
   private void recordReadCoverage(List<String> paths, Map<String, Object> data) {
@@ -1359,36 +1321,37 @@ final class ManagedCodePlanCoordinator
     return !readCoverageByPath.isEmpty();
   }
 
+  private boolean hasReadyReadCoverage(String rawPath) {
+    String path = canonicalPath(rawPath);
+    if (path.isEmpty()) return false;
+    ReadCoverage coverage = readCoverageByPath.get(path);
+    if (coverage == null) return false;
+    String current = currentSourceRevision(path);
+    if (current.isEmpty() || !current.equalsIgnoreCase(coverage.sourceRevision)) {
+      readCoverageByPath.remove(path);
+      return false;
+    }
+    return true;
+  }
+
   private PlanStep currentStep() {
     for (PlanStep step : steps) if (!step.done) return step;
     return null;
   }
 
-  private boolean requiresReadCoverage(PlanStep step) {
-    if (step == null || step.fileRefs.isEmpty()) return true;
-    boolean exactAnchorEditAvailable = false;
-    for (String raw : step.requiredTools) {
-      if ("search_replace".equals(canonicalToolName(raw))
-          && role("search_replace") == CodeToolRole.EDIT) {
-        exactAnchorEditAvailable = true;
-        break;
-      }
-    }
+  private boolean writeEvidenceReady(PlanStep step) {
+    if (step == null) return false;
     for (String ref : step.fileRefs) {
       PlanFile file = file(ref);
-      if (file == null) return true;
-      if (!"create".equals(file.action)) {
-        if (!exactAnchorEditAvailable) return true;
-        continue;
-      }
-      if (!file.canonicalPath.isEmpty()) {
-        try {
-          File target = workspace == null ? new File(file.canonicalPath) : workspace.resolveSafely(file.displayPath);
-          if (target.exists() && !exactAnchorEditAvailable) return true;
-        } catch (Exception ignored) {
-          if (!exactAnchorEditAvailable) return true;
-        }
-      }
+      if (file == null || hasWriteFor(file)) continue;
+      if ("create".equals(file.action) && !plannedFileExists(file)) return true;
+      return hasReadyReadCoverage(file.canonicalPath.isEmpty()
+          ? file.displayPath : file.canonicalPath);
+    }
+    for (String raw : step.requiredTools) {
+      CodeToolRole candidate = role(canonicalToolName(raw));
+      if (candidate == CodeToolRole.CREATE) return true;
+      if (candidate == CodeToolRole.EDIT) return hasReadyReadCoverage();
     }
     return false;
   }
@@ -1610,7 +1573,7 @@ final class ManagedCodePlanCoordinator
     if ("quality".equals(current.phase)) return CodeAgentToolNames.QUALITY_REVIEW;
     if ("discover".equals(current.phase)) return "read_file";
     if ("implement".equals(current.phase)) {
-      if (requiresReadCoverage(current) && !hasReadyReadCoverage()) return "read_file";
+      if (!writeEvidenceReady(current)) return "read_file";
       String pending = nextPendingImplementationTool(current);
       return pending.isEmpty() ? "search_replace" : pending;
     }
@@ -1673,20 +1636,6 @@ final class ManagedCodePlanCoordinator
     for (String raw : step.requiredTools) {
       CodeToolRole candidate = role(canonicalToolName(raw));
       if (candidate == CodeToolRole.CREATE || candidate == CodeToolRole.EDIT) return true;
-    }
-    return false;
-  }
-
-  private boolean planUsesSearchReplace() {
-    if (role("search_replace") != CodeToolRole.EDIT) return false;
-    for (PlanFile file : files) {
-      if ("edit".equals(file.action)) return true;
-    }
-    for (PlanStep step : steps) {
-      if (!"implement".equals(step.phase)) continue;
-      for (String tool : step.requiredTools) {
-        if ("search_replace".equals(canonicalToolName(tool))) return true;
-      }
     }
     return false;
   }

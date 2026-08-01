@@ -17,6 +17,7 @@ public final class ToolArgumentContractTest {
 
     assertFalse(legacyTool.strictSchema());
     assertEquals(ToolArgumentMode.BEST_EFFORT, legacyEndpoint.toolArgumentMode());
+    assertTrue(legacyEndpoint.namedToolChoiceSupported());
   }
 
   @Test
@@ -35,5 +36,22 @@ public final class ToolArgumentContractTest {
 
     assertTrue(strictTool.strictSchema());
     assertEquals(ToolArgumentMode.STRICT, strictEndpoint.toolArgumentMode());
+  }
+
+  @Test
+  public void endpointCanDisableNamedToolChoiceWithoutBreakingLegacyDefaults() {
+    ModelEndpoint endpoint =
+        new ModelEndpoint(
+            "https://example.test/v1",
+            "",
+            "deepseek-chat",
+            0.2,
+            true,
+            false,
+            false,
+            ignored -> Collections.emptyMap(),
+            ToolArgumentMode.BEST_EFFORT);
+
+    assertFalse(endpoint.namedToolChoiceSupported());
   }
 }

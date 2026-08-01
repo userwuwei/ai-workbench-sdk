@@ -5,7 +5,7 @@ import java.util.Collections;
 public final class ModelEndpoint {
   private final String baseUrl, apiKey, modelId;
   private final double temperature;
-  private final boolean nativeTools, deepThinking;
+  private final boolean nativeTools, deepThinking, namedToolChoiceSupported;
   private final ModelHeaderProvider headerProvider;
   private final ToolArgumentMode toolArgumentMode;
 
@@ -74,12 +74,35 @@ public final class ModelEndpoint {
       boolean deepThinking,
       ModelHeaderProvider headerProvider,
       ToolArgumentMode toolArgumentMode) {
+    this(
+        baseUrl,
+        apiKey,
+        modelId,
+        temperature,
+        nativeTools,
+        deepThinking,
+        true,
+        headerProvider,
+        toolArgumentMode);
+  }
+
+  public ModelEndpoint(
+      String baseUrl,
+      String apiKey,
+      String modelId,
+      double temperature,
+      boolean nativeTools,
+      boolean deepThinking,
+      boolean namedToolChoiceSupported,
+      ModelHeaderProvider headerProvider,
+      ToolArgumentMode toolArgumentMode) {
     this.baseUrl = baseUrl;
     this.apiKey = apiKey;
     this.modelId = modelId;
     this.temperature = temperature;
     this.nativeTools = nativeTools;
     this.deepThinking = deepThinking;
+    this.namedToolChoiceSupported = namedToolChoiceSupported;
     this.headerProvider =
         headerProvider == null ? endpoint -> Collections.emptyMap() : headerProvider;
     this.toolArgumentMode =
@@ -108,6 +131,10 @@ public final class ModelEndpoint {
 
   public boolean deepThinking() {
     return deepThinking;
+  }
+
+  public boolean namedToolChoiceSupported() {
+    return namedToolChoiceSupported;
   }
 
   public ModelHeaderProvider headerProvider() {

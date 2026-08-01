@@ -273,6 +273,15 @@ public class OpenAIModelGatewayTest {
     assertEquals("function", choice.get("type").getAsString());
     assertEquals("create_file", choice.getAsJsonObject("function").get("name").getAsString());
     assertFalse(named.get("parallel_tool_calls").getAsBoolean());
+
+    server.enqueue(stopResponse());
+    await(
+        new OpenAIModelGateway(),
+        request(ToolArgumentMode.BEST_EFFORT, false, false, "create_file", false));
+    JsonObject unsupported =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertEquals("auto", unsupported.get("tool_choice").getAsString());
   }
 
   @Test
@@ -673,9 +682,19 @@ public class OpenAIModelGatewayTest {
       boolean strictSchema,
       boolean allowMultipleToolCalls,
       String requiredToolName) {
+    return request(mode, strictSchema, allowMultipleToolCalls, requiredToolName, true);
+  }
+
+  private ModelRequest request(
+      ToolArgumentMode mode,
+      boolean strictSchema,
+      boolean allowMultipleToolCalls,
+      String requiredToolName,
+      boolean namedToolChoiceSupported) {
     ModelEndpoint endpoint =
         new ModelEndpoint(
-            server.url("/v1").toString(), "secret", "test", 0.2, true, false, mode);
+            server.url("/v1").toString(), "secret", "test", 0.2, true, false,
+            namedToolChoiceSupported, ignored -> Collections.emptyMap(), mode);
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", "object");
     schema.put("properties", Collections.emptyMap());

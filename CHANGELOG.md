@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.27
+
+- Code Agent 仅在当前 revision 已取得全文、完整结构或 `read_plan.ready_for_edit` 证据后切换到单一 `search_replace`，普通局部内容不再提前开放写工具。
+- 删除同文件第二次局部读取固定推荐 `read_plan` 的计数反馈；`plan_progress` 累计同 revision 的 evidence 与已覆盖 requirement，等价证据不再形成重复规划链路。
+- `ModelEndpoint` 增加向后兼容的 named tool choice 能力标志；不支持 named choice 的端点保持单一可见阶段工具并发送 `tool_choice=auto`。
+
 ## 2.0.26
 
 - `submit()` 作为新任务边界，仅保留 System Prompt 与真实成功的已完成任务摘要；旧未完成计划、工具协议、源码证据和重复需求不再进入新 run，暂停恢复仍沿用原 run。

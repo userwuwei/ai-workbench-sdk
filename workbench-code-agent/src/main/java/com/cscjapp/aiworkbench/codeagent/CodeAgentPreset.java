@@ -170,7 +170,8 @@ public final class CodeAgentPreset {
         + "禁止在 reasoning 中生成、引用、复述、检查或修改源码、伪代码、diff、工具 JSON，"
         + "以及 old/new/content/replacements 等工具参数。"
         + "证据和计划满足后立即调用工具；一个模型响应只生成一个代码写入调用，源码只能生成一次并直接写入工具参数。"
-        + "当本轮已通过 named tool_choice 指定工具时，reasoning 最多只写一句抽象目标并直接输出指定工具参数；"
+        + "当本轮已通过 named tool_choice 指定工具，或当前请求只暴露一个阶段工具时，"
+        + "reasoning 最多只写一句抽象目标并直接输出该工具参数；"
         + "若为写工具，禁止代码围栏、源码、伪代码、diff 和 old/new/content/replacements 草稿。"
         + "写入前不进行代码级自检；写入后使用真实验证工具检查，并且只根据真实失败修复。";
   }
