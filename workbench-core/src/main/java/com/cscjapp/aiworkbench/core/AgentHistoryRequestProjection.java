@@ -34,6 +34,7 @@ final class AgentHistoryRequestProjection {
     if (safe.isEmpty()) return safe;
     Set<String> preservedWriteCalls = preservedWriteCalls(safe);
     Set<String> preservedFullReadCalls = preservedFullReadCalls(safe);
+    Set<String> preservedReadPlanCalls = preservedReadPlanCalls(safe);
     List<AgentMessage> out = new ArrayList<>(safe.size());
     boolean anyChanged = false;
     for (int index = 0; index < safe.size(); ) {
@@ -57,7 +58,8 @@ final class AgentHistoryRequestProjection {
             call,
             resultsByCallId.get(call.id()),
             preservedWriteCalls.contains(call.id()),
-            preservedFullReadCalls.contains(call.id()));
+            preservedFullReadCalls.contains(call.id()),
+            preservedReadPlanCalls.contains(call.id()));
         if (projection == null) calls.add(call);
         else {
           calls.add(new AgentToolCall(call.id(), call.name(), projection.arguments));
@@ -82,12 +84,15 @@ final class AgentHistoryRequestProjection {
       AgentToolCall call,
       AgentMessage resultMessage,
       boolean preserveWritePayload,
-      boolean preserveFullRead) {
+      boolean preserveFullRead,
+      boolean preserveReadPlanEvidence) {
     if (call == null || call.arguments() == null || resultMessage == null) return null;
     if ("read_file".equals(call.name())) {
       return preserveFullRead ? null : compactStaleFullRead(call, resultMessage);
     }
-    if ("read_plan".equals(call.name())) return compactReadPlan(call, resultMessage);
+    if ("read_plan".equals(call.name())) {
+      return compactReadPlan(call, resultMessage, preserveReadPlanEvidence);
+    }
     if ("browser_test".equals(call.name())) return compactBrowserTest(call, resultMessage);
     if (!isWriteTool(call.name())) return null;
     String rawArguments = GSON.toJson(call.arguments().asMap());
@@ -400,6 +405,50 @@ final class AgentHistoryRequestProjection {
         ? Collections.emptySet() : new LinkedHashSet<>(latestByPath.values());
   }
 
+  /** Keep one complete evidence packet for each source revision; older packets keep only routing data. */
+  private static Set<String> preservedReadPlanCalls(List<AgentMessage> messages) {
+    Map<String, String> latestByPathRevision = new LinkedHashMap<>();
+    for (int index = 0; index < messages.size(); index++) {
+      AgentMessage message = messages.get(index);
+      if (message.role() != AgentMessage.Role.ASSISTANT || message.toolCalls().isEmpty()) continue;
+      Map<String, AgentMessage> results = new LinkedHashMap<>();
+      int cursor = index + 1;
+      while (cursor < messages.size() && messages.get(cursor).role() == AgentMessage.Role.TOOL) {
+        AgentMessage result = messages.get(cursor++);
+        results.put(result.toolCallId(), result);
+      }
+      for (AgentToolCall call : message.toolCalls()) {
+        if (!"read_plan".equals(call.name())) continue;
+        AgentMessage resultMessage = results.get(call.id());
+        JsonObject result = resultMessage == null ? null : parseObject(resultMessage.content());
+        JsonObject data = result == null ? null : object(result.get("data"));
+        if (result == null
+            || !"success".equalsIgnoreCase(string(result.get("status")))
+            || data == null
+            || !hasEvidenceContent(data)) continue;
+        String path = string(data.get("path"));
+        if (path.isEmpty()) path = call.arguments().getString("path", "");
+        String revision = string(data.get("revision"));
+        if (!path.isEmpty() && !revision.isEmpty()) {
+          latestByPathRevision.put(path + "\n" + revision, call.id());
+        }
+      }
+    }
+    return latestByPathRevision.isEmpty()
+        ? Collections.emptySet()
+        : new LinkedHashSet<>(latestByPathRevision.values());
+  }
+
+  private static boolean hasEvidenceContent(JsonObject data) {
+    JsonElement rawEvidence = data == null ? null : data.get("evidence");
+    if (rawEvidence == null || !rawEvidence.isJsonArray()) return false;
+    for (JsonElement raw : rawEvidence.getAsJsonArray()) {
+      JsonObject evidence = object(raw);
+      if (evidence != null && !string(evidence.get("content")).isEmpty()) return true;
+    }
+    return false;
+  }
+
   private static boolean isFullRead(AgentToolCall call, JsonObject data) {
     if (booleanValue(data.get("full_file")) || "full_file".equals(string(data.get("mode")))) {
       return true;
@@ -428,7 +477,8 @@ final class AgentHistoryRequestProjection {
     return new Projection(call.arguments(), GSON.toJson(compactResult));
   }
 
-  private static Projection compactReadPlan(AgentToolCall call, AgentMessage resultMessage) {
+  private static Projection compactReadPlan(
+      AgentToolCall call, AgentMessage resultMessage, boolean preserveEvidence) {
     JsonObject result = parseObject(resultMessage.content());
     if (result == null) return null;
     JsonObject data = object(result.get("data"));
@@ -450,15 +500,20 @@ final class AgentHistoryRequestProjection {
         "total_returned_lines",
         "truncated",
         "resolved_targets",
-        "evidence",
         "coverage_summary",
-        "edit_anchor_pack",
+        "evidence_frontier",
+        "plan_progress",
         "read_paths",
         "recommended_next_action",
         "next_read_plan_delta",
         "message",
         "plan_state");
-    compactData.addProperty("history_projection", "goal_driven_read_compacted");
+    if (preserveEvidence) {
+      copyJson(data, compactData, "evidence", "edit_anchor_pack");
+      compactData.addProperty("history_projection", "goal_driven_read_compacted");
+    } else {
+      compactData.addProperty("history_projection", "stale_goal_driven_read_compacted");
+    }
     compactResult.add("data", compactData);
     return new Projection(call.arguments(), GSON.toJson(compactResult));
   }

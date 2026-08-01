@@ -694,6 +694,70 @@ public class AgentHistoryRequestProjectionTest {
   }
 
   @Test
+  public void readPlanHistoryKeepsOnlyLatestEvidenceForSamePathAndRevision() {
+    String revision = String.join("", Collections.nCopies(64, "b"));
+    ToolArguments firstArguments = new ToolArguments(map(
+        "path", "/project/app.js",
+        "goal", "inspect state",
+        "evidence_requirements", Collections.singletonList(map(
+            "id", "state", "question", "find state", "signals", Collections.singletonList("state")))));
+    ToolArguments secondArguments = new ToolArguments(map(
+        "path", "/project/app.js",
+        "goal", "inspect state again",
+        "evidence_requirements", Collections.singletonList(map(
+            "id", "render", "question", "find render", "signals", Collections.singletonList("render")))));
+    Map<String, Object> firstData = map(
+        "operation", "read_plan",
+        "mode", "goal_driven_evidence_batch",
+        "path", "/project/app.js",
+        "revision", revision,
+        "resolved_targets", Collections.singletonList(map("start_line", 1, "end_line", 2)),
+        "evidence", Collections.singletonList(map(
+            "evidence_id", "ev_state", "content", "const state = {};", "sha256", "first")),
+        "edit_anchor_pack", Collections.singletonList(map("copyable_old", "const state = {};")),
+        "coverage_summary", map("ready_for_edit", false),
+        "evidence_frontier", map("can_request_delta", true),
+        "plan_progress", map("has_new_information", true),
+        "recommended_next_action", "read_plan");
+    Map<String, Object> secondData = map(
+        "operation", "read_plan",
+        "mode", "goal_driven_evidence_batch",
+        "path", "/project/app.js",
+        "revision", revision,
+        "resolved_targets", Collections.singletonList(map("start_line", 8, "end_line", 10)),
+        "evidence", Collections.singletonList(map(
+            "evidence_id", "ev_render", "content", "function render() {}", "sha256", "second")),
+        "edit_anchor_pack", Collections.singletonList(map("copyable_old", "function render() {}")),
+        "coverage_summary", map("ready_for_edit", true),
+        "evidence_frontier", map("can_request_delta", false),
+        "plan_progress", map("has_new_information", true),
+        "recommended_next_action", "search_replace");
+    List<AgentMessage> history = Arrays.asList(
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("read-1", "read_plan", firstArguments))),
+        AgentMessage.tool("read-1", "read_plan", ToolResultCodec.toJson(ToolResult.success(firstData))),
+        AgentMessage.assistant("", Collections.singletonList(
+            new AgentToolCall("read-2", "read_plan", secondArguments))),
+        AgentMessage.tool("read-2", "read_plan", ToolResultCodec.toJson(ToolResult.success(secondData))));
+
+    List<AgentMessage> projected = AgentHistoryRequestProjection.project(history);
+
+    JsonObject stale = JsonParser.parseString(projected.get(1).content())
+        .getAsJsonObject().getAsJsonObject("data");
+    assertFalse(stale.has("evidence"));
+    assertFalse(stale.has("edit_anchor_pack"));
+    assertTrue(stale.has("evidence_frontier"));
+    assertTrue(stale.has("plan_progress"));
+    assertEquals("stale_goal_driven_read_compacted", stale.get("history_projection").getAsString());
+
+    JsonObject latest = JsonParser.parseString(projected.get(3).content())
+        .getAsJsonObject().getAsJsonObject("data");
+    assertTrue(latest.getAsJsonArray("evidence").toString().contains("function render"));
+    assertTrue(latest.has("edit_anchor_pack"));
+    assertEquals("goal_driven_read_compacted", latest.get("history_projection").getAsString());
+  }
+
+  @Test
   public void browserHistoryKeepsFormalScenarioArgumentsAndCompactsOnlyResults() {
     Map<String, Object> arguments =
         map(

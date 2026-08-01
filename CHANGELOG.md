@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.0.23
+
+- `read_plan` 以当前 revision 中的真实完整证据块判定多信号覆盖；未完成结果返回 `evidence_frontier`，只有存在未返回的真实源码候选时才给出增量 `next_read_plan_delta` 与 `read_plan` 建议。
+- 本地规划器复用本次已读取源码，统一索引 signals、命中行与最内层结构，不再逐 evidence target 重读文件或重复计算 revision；成功路径输出分阶段耗时日志。
+- Code Agent 为同一路径和 revision 记录证据增量并返回 `plan_progress`；重复证据不再推荐等价 `read_plan`。历史投影只保留同一路径和 revision 最新一次计划的完整 evidence。
+
 ## 2.0.22
 
 - Code Agent 按文件路径与源码 revision 统计成功的局部 `read_file`；同一文件第二次及后续局部读取仍正常返回代码，并明确推荐下一步使用一次 `read_plan` 收集剩余证据。

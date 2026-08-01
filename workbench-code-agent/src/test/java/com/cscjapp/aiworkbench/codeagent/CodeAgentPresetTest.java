@@ -145,6 +145,9 @@ public final class CodeAgentPresetTest {
     assertTrue(present.contains("禁止猜测行号"));
     assertTrue(present.contains(
         "当 read_file 返回 recommended_next_action=read_plan 时，下一步直接调用一次 read_plan"));
+    assertTrue(present.contains("signals 是真实源码定位词"));
+    assertTrue(present.contains("evidence_frontier 与 plan_progress"));
+    assertTrue(present.contains("has_new_information=true"));
     assertFalse(present.contains("优先只传 path 使用 read_file 完整读取"));
     assertTrue(legacy.contains("优先只传 path 使用 read_file 完整读取"));
     assertFalse(legacy.contains("最小充分证据"));
@@ -2086,6 +2089,126 @@ public final class CodeAgentPresetTest {
             "recommended_next_action", "read_plan")));
     assertFalse(summary.data().containsKey("same_file_bounded_read_count"));
     assertEquals("read_plan", summary.data().get("recommended_next_action"));
+  }
+
+  @Test
+  public void readPlanProgressSuppressesEquivalentRetryButResetsForNewRevision() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_plan", CodeToolRole.READ);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(71L, "session", "workspace", "task"));
+    long generation = coordinator.generation();
+    ToolArguments arguments = new ToolArguments(map(
+        "path", "main.txt",
+        "goal", "collect evidence",
+        "evidence_requirements", Collections.singletonList(map(
+            "id", "state", "question", "find state", "signals", Collections.singletonList("state")))));
+
+    ToolResult first = coordinator.recordAndDecorate(
+        generation,
+        "read_plan",
+        arguments,
+        ToolResult.success(map(
+            "mode", "goal_driven_evidence_batch",
+            "path", "main.txt",
+            "revision", "read-plan-revision-a",
+            "evidence", Collections.singletonList(map(
+                "evidence_id", "ev-state", "sha256", "hash-state", "content", "const state = 1;")),
+            "coverage_summary", map(
+                "ready_for_edit", false,
+                "covered", Collections.emptyList(),
+                "missing", Collections.singletonList("state")),
+            "evidence_frontier", map("can_request_delta", true),
+            "next_read_plan_delta", map("path", "main.txt"),
+            "recommended_next_action", "read_plan")));
+    Map<?, ?> firstProgress = (Map<?, ?>) first.data().get("plan_progress");
+    assertEquals(1, firstProgress.get("new_evidence_count"));
+    assertEquals(Boolean.TRUE, firstProgress.get("has_new_information"));
+    assertEquals("read_plan", first.data().get("recommended_next_action"));
+
+    ToolResult repeated = coordinator.recordAndDecorate(
+        generation,
+        "read_plan",
+        arguments,
+        ToolResult.success(map(
+            "mode", "goal_driven_evidence_batch",
+            "path", "main.txt",
+            "revision", "read-plan-revision-a",
+            "evidence", Collections.singletonList(map(
+                "evidence_id", "ev-state", "sha256", "hash-state", "content", "const state = 1;")),
+            "coverage_summary", map(
+                "ready_for_edit", false,
+                "covered", Collections.emptyList(),
+                "missing", Collections.singletonList("state")),
+            "evidence_frontier", map("can_request_delta", true),
+            "next_read_plan_delta", map("path", "main.txt"),
+            "recommended_next_action", "read_plan")));
+    Map<?, ?> repeatedProgress = (Map<?, ?>) repeated.data().get("plan_progress");
+    assertEquals(0, repeatedProgress.get("new_evidence_count"));
+    assertEquals(1, repeatedProgress.get("repeated_evidence_count"));
+    assertEquals(Boolean.FALSE, repeatedProgress.get("has_new_information"));
+    assertFalse(repeated.data().containsKey("recommended_next_action"));
+    assertFalse(repeated.data().containsKey("next_read_plan_delta"));
+    assertEquals("const state = 1;",
+        ((Map<?, ?>) ((List<?>) repeated.data().get("evidence")).get(0)).get("content"));
+
+    ToolResult newRevision = coordinator.recordAndDecorate(
+        generation,
+        "read_plan",
+        arguments,
+        ToolResult.success(map(
+            "mode", "goal_driven_evidence_batch",
+            "path", "main.txt",
+            "revision", "read-plan-revision-b",
+            "evidence", Collections.singletonList(map(
+                "evidence_id", "ev-state", "sha256", "hash-state-b", "content", "const state = 2;")),
+            "coverage_summary", map(
+                "ready_for_edit", false,
+                "covered", Collections.emptyList(),
+                "missing", Collections.singletonList("state")),
+            "evidence_frontier", map("can_request_delta", true),
+            "next_read_plan_delta", map("path", "main.txt"))));
+    Map<?, ?> resetProgress = (Map<?, ?>) newRevision.data().get("plan_progress");
+    assertEquals(1, resetProgress.get("new_evidence_count"));
+    assertEquals(Boolean.TRUE, resetProgress.get("has_new_information"));
+    assertEquals("read_plan", newRevision.data().get("recommended_next_action"));
+  }
+
+  @Test
+  public void readyReadPlanKeepsSearchReplaceAsTheNextAction() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_plan", CodeToolRole.READ);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().build(),
+        roles,
+        workspace);
+    coordinator.onRunStarted(new AgentRunContext(72L, "session", "workspace", "task"));
+
+    ToolResult result = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_plan",
+        new ToolArguments(map("path", "main.txt", "goal", "collect evidence")),
+        ToolResult.success(map(
+            "mode", "goal_driven_evidence_batch",
+            "path", "main.txt",
+            "revision", "read-plan-ready",
+            "evidence", Collections.singletonList(map(
+                "evidence_id", "ev-ready", "sha256", "hash-ready", "content", "const ready = true;")),
+            "coverage_summary", map(
+                "ready_for_edit", true,
+                "covered", Collections.singletonList("ready"),
+                "missing", Collections.emptyList()),
+            "evidence_frontier", map("can_request_delta", true),
+            "next_read_plan_delta", map("path", "main.txt"),
+            "recommended_next_action", "read_plan")));
+
+    assertEquals("search_replace", result.data().get("recommended_next_action"));
+    assertFalse(result.data().containsKey("next_read_plan_delta"));
   }
 
   @Test

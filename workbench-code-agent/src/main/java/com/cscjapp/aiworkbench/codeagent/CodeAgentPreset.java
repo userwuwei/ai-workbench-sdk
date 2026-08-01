@@ -203,7 +203,7 @@ public final class CodeAgentPreset {
     if (!convergent) {
       if (!available) return "";
       return "\n首次接触当前 revision 的普通源码文件时，优先只传 path 使用 read_file 完整读取；已知具体跨区域问题或验证失败证据时，可使用 read_plan.evidence_requirements 一次定位 DOM/CSS/函数/调用链。读取工具是非破坏性的，由你根据上下文自行选择。"
-          + "\nread_plan.coverage_summary.ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入合并 search_replace；为 false 时根据 missing_evidence_types/missing_signals 决定继续读取或调整判断，禁止猜测 old。";
+          + "\nread_plan 的 signals 只填写真实源码定位词；已知主体结构时，把主体符号和待确认事实写在同一 requirement。ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入合并 search_replace；未就绪时先查看 evidence_frontier 与 plan_progress，只有 has_new_information=true 且存在 next_read_plan_delta 时才继续 read_plan，禁止原样重发等价计划或猜测 old。";
     }
     String multiRegion = available
         ? "\n3. 涉及两个以上不连续区域、调用链、状态流或 DOM/CSS/JS 联动且缺少锚点时，只调用一次 read_plan.evidence_requirements 收集全部证据。"
@@ -213,7 +213,7 @@ public final class CodeAgentPreset {
         + "\n2. 只缺一个连续符号或函数时，仅调用一次有界 read_file；范围必须来自当前 revision 的工具结果或错误窗口，禁止猜测行号。"
         + multiRegion
         + "\n4. 成功写入已经建立当前 revision；写入后有 old 就直接 search_replace，没有 old 才补一次有界读取或一次 read_plan。"
-        + "\n5. read_plan.coverage_summary.ready_for_edit=true 后默认编辑或验证；为 false 时只补充明确列出的 missing evidence，禁止猜测 old。"
+        + "\n5. read_plan 的 signals 是真实源码定位词，不是候选名称列表；已知主体结构时，在同一 requirement 中同时提供主体符号和待确认事实。ready_for_edit=true 后默认编辑或验证；未就绪时先检查 evidence_frontier 与 plan_progress，只有 has_new_information=true 且存在 next_read_plan_delta 时才继续增量 read_plan；没有 delta 时不得原样重发等价计划，依据已有 evidence 和候选锚点自行决定下一步，禁止猜测 old。"
         + "\n6. 仅在首次接触小文件且确实需要全局理解时，才使用 path-only 完整 read_file。"
         + "\n7. 当 read_file 返回 recommended_next_action=read_plan 时，下一步直接调用一次 read_plan 补齐当前任务所需的剩余证据，不要继续对同一文件调用 read_file。";
   }

@@ -26,6 +26,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   private final Map<String, Long> pathRevisions = new LinkedHashMap<>();
   private final Map<String, ReadCoverage> readCoverageByPath = new LinkedHashMap<>();
   private final Map<String, Integer> boundedReadCounts = new LinkedHashMap<>();
+  private final Map<String, ReadPlanSnapshot> readPlanSnapshots = new LinkedHashMap<>();
   private final Map<String, String> createdFileBindings = new LinkedHashMap<>();
   private final Set<String> unresolvedWritePaths = new LinkedHashSet<>();
   private Map<String, Object> currentState = Collections.emptyMap();
@@ -89,6 +90,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     pathRevisions.clear();
     readCoverageByPath.clear();
     boundedReadCounts.clear();
+    readPlanSnapshots.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
@@ -117,6 +119,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     pathRevisions.clear();
     readCoverageByPath.clear();
     boundedReadCounts.clear();
+    readPlanSnapshots.clear();
     createdFileBindings.clear();
     unresolvedWritePaths.clear();
     currentState = Collections.emptyMap();
@@ -420,18 +423,23 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     }
     int boundedReadCount = boundedReadCount(toolName, arguments, effective);
     boolean recommendReadPlan = boundedReadCount >= 2;
+    boolean goalDrivenReadPlan = isGoalDrivenReadPlan(toolName, effective);
     boolean contractResult = hasPlan()
         && ("browser_test".equals(toolName)
             || "verify_web_project".equals(toolName)
             || CodeAgentToolNames.QUALITY_REVIEW.equals(toolName)
             || CodeAgentToolNames.FINALIZE_TASK.equals(toolName));
     boolean recoverableRetry = hasPlan() && recoverableSearchReplaceFailure(toolName, effective);
-    if (!recommendReadPlan
+    if (!goalDrivenReadPlan
+        && !recommendReadPlan
         && ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan())) return effective;
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
+    if (goalDrivenReadPlan) decorateReadPlanProgress(arguments, data);
     if (hasPlan() && (stateChanged || contractResult)) data.put("plan_state", state());
     if (contractResult) decorateManagedResult(toolName, data);
-    if (recommendReadPlan) {
+    if (goalDrivenReadPlan) {
+      decorateReadPlanRecommendation(data);
+    } else if (recommendReadPlan) {
       data.put("same_file_bounded_read_count", boundedReadCount);
       data.put("recommended_next_action", "read_plan");
       data.put("message", appendMessage(
@@ -457,6 +465,108 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           effective.errorCode(), effective.message(), effective.retryable(), data);
     }
     return effective;
+  }
+
+  private static boolean isGoalDrivenReadPlan(String toolName, ToolResult result) {
+    return "read_plan".equals(toolName)
+        && result != null
+        && result.isSuccess()
+        && "goal_driven_evidence_batch".equals(text(result.data().get("mode")));
+  }
+
+  @SuppressWarnings("unchecked")
+  private void decorateReadPlanProgress(ToolArguments arguments, Map<String, Object> data) {
+    String path = text(firstValue(data, "resolved_path", "path"));
+    if (path.isEmpty() && arguments != null) path = text(arguments.get("path"));
+    String canonical = canonicalPath(path);
+    if (!canonical.isEmpty()) path = canonical;
+    String sourceRevision = text(data.get("revision"));
+    LinkedHashSet<String> evidenceHashes = evidenceHashes(data.get("evidence"));
+    LinkedHashSet<String> covered = coverageIds(data.get("coverage_summary"), "covered");
+    LinkedHashSet<String> unresolved = coverageIds(data.get("coverage_summary"), "missing");
+    ReadPlanSnapshot previous = null;
+    String key = path.isEmpty() || sourceRevision.isEmpty() ? "" : path + "\n" + sourceRevision;
+    if (!key.isEmpty()) previous = readPlanSnapshots.get(key);
+
+    LinkedHashSet<String> newEvidence = new LinkedHashSet<>(evidenceHashes);
+    LinkedHashSet<String> repeatedEvidence = new LinkedHashSet<>();
+    LinkedHashSet<String> newlyResolved = new LinkedHashSet<>(covered);
+    if (previous != null) {
+      newEvidence.removeAll(previous.evidenceHashes);
+      repeatedEvidence.addAll(evidenceHashes);
+      repeatedEvidence.retainAll(previous.evidenceHashes);
+      newlyResolved.removeAll(previous.coveredRequirementIds);
+    }
+    boolean hasNewInformation = !newEvidence.isEmpty() || !newlyResolved.isEmpty();
+    Map<String, Object> progress = new LinkedHashMap<>();
+    Object existing = data.get("plan_progress");
+    if (existing instanceof Map) progress.putAll((Map<String, Object>) existing);
+    progress.put("new_evidence_count", newEvidence.size());
+    progress.put("repeated_evidence_count", repeatedEvidence.size());
+    progress.put("newly_resolved_requirement_ids", new ArrayList<>(newlyResolved));
+    progress.put("unresolved_requirement_ids", new ArrayList<>(unresolved));
+    progress.put("has_new_information", hasNewInformation);
+    data.put("plan_progress", progress);
+    if (!key.isEmpty()) {
+      readPlanSnapshots.put(key, new ReadPlanSnapshot(evidenceHashes, covered, unresolved));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void decorateReadPlanRecommendation(Map<String, Object> data) {
+    Map<String, Object> progress = data.get("plan_progress") instanceof Map
+        ? (Map<String, Object>) data.get("plan_progress") : Collections.emptyMap();
+    Map<String, Object> coverage = data.get("coverage_summary") instanceof Map
+        ? (Map<String, Object>) data.get("coverage_summary") : Collections.emptyMap();
+    boolean readyForEdit = Boolean.TRUE.equals(coverage.get("ready_for_edit"));
+    if (readyForEdit) {
+      data.put("recommended_next_action", "search_replace");
+      data.remove("next_read_plan_delta");
+      return;
+    }
+    Map<String, Object> frontier = data.get("evidence_frontier") instanceof Map
+        ? (Map<String, Object>) data.get("evidence_frontier") : Collections.emptyMap();
+    boolean hasNewInformation = Boolean.TRUE.equals(progress.get("has_new_information"));
+    boolean canRequestDelta = Boolean.TRUE.equals(frontier.get("can_request_delta"));
+    boolean hasDelta = data.get("next_read_plan_delta") instanceof Map;
+    if (hasNewInformation && canRequestDelta && hasDelta) {
+      data.put("recommended_next_action", "read_plan");
+      return;
+    }
+    if ("read_plan".equals(text(data.get("recommended_next_action")))) {
+      data.remove("recommended_next_action");
+    }
+    data.remove("next_read_plan_delta");
+    if (!hasNewInformation) {
+      data.put("message", appendMessage(
+          text(data.get("message")),
+          "本次同一 revision 的阅读没有产生新增源码证据；复用已有 evidence 或依据 evidence_frontier 改变问题或锚点。"));
+    }
+  }
+
+  private static LinkedHashSet<String> evidenceHashes(Object rawEvidence) {
+    LinkedHashSet<String> output = new LinkedHashSet<>();
+    if (!(rawEvidence instanceof Iterable)) return output;
+    for (Object raw : (Iterable<?>) rawEvidence) {
+      if (!(raw instanceof Map)) continue;
+      Map<?, ?> evidence = (Map<?, ?>) raw;
+      String hash = text(evidence.get("sha256"));
+      if (hash.isEmpty()) hash = text(evidence.get("evidence_id"));
+      if (!hash.isEmpty()) output.add(hash);
+    }
+    return output;
+  }
+
+  private static LinkedHashSet<String> coverageIds(Object rawCoverage, String key) {
+    LinkedHashSet<String> output = new LinkedHashSet<>();
+    if (!(rawCoverage instanceof Map)) return output;
+    Object rawIds = ((Map<?, ?>) rawCoverage).get(key);
+    if (!(rawIds instanceof Iterable)) return output;
+    for (Object raw : (Iterable<?>) rawIds) {
+      String id = text(raw);
+      if (!id.isEmpty()) output.add(id);
+    }
+    return output;
   }
 
   private int boundedReadCount(
@@ -2202,6 +2312,23 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     ReadCoverage(String sourceRevision, Collection<String> evidenceIds) {
       this.sourceRevision = sourceRevision;
       this.evidenceIds = Collections.unmodifiableList(new ArrayList<>(evidenceIds));
+    }
+  }
+
+  private static final class ReadPlanSnapshot {
+    final Set<String> evidenceHashes;
+    final Set<String> coveredRequirementIds;
+    final Set<String> unresolvedRequirementIds;
+
+    ReadPlanSnapshot(
+        Collection<String> evidenceHashes,
+        Collection<String> coveredRequirementIds,
+        Collection<String> unresolvedRequirementIds) {
+      this.evidenceHashes = Collections.unmodifiableSet(new LinkedHashSet<>(evidenceHashes));
+      this.coveredRequirementIds =
+          Collections.unmodifiableSet(new LinkedHashSet<>(coveredRequirementIds));
+      this.unresolvedRequirementIds =
+          Collections.unmodifiableSet(new LinkedHashSet<>(unresolvedRequirementIds));
     }
   }
 
