@@ -129,6 +129,90 @@ public class AgentCoreTest {
   }
 
   @Test
+  public void multipleToolCallsAreEnabledByRoundPolicyAndExecutedInOrder() {
+    class BatchPolicy implements ToolPolicy, MultipleToolCallPolicy {
+      public boolean allowMultipleToolCalls(AgentRoundContext context) {
+        return context.round() == 0;
+      }
+
+      public boolean supports(ToolInvocation invocation) {
+        return false;
+      }
+
+      public Cancellable evaluate(
+          ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+        throw new AssertionError("round-only policy must not evaluate invocations");
+      }
+    }
+    BatchPolicy policy = new BatchPolicy();
+    AtomicInteger firstExecutions = new AtomicInteger();
+    AtomicInteger secondExecutions = new AtomicInteger();
+    List<Boolean> multipleFlags = new ArrayList<>();
+    AtomicInteger rounds = new AtomicInteger();
+    ModelGateway gateway = (request, observer) -> {
+      multipleFlags.add(request.allowMultipleToolCalls());
+      int round = rounds.incrementAndGet();
+      if (round == 1) {
+        observer.onComplete(new ModelResponse(
+            "",
+            "tool_calls",
+            Arrays.asList(
+                new AgentToolCall("first", "write_first", ToolArguments.empty()),
+                new AgentToolCall("second", "write_second", ToolArguments.empty()))));
+      } else {
+        observer.onComplete(new ModelResponse(
+            "",
+            "tool_calls",
+            Collections.singletonList(new AgentToolCall(
+                "final",
+                "finalize_task",
+                new ToolArguments(map("status", "completed", "summary", "done"))))));
+      }
+      return Cancellable.NONE;
+    };
+    WorkbenchDefinition base = definition(
+        Arrays.asList(
+            countingTool("write_first", firstExecutions),
+            countingTool("write_second", secondExecutions),
+            tool("finalize_task", true)),
+        Collections.emptyList());
+    WorkbenchDefinition routed = new WorkbenchDefinition() {
+      public String id() { return base.id(); }
+      public String displayName() { return base.displayName(); }
+      public List<PromptContributor> promptContributors() { return base.promptContributors(); }
+      public List<ContextProvider> contextProviders() { return base.contextProviders(); }
+      public List<AgentTool> tools() { return base.tools(); }
+      public List<ToolPolicy> toolPolicies() { return Collections.singletonList(policy); }
+      public List<TaskValidator> validators() { return base.validators(); }
+      public WorkbenchHost host() { return base.host(); }
+    };
+    AgentEngine engine = new AgentEngine(
+        routed,
+        gateway,
+        new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(),
+        Runnable::run,
+        "s",
+        "w",
+        false,
+        4);
+
+    engine.submit("task", observer(new AtomicReference<>()));
+
+    assertEquals(Arrays.asList(true, false), multipleFlags);
+    assertEquals(1, firstExecutions.get());
+    assertEquals(1, secondExecutions.get());
+    List<String> writes = new ArrayList<>();
+    for (AgentMessage message : engine.messages()) {
+      if (message.role() == AgentMessage.Role.TOOL
+          && ("write_first".equals(message.name()) || "write_second".equals(message.name()))) {
+        writes.add(message.name());
+      }
+    }
+    assertEquals(Arrays.asList("write_first", "write_second"), writes);
+  }
+
+  @Test
   public void roundToolSelectionIsAdvisoryForRegisteredTools() {
     AtomicInteger rounds = new AtomicInteger();
     AtomicInteger hiddenExecutions = new AtomicInteger();

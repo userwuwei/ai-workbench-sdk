@@ -8,16 +8,27 @@ public final class ModelRequest {
   private final List<AgentMessage> messages;
   private final List<ToolSpec> tools;
   private final boolean deepThinking;
+  private final boolean allowMultipleToolCalls;
 
   public ModelRequest(
       ModelEndpoint endpoint,
       List<AgentMessage> messages,
       List<ToolSpec> tools,
       boolean deepThinking) {
+    this(endpoint, messages, tools, deepThinking, false);
+  }
+
+  public ModelRequest(
+      ModelEndpoint endpoint,
+      List<AgentMessage> messages,
+      List<ToolSpec> tools,
+      boolean deepThinking,
+      boolean allowMultipleToolCalls) {
     this.endpoint = endpoint;
     this.messages = Collections.unmodifiableList(new ArrayList<>(messages));
     this.tools = Collections.unmodifiableList(new ArrayList<>(tools));
     this.deepThinking = deepThinking;
+    this.allowMultipleToolCalls = allowMultipleToolCalls;
   }
 
   public ModelEndpoint endpoint() {
@@ -34,5 +45,9 @@ public final class ModelRequest {
 
   public boolean deepThinking() {
     return deepThinking;
+  }
+
+  public boolean allowMultipleToolCalls() {
+    return allowMultipleToolCalls;
   }
 }

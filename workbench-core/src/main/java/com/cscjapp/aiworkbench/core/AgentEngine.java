@@ -171,7 +171,8 @@ public final class AgentEngine implements Cancellable {
     if (pauseBeforeRound(demand, o, n, runId)) return;
     ModelRequest req;
     synchronized (this) {
-      List<ToolSpec> selectedTools = selectTools(n, runId);
+      AgentRoundContext roundContext = roundContext(n, runId);
+      List<ToolSpec> selectedTools = selectTools(roundContext);
       StableAgentRequestHistory.Projection projection =
           requestHistory.prepare(messages, selectedTools, demand);
       req =
@@ -179,7 +180,8 @@ public final class AgentEngine implements Cancellable {
               endpoint,
               projection.messages,
               selectedTools,
-              deepThinking);
+              deepThinking,
+              allowMultipleToolCalls(roundContext));
     }
     o.onState("model_running");
     active =
@@ -301,18 +303,29 @@ public final class AgentEngine implements Cancellable {
         + " \\UXXXXXXXX 或 \\u{...}，可优先使用原始 Unicode 字符。";
   }
 
-  private List<ToolSpec> selectTools(int round, long runId) {
+  private AgentRoundContext roundContext(int round, long runId) {
     AgentRunContext run = activeRunContext;
     if (run == null || run.runId() != runId) {
       run = new AgentRunContext(runId, sessionId, workspaceId, "");
     }
-    AgentRoundContext context = new AgentRoundContext(run, round);
+    return new AgentRoundContext(run, round);
+  }
+
+  private List<ToolSpec> selectTools(AgentRoundContext context) {
     List<ToolSpec> selected = registry.specs();
     for (ToolPolicy policy : toolPolicies) {
       ToolSelection next = policy.selectTools(context, selected);
       selected = retainSelected(selected, next == null ? Collections.emptyList() : next.tools());
     }
     return selected;
+  }
+
+  private boolean allowMultipleToolCalls(AgentRoundContext context) {
+    for (ToolPolicy policy : toolPolicies) {
+      if (policy instanceof MultipleToolCallPolicy
+          && ((MultipleToolCallPolicy) policy).allowMultipleToolCalls(context)) return true;
+    }
+    return false;
   }
 
   private static List<ToolSpec> retainSelected(

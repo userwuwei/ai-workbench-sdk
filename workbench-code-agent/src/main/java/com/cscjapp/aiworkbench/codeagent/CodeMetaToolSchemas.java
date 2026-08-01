@@ -82,7 +82,9 @@ final class CodeMetaToolSchemas {
     properties.put("implementation_shape", object("文件拆分和实现形态。"));
     properties.put("steps", planStepsSchema());
     properties.put("replan_reason", limitedString("真实证据变化后的短重规划原因。", 200));
-    properties.put("self_review_required", bool("完成前是否要求结构化自查。"));
+    properties.put(
+        "self_review_required",
+        bool("写入后是否通过真实验证工具进行结构化自查；不得在 reasoning 中展开源码预检。"));
     properties.put("risks", arrayOfString("已识别的实现风险。"));
     return objectSchema(
         properties,

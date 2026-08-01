@@ -237,6 +237,23 @@ public class OpenAIModelGatewayTest {
   }
 
   @Test
+  public void sendsRequestScopedParallelToolCallSetting() throws Exception {
+    server.enqueue(stopResponse());
+    await(new OpenAIModelGateway(), request(ToolArgumentMode.BEST_EFFORT, false, false));
+    JsonObject single =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertFalse(single.get("parallel_tool_calls").getAsBoolean());
+
+    server.enqueue(stopResponse());
+    await(new OpenAIModelGateway(), request(ToolArgumentMode.BEST_EFFORT, false, true));
+    JsonObject multiple =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertTrue(multiple.get("parallel_tool_calls").getAsBoolean());
+  }
+
+  @Test
   public void legacyOnDeltaObserverReceivesContentExactlyOnce() throws Exception {
     server.enqueue(
         new MockResponse()
@@ -619,6 +636,11 @@ public class OpenAIModelGatewayTest {
   }
 
   private ModelRequest request(ToolArgumentMode mode, boolean strictSchema) {
+    return request(mode, strictSchema, false);
+  }
+
+  private ModelRequest request(
+      ToolArgumentMode mode, boolean strictSchema, boolean allowMultipleToolCalls) {
     ModelEndpoint endpoint =
         new ModelEndpoint(
             server.url("/v1").toString(), "secret", "test", 0.2, true, false, mode);
@@ -633,6 +655,7 @@ public class OpenAIModelGatewayTest {
         endpoint,
         Arrays.asList(AgentMessage.system("s"), AgentMessage.user("u")),
         Collections.singletonList(spec),
-        false);
+        false,
+        allowMultipleToolCalls);
   }
 }

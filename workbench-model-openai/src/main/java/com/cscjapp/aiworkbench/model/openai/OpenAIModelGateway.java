@@ -244,7 +244,7 @@ public final class OpenAIModelGateway implements ModelGateway {
       }
       root.add("tools", tools);
       root.addProperty("tool_choice", "auto");
-      root.addProperty("parallel_tool_calls", false);
+      root.addProperty("parallel_tool_calls", request.allowMultipleToolCalls());
     }
     if (request.deepThinking()) root.addProperty("enable_thinking", true);
     return root;

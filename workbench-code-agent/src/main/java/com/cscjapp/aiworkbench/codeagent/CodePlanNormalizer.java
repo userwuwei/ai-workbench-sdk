@@ -159,6 +159,7 @@ final class CodePlanNormalizer {
       Map<String, Object> step = implementation.get(0);
       if (((List<?>) step.get("file_refs")).isEmpty()) step.put("file_refs", fileIds(files));
       ensureAllFilesMapped(implementation, files);
+      alignImplementationTools(implementation, files);
       return;
     }
     if (implementation.size() == files.size()) {
@@ -169,6 +170,7 @@ final class CodePlanNormalizer {
         }
       }
       ensureAllFilesMapped(implementation, files);
+      alignImplementationTools(implementation, files);
       return;
     }
     boolean allExplicit = !implementation.isEmpty();
@@ -177,6 +179,7 @@ final class CodePlanNormalizer {
     }
     if (allExplicit) {
       ensureAllFilesMapped(implementation, files);
+      alignImplementationTools(implementation, files);
       return;
     }
 
@@ -185,27 +188,41 @@ final class CodePlanNormalizer {
     while (insertAt < steps.size() && "discover".equals(text(steps.get(insertAt).get("phase")))) {
       insertAt++;
     }
-    Map<String, List<String>> groups = new LinkedHashMap<>();
+    Map<String, Object> batch =
+        step("implement-batch", "完成当前实现批次", "implement", implementationTools(files));
+    batch.put("file_refs", fileIds(files));
+    steps.add(insertAt, batch);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void alignImplementationTools(
+      List<Map<String, Object>> implementation, List<Map<String, Object>> files) {
+    Map<String, Map<String, Object>> byId = new LinkedHashMap<>();
+    for (Map<String, Object> file : files) byId.put(text(file.get("file_id")), file);
+    for (Map<String, Object> step : implementation) {
+      List<Map<String, Object>> referenced = new ArrayList<>();
+      for (String ref : (List<String>) step.get("file_refs")) {
+        Map<String, Object> file = byId.get(ref);
+        if (file != null) referenced.add(file);
+      }
+      if (!referenced.isEmpty()) step.put("required_tools", implementationTools(referenced));
+    }
+  }
+
+  private static List<String> implementationTools(List<Map<String, Object>> files) {
+    LinkedHashSet<String> tools = new LinkedHashSet<>();
     for (Map<String, Object> file : files) {
       String action = text(file.get("action"));
-      if (!"create".equals(action) && !"edit".equals(action)) action = "write";
-      groups.computeIfAbsent(action, ignored -> new ArrayList<>()).add(text(file.get("file_id")));
+      if ("edit".equals(action)) {
+        tools.add("search_replace");
+      } else if ("create".equals(action)) {
+        tools.add("create_file");
+      } else {
+        tools.add("search_replace");
+        tools.add("create_file");
+      }
     }
-    List<Map<String, Object>> generated = new ArrayList<>();
-    for (Map.Entry<String, List<String>> group : groups.entrySet()) {
-      String action = group.getKey();
-      String title = "create".equals(action) ? "创建计划文件"
-          : "edit".equals(action) ? "修改计划文件" : "完成计划文件实现";
-      List<String> tools = "create".equals(action)
-          ? Collections.singletonList("create_file")
-          : "edit".equals(action)
-              ? Arrays.asList("search_replace", "rewrite")
-              : Collections.emptyList();
-      Map<String, Object> step = step("implement-" + action, title, "implement", tools);
-      step.put("file_refs", group.getValue());
-      generated.add(step);
-    }
-    steps.addAll(insertAt, generated);
+    return new ArrayList<>(tools);
   }
 
   @SuppressWarnings("unchecked")

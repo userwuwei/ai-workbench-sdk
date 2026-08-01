@@ -110,6 +110,10 @@ public final class CodeAgentPresetTest {
     assertFalse(common.contains("不得超过 40 行或 3000 字符"));
     assertTrue(common.contains("唯一命中"));
     assertTrue(common.contains("不为同一缺口重新读取"));
+    assertTrue(common.contains("reasoning_content 只用于确定下一步工具及调用顺序"));
+    assertTrue(common.contains("不是源码草稿区"));
+    assertTrue(common.contains("源码只能生成一次并直接写入工具参数"));
+    assertTrue(common.contains("写入后使用真实验证工具检查"));
     assertFalse(common.contains("create_file 用于写入模型已经生成的完整内容"));
     assertFalse(common.contains("目标冲突由本地用户决定覆盖或新建"));
     assertTrue(composed.contains("language-specific-rules"));
@@ -335,6 +339,8 @@ public final class CodeAgentPresetTest {
         Arrays.asList(
             "goal", "quality_mode", "writing_mode", "planned_files",
             "verification_plan", "steps")));
+    assertTrue(String.valueOf(((Map<?, ?>) properties.get("self_review_required"))
+        .get("description")).contains("不得在 reasoning 中展开源码预检"));
   }
 
   @Test
@@ -450,12 +456,19 @@ public final class CodeAgentPresetTest {
       expected.add(String.valueOf(((Map<?, ?>) raw).get("file_id")));
     }
     Set<String> actual = new LinkedHashSet<>();
+    List<Map<?, ?>> implementation = new ArrayList<>();
     for (Object raw : (List<?>) normalized.get("steps")) {
       Map<?, ?> step = (Map<?, ?>) raw;
       if (!"implement".equals(step.get("phase"))) continue;
+      implementation.add(step);
       for (Object ref : (List<?>) step.get("file_refs")) actual.add(String.valueOf(ref));
     }
     assertEquals(expected, actual);
+    assertEquals(1, implementation.size());
+    assertEquals("implement-batch", implementation.get(0).get("id"));
+    assertEquals(
+        Arrays.asList("search_replace", "create_file"),
+        implementation.get(0).get("required_tools"));
     assertTrue(((List<?>) normalized.get("steps")).size() <= 5);
   }
 
@@ -476,6 +489,75 @@ public final class CodeAgentPresetTest {
     assertEquals("discover", ((Map<?, ?>) steps.get(0)).get("phase"));
     assertEquals("implement", ((Map<?, ?>) steps.get(1)).get("phase"));
     assertEquals(2, ((List<?>) ((Map<?, ?>) steps.get(1)).get("file_refs")).size());
+  }
+
+  @Test
+  public void mixedImplementationBatchExposesAllWritesAndAdvancesOnlyAfterEveryFile()
+      throws Exception {
+    CodeValidationContract contract =
+        CodeValidationContract.builder().defaultRequiredEvidence("verify_web_project").build();
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("create_file", CodeToolRole.CREATE);
+    roles.put("verify_web_project", CodeToolRole.VERIFY);
+    roles.put(CodeAgentToolNames.PLAN_TASK, CodeToolRole.PLAN);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator =
+        new ManagedCodePlanCoordinator(CodePlanningMode.ADAPTIVE, contract, roles, workspace);
+    AgentRunContext run = new AgentRunContext(23L, "s", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 1);
+    coordinator.onRunStarted(run);
+
+    Map<String, Object> accepted = coordinator.acceptPlan(map(
+        "goal", "完成当前实现批次",
+        "planned_files", Arrays.asList(
+            map("path", "main.txt", "action", "edit"),
+            map("path", "style.css", "action", "create"),
+            map("path", "game.js", "action", "create")),
+        "steps", Arrays.asList(
+            step("part-a", "实现一部分", "implement", "search_replace"),
+            step("part-b", "实现其余部分", "implement", "create_file"),
+            step("verify", "验证", "verify", "verify_web_project"))));
+    assertEquals("implement-batch", currentStepId(accepted.get("plan_state")));
+    assertEquals("search_replace", accepted.get("recommended_next_action"));
+    assertTrue(String.valueOf(accepted.get("implementation_instruction"))
+        .contains("源码只生成一次"));
+
+    List<ToolSpec> registered = new ArrayList<>();
+    for (String name : roles.keySet()) registered.add(tool(name).spec());
+    Set<String> initial = selectedNames(coordinator.selectTools(round, registered));
+    assertTrue(initial.contains("search_replace"));
+    assertTrue(initial.contains("create_file"));
+    assertTrue(coordinator.allowMultipleToolCalls(round));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
+    assertTrue(coordinator.allowMultipleToolCalls(round));
+
+    Files.write(new File(root, "style.css").toPath(), "style".getBytes(StandardCharsets.UTF_8));
+    ToolResult styleCreated = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "create_file",
+        new ToolArguments(map("path", "style.css")),
+        ToolResult.success(map("path", "style.css", "created", true)));
+    assertFalse(coordinator.allowMultipleToolCalls(round));
+    assertEquals("implement-batch", currentStepId(styleCreated.data().get("plan_state")));
+
+    Files.write(new File(root, "game.js").toPath(), "game".getBytes(StandardCharsets.UTF_8));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "create_file",
+        new ToolArguments(map("path", "game.js")),
+        ToolResult.success(map("path", "game.js", "created", true)));
+    assertFalse(coordinator.allowMultipleToolCalls(round));
+    Set<String> afterWrites = selectedNames(coordinator.selectTools(round, registered));
+    assertTrue(afterWrites.contains("verify_web_project"));
+    assertFalse(afterWrites.contains("create_file"));
   }
 
   @Test
@@ -1292,7 +1374,7 @@ public final class CodeAgentPresetTest {
         "search_replace",
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true)));
-    assertEquals("implement", currentStepId(edited.data().get("plan_state")));
+    assertEquals("verify-syntax", currentStepId(edited.data().get("plan_state")));
     assertEquals(
         Collections.singletonList("verify:syntax_check"),
         ((Map<?, ?>) edited.data().get("plan_state")).get("missing_evidence"));
@@ -1953,9 +2035,9 @@ public final class CodeAgentPresetTest {
         "search_replace",
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true)));
-    assertEquals("implement", currentStepId(edited.data().get("plan_state")));
+    assertEquals("verify", currentStepId(edited.data().get("plan_state")));
     assertEquals(
-        Collections.singletonList("verify:syntax_check"),
+        Arrays.asList("verify:syntax_check", "verify:browser_test"),
         ((Map<?, ?>) edited.data().get("plan_state")).get("missing_evidence"));
 
     ToolResult syntaxResult = coordinator.recordAndDecorate(
@@ -2000,7 +2082,7 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true)));
     assertFalse(coordinator.isComplete());
-    assertEquals("implement", currentStepId(changedAgain.data().get("plan_state")));
+    assertEquals("verify", currentStepId(changedAgain.data().get("plan_state")));
 
     coordinator.onRunStarted(new AgentRunContext(12L, "session", "workspace", "next"));
     ToolResult late = coordinator.recordAndDecorate(
@@ -2628,7 +2710,7 @@ public final class CodeAgentPresetTest {
         "search_replace",
         mainPath,
         ToolResult.success(map("path", "main.txt", "changed", true)));
-    assertEquals("implement", currentStepId(firstWrite.data().get("plan_state")));
+    assertEquals("verify", currentStepId(firstWrite.data().get("plan_state")));
     Set<String> afterFirst = selectedNames(coordinator.selectTools(round, registered));
     assertTrue(afterFirst.contains("search_replace"));
     assertTrue(afterFirst.contains("syntax_check"));
@@ -2883,12 +2965,12 @@ public final class CodeAgentPresetTest {
             "search_replace",
             new ToolArguments(map("path", "styles.css")),
             ToolResult.success(map("path", "styles.css", "changed", true)));
-    assertEquals("style-step", currentStepId(styleEdited.data().get("plan_state")));
+    assertEquals("verify", currentStepId(styleEdited.data().get("plan_state")));
     assertFalse(
         ((List<?>) ((Map<?, ?>) styleEdited.data().get("plan_state")).get("missing_evidence"))
             .contains("rewrite"));
     assertEquals(
-        Collections.singletonList("verify:syntax_check"),
+        Arrays.asList("verify:syntax_check", "verify:browser_test"),
         ((Map<?, ?>) styleEdited.data().get("plan_state")).get("missing_evidence"));
 
     coordinator.recordAndDecorate(
@@ -2922,7 +3004,7 @@ public final class CodeAgentPresetTest {
             new ToolArguments(map("path", "index.html")),
             ToolResult.success(map("path", "index.html", "changed", true)));
     assertFalse(coordinator.isComplete());
-    assertEquals("style-step", currentStepId(changedAgain.data().get("plan_state")));
+    assertEquals("verify", currentStepId(changedAgain.data().get("plan_state")));
     assertTrue(String.valueOf(changedAgain.data().get("plan_state")).length() <= 800);
   }
 
@@ -3068,7 +3150,7 @@ public final class CodeAgentPresetTest {
               "search_replace",
               new ToolArguments(map("path", "main.txt")),
               ToolResult.success(map("path", "main.txt", "changed", true)));
-    assertEquals("implement", currentStepId(validWrite.data().get("plan_state")));
+    assertEquals("verify", currentStepId(validWrite.data().get("plan_state")));
     assertEquals(
         Collections.singletonList("verify:syntax_check"),
         ((Map<?, ?>) validWrite.data().get("plan_state")).get("missing_evidence"));
@@ -3285,7 +3367,7 @@ public final class CodeAgentPresetTest {
             "search_replace",
             new ToolArguments(map("path", "main.txt")),
             ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
-    assertEquals("implement", currentStepId(repaired.data().get("plan_state")));
+    assertEquals("verify", currentStepId(repaired.data().get("plan_state")));
     assertEquals(
         Collections.singletonList("verify:syntax_check"),
         ((Map<?, ?>) repaired.data().get("plan_state")).get("missing_evidence"));
@@ -3341,7 +3423,7 @@ public final class CodeAgentPresetTest {
             "syntax_check",
             ToolArguments.empty(),
             ToolResult.success(map("passed", false)));
-    assertEquals("implement", currentStepId(failedVerify.data().get("plan_state")));
+    assertEquals("verify", currentStepId(failedVerify.data().get("plan_state")));
     assertFalse(coordinator.isComplete());
     coordinator.recordAndDecorate(
         coordinator.generation(),
@@ -3358,7 +3440,7 @@ public final class CodeAgentPresetTest {
             ToolResult.error("syntax_failed", "syntax failed", true, map("passed", false)));
     assertEquals(ToolResult.Status.ERROR, erroredVerify.status());
     assertTrue(erroredVerify.retryable());
-    assertEquals("implement", currentStepId(erroredVerify.data().get("plan_state")));
+    assertEquals("verify", currentStepId(erroredVerify.data().get("plan_state")));
     assertFalse(coordinator.isComplete());
     coordinator.recordAndDecorate(
         coordinator.generation(),
@@ -3445,7 +3527,7 @@ public final class CodeAgentPresetTest {
                         step("verify", "执行验证", "verify", "syntax_check", "browser_test"),
                         step("quality", "质量审查", "quality", "quality_review"))));
     List<?> steps = (List<?>) normalized.get("steps");
-    assertEquals(5, steps.size());
+    assertEquals(4, steps.size());
     Set<String> expected = new LinkedHashSet<>();
     for (Object raw : (List<?>) normalized.get("planned_files")) {
       expected.add(String.valueOf(((Map<?, ?>) raw).get("file_id")));
@@ -3454,6 +3536,10 @@ public final class CodeAgentPresetTest {
     for (Object raw : steps) {
       Map<?, ?> step = (Map<?, ?>) raw;
       if ("implement".equals(step.get("phase"))) {
+        assertEquals("implement-batch", step.get("id"));
+        assertEquals(
+            Arrays.asList("create_file", "search_replace"),
+            ((List<?>) step.get("required_tools")).subList(0, 2));
         for (Object ref : (List<?>) step.get("file_refs")) actual.add(String.valueOf(ref));
       }
     }

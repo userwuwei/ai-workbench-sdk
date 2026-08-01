@@ -140,6 +140,7 @@ public final class CodeAgentPreset {
       String content =
           "你运行在通用 Code Agent 中。"
               + protocol
+              + singleGenerationInstruction()
               + planningInstruction(planningMode)
               + "\n工具参数必须是严格 JSON；源码反斜杠必须在外层 JSON 中再次转义。"
               + "禁止在 JSON 层直接输出 \\UXXXXXXXX 或 \\u{...}，优先使用原始 Unicode 字符。"
@@ -160,6 +161,14 @@ public final class CodeAgentPreset {
           new PromptSection(
               "code_agent_protocol", PromptPhase.BASE, 0, 5000, content));
     };
+  }
+
+  private static String singleGenerationInstruction() {
+    return "\nreasoning_content 只用于确定下一步工具及调用顺序，不是源码草稿区。"
+        + "禁止在 reasoning 中生成、引用、复述、检查或修改源码、伪代码、diff、工具 JSON，"
+        + "以及 old/new/content/replacements 等工具参数。"
+        + "证据和计划满足后立即调用工具；源码只能生成一次并直接写入工具参数。"
+        + "写入前不进行代码级自检；写入后使用真实验证工具检查，并且只根据真实失败修复。";
   }
 
   private static String lightweightWebVerificationInstruction(boolean available) {

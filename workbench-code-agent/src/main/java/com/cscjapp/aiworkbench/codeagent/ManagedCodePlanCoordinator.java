@@ -7,7 +7,8 @@ import java.security.MessageDigest;
 import java.util.*;
 
 /** Run-scoped managed plan shared by Code Agent tools and completion validation. */
-final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle {
+final class ManagedCodePlanCoordinator
+    implements ToolPolicy, AgentRunLifecycle, MultipleToolCallPolicy {
   private static final int MAX_STATE_CHARS = 800;
   private final CodePlanningMode mode;
   private final CodeValidationContract contract;
@@ -257,6 +258,20 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   @Override
+  public synchronized boolean allowMultipleToolCalls(AgentRoundContext context) {
+    PlanStep current = currentStep();
+    if (current == null
+        || !"implement".equals(current.phase)
+        || implementationWriteSatisfied(current)) return false;
+    int pendingWrites = 0;
+    for (String ref : current.fileRefs) {
+      PlanFile file = file(ref);
+      if (file != null && !hasWriteFor(file) && ++pendingWrites > 1) return true;
+    }
+    return false;
+  }
+
+  @Override
   public synchronized boolean supports(ToolInvocation invocation) {
     if (invocation == null) return false;
     String toolName = invocation.tool().spec().name();
@@ -401,6 +416,13 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
     result.put("normalized_plan", new ToolArguments(next).asMap());
     result.put("plan_state", state());
     result.put("recommended_next_action", nextManagedAction());
+    PlanStep current = currentStep();
+    if (current != null && "implement".equals(current.phase)) {
+      result.put(
+          "implementation_instruction",
+          "计划已固定，当前进入写入批次。不要重新设计、预演或在 reasoning 中检查源码；"
+              + "直接生成当前批次工具参数，源码只生成一次。完成写入后执行真实验证。");
+    }
     stateChanged = false;
     return result;
   }
@@ -1114,15 +1136,27 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
 
   private boolean requiresReadCoverage(PlanStep step) {
     if (step == null || step.fileRefs.isEmpty()) return true;
+    boolean exactAnchorEditAvailable = false;
+    for (String raw : step.requiredTools) {
+      if ("search_replace".equals(canonicalToolName(raw))
+          && role("search_replace") == CodeToolRole.EDIT) {
+        exactAnchorEditAvailable = true;
+        break;
+      }
+    }
     for (String ref : step.fileRefs) {
       PlanFile file = file(ref);
-      if (file == null || !"create".equals(file.action)) return true;
+      if (file == null) return true;
+      if (!"create".equals(file.action)) {
+        if (!exactAnchorEditAvailable) return true;
+        continue;
+      }
       if (!file.canonicalPath.isEmpty()) {
         try {
           File target = workspace == null ? new File(file.canonicalPath) : workspace.resolveSafely(file.displayPath);
-          if (target.exists()) return true;
+          if (target.exists() && !exactAnchorEditAvailable) return true;
         } catch (Exception ignored) {
-          return true;
+          if (!exactAnchorEditAvailable) return true;
         }
       }
     }
@@ -1642,9 +1676,7 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
   }
 
   private boolean implementationSatisfied(PlanStep step) {
-    if (!implementationWriteSatisfied(step)) return false;
-    return !requiresImplementationVerificationBoundary(step)
-        || implementationVerificationBoundarySatisfied();
+    return implementationWriteSatisfied(step);
   }
 
   private boolean implementationWriteSatisfied(PlanStep step) {
@@ -1663,40 +1695,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
           && item.passed) return true;
     }
     return false;
-  }
-
-  private boolean requiresImplementationVerificationBoundary(PlanStep step) {
-    boolean found = false;
-    for (PlanStep candidate : steps) {
-      if (candidate == step) {
-        found = true;
-      } else if (found && "implement".equals(candidate.phase)) {
-        return false;
-      }
-    }
-    for (PlanFile file : files) {
-      if ("edit".equals(file.action)) return true;
-    }
-    for (PlanStep candidate : steps) {
-      if (!"implement".equals(candidate.phase)) continue;
-      for (String tool : candidate.requiredTools) {
-        if (role(canonicalToolName(tool)) == CodeToolRole.EDIT) return true;
-      }
-    }
-    return false;
-  }
-
-  private boolean implementationVerificationBoundarySatisfied() {
-    String first = firstImplementationVerificationTool();
-    return first.isEmpty() || hasCurrentTool(first);
-  }
-
-  private String firstImplementationVerificationTool() {
-    for (String tool : completionVerificationTools("code_generation")) {
-      String canonical = canonicalToolName(tool);
-      if (role(canonical) == CodeToolRole.VERIFY) return canonical;
-    }
-    return "";
   }
 
   private boolean hasWriteFor(PlanFile file) {
@@ -1830,10 +1828,6 @@ final class ManagedCodePlanCoordinator implements ToolPolicy, AgentRunLifecycle 
             }
           }
         }
-      } else if (requiresImplementationVerificationBoundary(step)
-          && !implementationVerificationBoundarySatisfied()) {
-        String boundary = firstImplementationVerificationTool();
-        if (!boundary.isEmpty()) out.add(limit("verify:" + boundary, 88));
       }
     } else if ("verify".equals(step.phase)) {
       for (String tool : requiredVerificationTools(step)) {
