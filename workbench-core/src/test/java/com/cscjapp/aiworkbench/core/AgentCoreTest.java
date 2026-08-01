@@ -8,6 +8,18 @@ import org.junit.*;
 
 public class AgentCoreTest {
   @Test
+  public void legacyModelRequestConstructorsDefaultToAutomaticSingleToolCalls() {
+    ModelRequest request = new ModelRequest(
+        new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        Collections.singletonList(AgentMessage.user("task")),
+        Collections.singletonList(tool("search_replace", false).spec()),
+        false);
+
+    assertEquals("", request.requiredToolName());
+    assertFalse(request.allowMultipleToolCalls());
+  }
+
+  @Test
   public void promptComposerOrdersAndBudgetsSections() {
     WorkbenchDefinition d =
         definition(
@@ -126,6 +138,99 @@ public class AgentCoreTest {
     engine.submit("task", observer(new AtomicReference<>()));
 
     assertEquals(Arrays.asList("read_plan", "finalize_task"), visible.get());
+  }
+
+  @Test
+  public void namedToolChoiceIsResolvedAfterFinalToolSelection() {
+    class NamedPolicy implements ToolPolicy, NamedToolChoicePolicy {
+      public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
+        return ToolSelection.onlyNames(tools, Collections.singletonList("search_replace"));
+      }
+
+      public String requiredToolName(AgentRoundContext context) {
+        return "search_replace";
+      }
+
+      public boolean supports(ToolInvocation invocation) { return false; }
+
+      public Cancellable evaluate(
+          ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+        throw new AssertionError("selection-only policy must not evaluate invocations");
+      }
+    }
+    AtomicReference<String> required = new AtomicReference<>();
+    WorkbenchDefinition base = definition(
+        Arrays.asList(tool("search_replace", false), tool("finalize_task", false)),
+        Collections.emptyList());
+    WorkbenchDefinition routed = withPolicies(base, Collections.singletonList(new NamedPolicy()));
+    AgentEngine engine = new AgentEngine(
+        routed,
+        (request, observer) -> {
+          required.set(request.requiredToolName());
+          observer.onComplete(new ModelResponse("done", "stop", Collections.emptyList()));
+          return Cancellable.NONE;
+        },
+        new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(),
+        Runnable::run,
+        "s",
+        "w",
+        false,
+        2);
+
+    engine.submit("task", observer(new AtomicReference<>()));
+
+    assertEquals("search_replace", required.get());
+  }
+
+  @Test
+  public void invisibleNamedToolFailsBeforeGatewayWithoutFallback() {
+    class InvalidNamedPolicy implements ToolPolicy, NamedToolChoicePolicy {
+      public ToolSelection selectTools(AgentRoundContext context, List<ToolSpec> tools) {
+        return ToolSelection.onlyNames(tools, Collections.singletonList("finalize_task"));
+      }
+
+      public String requiredToolName(AgentRoundContext context) { return "search_replace"; }
+      public boolean supports(ToolInvocation invocation) { return false; }
+      public Cancellable evaluate(
+          ToolContext context, ToolInvocation invocation, ToolPolicyCallback callback) {
+        throw new AssertionError("selection-only policy must not evaluate invocations");
+      }
+    }
+    AtomicInteger gatewayCalls = new AtomicInteger();
+    AtomicReference<Throwable> error = new AtomicReference<>();
+    WorkbenchDefinition base = definition(
+        Arrays.asList(tool("search_replace", false), tool("finalize_task", false)),
+        Collections.emptyList());
+    AgentEngine engine = new AgentEngine(
+        withPolicies(base, Collections.singletonList(new InvalidNamedPolicy())),
+        (request, observer) -> {
+          gatewayCalls.incrementAndGet();
+          return Cancellable.NONE;
+        },
+        new ModelEndpoint("http://localhost", "", "m", 0, true, false),
+        noopDecisions(),
+        Runnable::run,
+        "s",
+        "w",
+        false,
+        2);
+
+    engine.submit("task", new AgentObserver() {
+      public void onState(String state) {}
+      public void onDelta(String content, String reasoning) {}
+      public void onToolStarted(String id, String name, ToolArguments arguments) {}
+      public void onToolProgress(
+          String id, String stage, long current, long total, String message) {}
+      public void onToolCompleted(String id, String name, ToolResult result) {}
+      public void onValidation(ValidationResult result) {}
+      public void onFinal(String content) {}
+      public void onError(Throwable failure) { error.set(failure); }
+    });
+
+    assertEquals(0, gatewayCalls.get());
+    assertNotNull(error.get());
+    assertTrue(error.get().getMessage().contains("required_tool_not_visible"));
   }
 
   @Test

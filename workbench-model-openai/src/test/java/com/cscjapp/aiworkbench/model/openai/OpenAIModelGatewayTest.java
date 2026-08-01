@@ -254,6 +254,28 @@ public class OpenAIModelGatewayTest {
   }
 
   @Test
+  public void sendsAutoOrNamedRequestScopedToolChoice() throws Exception {
+    server.enqueue(stopResponse());
+    await(new OpenAIModelGateway(), request(ToolArgumentMode.BEST_EFFORT, false, false, ""));
+    JsonObject automatic =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    assertEquals("auto", automatic.get("tool_choice").getAsString());
+
+    server.enqueue(stopResponse());
+    await(
+        new OpenAIModelGateway(),
+        request(ToolArgumentMode.BEST_EFFORT, false, false, "create_file"));
+    JsonObject named =
+        JsonParser.parseString(server.takeRequest(3, TimeUnit.SECONDS).getBody().readUtf8())
+            .getAsJsonObject();
+    JsonObject choice = named.getAsJsonObject("tool_choice");
+    assertEquals("function", choice.get("type").getAsString());
+    assertEquals("create_file", choice.getAsJsonObject("function").get("name").getAsString());
+    assertFalse(named.get("parallel_tool_calls").getAsBoolean());
+  }
+
+  @Test
   public void legacyOnDeltaObserverReceivesContentExactlyOnce() throws Exception {
     server.enqueue(
         new MockResponse()
@@ -641,6 +663,14 @@ public class OpenAIModelGatewayTest {
 
   private ModelRequest request(
       ToolArgumentMode mode, boolean strictSchema, boolean allowMultipleToolCalls) {
+    return request(mode, strictSchema, allowMultipleToolCalls, "");
+  }
+
+  private ModelRequest request(
+      ToolArgumentMode mode,
+      boolean strictSchema,
+      boolean allowMultipleToolCalls,
+      String requiredToolName) {
     ModelEndpoint endpoint =
         new ModelEndpoint(
             server.url("/v1").toString(), "secret", "test", 0.2, true, false, mode);
@@ -656,6 +686,7 @@ public class OpenAIModelGatewayTest {
         Arrays.asList(AgentMessage.system("s"), AgentMessage.user("u")),
         Collections.singletonList(spec),
         false,
-        allowMultipleToolCalls);
+        allowMultipleToolCalls,
+        requiredToolName);
   }
 }

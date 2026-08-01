@@ -170,18 +170,28 @@ public final class AgentEngine implements Cancellable {
     }
     if (pauseBeforeRound(demand, o, n, runId)) return;
     ModelRequest req;
-    synchronized (this) {
-      AgentRoundContext roundContext = roundContext(n, runId);
-      List<ToolSpec> selectedTools = selectTools(roundContext);
-      StableAgentRequestHistory.Projection projection =
-          requestHistory.prepare(messages, selectedTools, demand);
-      req =
-          new ModelRequest(
-              endpoint,
-              projection.messages,
-              selectedTools,
-              deepThinking,
-              allowMultipleToolCalls(roundContext));
+    try {
+      synchronized (this) {
+        AgentRoundContext roundContext = roundContext(n, runId);
+        List<ToolSpec> selectedTools = selectTools(roundContext);
+        String requiredToolName = requiredToolName(roundContext, selectedTools);
+        StableAgentRequestHistory.Projection projection =
+            requestHistory.prepare(messages, selectedTools, demand);
+        req =
+            new ModelRequest(
+                endpoint,
+                projection.messages,
+                selectedTools,
+                deepThinking,
+                allowMultipleToolCalls(roundContext),
+                requiredToolName);
+      }
+    } catch (Throwable error) {
+      if (isActive(runId)) {
+        finishRun(runId, "error");
+        o.onError(error);
+      }
+      return;
     }
     o.onState("model_running");
     active =
@@ -326,6 +336,27 @@ public final class AgentEngine implements Cancellable {
           && ((MultipleToolCallPolicy) policy).allowMultipleToolCalls(context)) return true;
     }
     return false;
+  }
+
+  private String requiredToolName(
+      AgentRoundContext context, List<ToolSpec> selectedTools) {
+    String required = "";
+    for (ToolPolicy policy : toolPolicies) {
+      if (!(policy instanceof NamedToolChoicePolicy)) continue;
+      String candidate = ((NamedToolChoicePolicy) policy).requiredToolName(context);
+      candidate = candidate == null ? "" : candidate.trim();
+      if (candidate.isEmpty()) continue;
+      if (!required.isEmpty() && !required.equals(candidate)) {
+        throw new IllegalStateException(
+            "conflicting_required_tool_choice: " + required + ", " + candidate);
+      }
+      required = candidate;
+    }
+    if (required.isEmpty()) return "";
+    for (ToolSpec tool : selectedTools) {
+      if (required.equals(tool.name())) return required;
+    }
+    throw new IllegalStateException("required_tool_not_visible: " + required);
   }
 
   private static List<ToolSpec> retainSelected(

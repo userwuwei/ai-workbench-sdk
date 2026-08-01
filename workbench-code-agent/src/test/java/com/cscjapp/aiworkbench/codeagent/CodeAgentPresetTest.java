@@ -113,10 +113,18 @@ public final class CodeAgentPresetTest {
     assertTrue(common.contains("reasoning_content 只用于确定下一步工具及调用顺序"));
     assertTrue(common.contains("不是源码草稿区"));
     assertTrue(common.contains("源码只能生成一次并直接写入工具参数"));
+    assertTrue(common.contains("一个模型响应只生成一个代码写入调用"));
+    assertTrue(common.contains("named tool_choice 指定写工具"));
+    assertTrue(common.contains("reasoning 最多只写一句抽象目标"));
+    assertTrue(common.contains("一次 search_replace 默认只处理一个连贯结构或直接根因"));
+    assertTrue(common.contains("禁止为了减少轮次同时重构不相关布局、断点和视觉区域"));
     assertTrue(common.contains("写入后使用真实验证工具检查"));
     assertFalse(common.contains("create_file 用于写入模型已经生成的完整内容"));
     assertFalse(common.contains("目标冲突由本地用户决定覆盖或新建"));
     assertTrue(composed.contains("language-specific-rules"));
+    assertTrue(composed.contains("一个模型响应只生成一个代码写入调用"));
+    assertTrue(composed.contains("named tool_choice 指定写工具"));
+    assertTrue(composed.contains("禁止为了减少轮次同时重构不相关布局、断点和视觉区域"));
   }
 
   @Test
@@ -174,7 +182,7 @@ public final class CodeAgentPresetTest {
     assertTrue(prompt.contains("禁止添加无因果点击凑交互"));
     assertTrue(prompt.contains("recommended_next_action"));
     assertTrue(prompt.contains("不是其他安全工具的执行禁令"));
-    assertTrue(prompt.contains("允许在验证前连续执行多次 search_replace"));
+    assertTrue(prompt.contains("一次 search_replace 默认只处理一个连贯结构或直接根因"));
     assertTrue(prompt.contains("逐字来自当前 revision"));
     assertTrue(prompt.contains("动作后的关闭、消失或复位使用 eventually_true"));
     assertTrue(prompt.contains("‘可见且可点击’只能作为静态检查"));
@@ -189,7 +197,8 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void qualityReviewIsVisibleWithMinimalArgumentsAndInvalidCallsDoNotChangeState() {
+  public void qualityReviewIsVisibleWithMinimalArgumentsAndInvalidCallsDoNotChangeState()
+      throws Exception {
     CodeValidationContract contract = CodeValidationContract.builder()
         .defaultRequiredEvidence("syntax_check", "browser_test")
         .requireQualityReview("code_generation")
@@ -199,7 +208,8 @@ public final class CodeAgentPresetTest {
         .build();
     CodeAgentPreset preset = CodeAgentPreset.builder(qualityProfile)
         .workspace(workspace)
-        .languageTools(Arrays.asList(tool("syntax_check"), tool("browser_test")))
+        .languageTools(Arrays.asList(
+            tool("create_file"), tool("syntax_check"), tool("browser_test")))
         .build();
     ManagedCodePlanCoordinator coordinator =
         (ManagedCodePlanCoordinator) preset.toolPolicies().get(0);
@@ -224,7 +234,16 @@ public final class CodeAgentPresetTest {
         quality, new ToolArguments(map("path", "main.txt")));
     assertTrue(premature.isSuccess());
     assertEquals(false, premature.data().get("passed"));
-    assertEquals("syntax_check", premature.data().get("recommended_next_action"));
+    assertEquals("create_file", premature.data().get("recommended_next_action"));
+
+    Files.write(
+        new File(root, "optional.txt").toPath(),
+        "optional".getBytes(StandardCharsets.UTF_8));
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "create_file",
+        new ToolArguments(map("path", "optional.txt")),
+        ToolResult.success(map("path", "optional.txt", "created", true)));
 
     coordinator.recordAndDecorate(
         coordinator.generation(), "syntax_check", ToolResult.success(map("passed", true)));
@@ -492,7 +511,7 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
-  public void mixedImplementationBatchExposesAllWritesAndAdvancesOnlyAfterEveryFile()
+  public void mixedImplementationBatchExposesOneOrderedWriteAndAdvancesOnlyAfterEveryFile()
       throws Exception {
     CodeValidationContract contract =
         CodeValidationContract.builder().defaultRequiredEvidence("verify_web_project").build();
@@ -523,21 +542,25 @@ public final class CodeAgentPresetTest {
     assertEquals("implement-batch", currentStepId(accepted.get("plan_state")));
     assertEquals("search_replace", accepted.get("recommended_next_action"));
     assertTrue(String.valueOf(accepted.get("implementation_instruction"))
-        .contains("源码只生成一次"));
+        .contains("一个响应只生成一个代码写入调用"));
 
     List<ToolSpec> registered = new ArrayList<>();
     for (String name : roles.keySet()) registered.add(tool(name).spec());
     Set<String> initial = selectedNames(coordinator.selectTools(round, registered));
-    assertTrue(initial.contains("search_replace"));
-    assertTrue(initial.contains("create_file"));
-    assertTrue(coordinator.allowMultipleToolCalls(round));
+    assertEquals(Collections.singleton("search_replace"), initial);
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+    assertFalse(coordinator.allowMultipleToolCalls(round));
 
     coordinator.recordAndDecorate(
         coordinator.generation(),
         "search_replace",
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(map("path", "main.txt", "changed", true, "applied_count", 1)));
-    assertTrue(coordinator.allowMultipleToolCalls(round));
+    assertEquals(
+        Collections.singleton("create_file"),
+        selectedNames(coordinator.selectTools(round, registered)));
+    assertEquals("create_file", coordinator.requiredToolName(round));
+    assertFalse(coordinator.allowMultipleToolCalls(round));
 
     Files.write(new File(root, "style.css").toPath(), "style".getBytes(StandardCharsets.UTF_8));
     ToolResult styleCreated = coordinator.recordAndDecorate(
@@ -547,6 +570,10 @@ public final class CodeAgentPresetTest {
         ToolResult.success(map("path", "style.css", "created", true)));
     assertFalse(coordinator.allowMultipleToolCalls(round));
     assertEquals("implement-batch", currentStepId(styleCreated.data().get("plan_state")));
+    assertEquals(
+        Collections.singleton("create_file"),
+        selectedNames(coordinator.selectTools(round, registered)));
+    assertEquals("create_file", coordinator.requiredToolName(round));
 
     Files.write(new File(root, "game.js").toPath(), "game".getBytes(StandardCharsets.UTF_8));
     coordinator.recordAndDecorate(
@@ -2174,6 +2201,197 @@ public final class CodeAgentPresetTest {
   }
 
   @Test
+  public void noPlanFullReadEntersNamedSingleDirectWriteAndPreservesContent() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("list_dir", CodeToolRole.DISCOVER);
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    roles.put("create_file", CodeToolRole.CREATE);
+    roles.put(CodeAgentToolNames.PLAN_TASK, CodeToolRole.PLAN);
+    roles.put(CodeAgentToolNames.FINALIZE_TASK, CodeToolRole.FINALIZE);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.FORCE,
+        CodeValidationContract.builder().build(),
+        roles,
+        workspace);
+    AgentRunContext run = new AgentRunContext(121L, "session", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 1);
+    coordinator.onRunStarted(run);
+    List<ToolSpec> registered = new ArrayList<>();
+    for (String name : roles.keySet()) registered.add(tool(name).spec());
+
+    ToolResult read = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map(
+            "path", "main.txt",
+            "content", "before",
+            "mode", "full_file",
+            "full_file", true,
+            "revision", sha256(new File(root, "main.txt")))));
+
+    assertEquals("before", read.data().get("content"));
+    assertEquals("search_replace", read.data().get("recommended_next_action"));
+    assertTrue(String.valueOf(read.data().get("implementation_instruction"))
+        .contains("一个响应只生成一个代码写入调用"));
+    assertEquals(
+        Collections.singleton("search_replace"),
+        selectedNames(coordinator.selectTools(round, registered)));
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+    assertFalse(coordinator.allowMultipleToolCalls(round));
+    assertFalse(coordinator.supports(new ToolInvocation(
+        "edit", tool("search_replace"), new ToolArguments(map("path", "main.txt")))));
+
+    ToolResult candidateRetry = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.error(
+            "search_match_count",
+            "no_match",
+            true,
+            map("path", "main.txt", "candidate_windows", Collections.singletonList("before"))));
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+    assertEquals("search_replace", candidateRetry.data().get("recommended_next_action"));
+    assertTrue(candidateRetry.data().containsKey("implementation_instruction"));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "search_replace",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.error("search_match_count", "no_match", true, map("path", "main.txt")));
+    assertEquals("", coordinator.requiredToolName(round));
+    Set<String> recovery = selectedNames(coordinator.selectTools(round, registered));
+    assertTrue(recovery.contains("read_file"));
+    assertFalse(recovery.contains("search_replace"));
+  }
+
+  @Test
+  public void invalidReadsDoNotEnterDirectWriteButCompleteStructureDoes()
+      throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().build(),
+        roles,
+        workspace);
+    AgentRunContext run = new AgentRunContext(122L, "session", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 1);
+    coordinator.onRunStarted(run);
+    ToolArguments path = new ToolArguments(map("path", "main.txt"));
+    String revision = sha256(new File(root, "main.txt"));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        path,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "before", "complete", false,
+            "revision", revision)));
+    assertEquals("", coordinator.requiredToolName(round));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        path,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "summary", "mode", "summary",
+            "complete", true, "revision", revision)));
+    assertEquals("", coordinator.requiredToolName(round));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        path,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "before", "full_file", true)));
+    assertEquals("", coordinator.requiredToolName(round));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        path,
+        ToolResult.error("read_failed", "failed", true));
+    assertEquals("", coordinator.requiredToolName(round));
+
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        path,
+        ToolResult.success(map(
+            "path", "main.txt", "content", "before", "complete", true,
+            "revision", revision)));
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+  }
+
+  @Test
+  public void directWriteNamedChoiceExpiresWhenSourceRevisionChanges() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_file", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().build(),
+        roles,
+        workspace);
+    AgentRunContext run = new AgentRunContext(123L, "session", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 1);
+    coordinator.onRunStarted(run);
+    coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_file",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map(
+            "path", "main.txt", "content", "before", "full_file", true,
+            "revision", sha256(new File(root, "main.txt")))));
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+
+    Files.write(new File(root, "main.txt").toPath(), "external".getBytes(StandardCharsets.UTF_8));
+
+    assertEquals("", coordinator.requiredToolName(round));
+  }
+
+  @Test
+  public void readyReadPlanWithoutManagedPlanEntersDirectWrite() throws Exception {
+    Map<String, CodeToolRole> roles = new LinkedHashMap<>();
+    roles.put("read_plan", CodeToolRole.READ);
+    roles.put("search_replace", CodeToolRole.EDIT);
+    ManagedCodePlanCoordinator coordinator = new ManagedCodePlanCoordinator(
+        CodePlanningMode.ADAPTIVE,
+        CodeValidationContract.builder().build(),
+        roles,
+        workspace);
+    AgentRunContext run = new AgentRunContext(124L, "session", "workspace", "task");
+    AgentRoundContext round = new AgentRoundContext(run, 1);
+    coordinator.onRunStarted(run);
+
+    ToolResult result = coordinator.recordAndDecorate(
+        coordinator.generation(),
+        "read_plan",
+        new ToolArguments(map("path", "main.txt")),
+        ToolResult.success(map(
+            "mode", "goal_driven_evidence_batch",
+            "path", "main.txt",
+            "revision", sha256(new File(root, "main.txt")),
+            "coverage_summary", map(
+                "ready_for_edit", true,
+                "covered", Collections.singletonList("target"),
+                "missing", Collections.emptyList()),
+            "evidence", Collections.singletonList(map(
+                "evidence_id", "target", "sha256", "evidence-hash", "content", "before")))));
+
+    assertEquals("search_replace", result.data().get("recommended_next_action"));
+    assertTrue(result.data().containsKey("plan_progress"));
+    assertTrue(String.valueOf(result.data().get("implementation_instruction"))
+        .contains("直接生成当前唯一写工具的参数"));
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+  }
+
+  @Test
   public void readPlanProgressSuppressesEquivalentRetryButResetsForNewRevision() throws Exception {
     Map<String, CodeToolRole> roles = new LinkedHashMap<>();
     roles.put("read_plan", CodeToolRole.READ);
@@ -2397,9 +2615,10 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt")),
         ToolResult.success(ready));
     assertEquals(
-        new LinkedHashSet<>(Arrays.asList(
-            "read_file", "read_plan", "search_replace", "plan_task", "finalize_task")),
+        Collections.singleton("search_replace"),
         selectedNames(coordinator.selectTools(round, registered)));
+    assertEquals("search_replace", coordinator.requiredToolName(round));
+    assertFalse(coordinator.allowMultipleToolCalls(round));
 
     coordinator.recordAndDecorate(
         generation,
@@ -2525,7 +2744,7 @@ public final class CodeAgentPresetTest {
         new ToolArguments(map("path", "main.txt", "start_line", 1, "end_line", 1)),
         ToolResult.success(map("path", "main.txt", "content", "before")));
     assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("search_replace"));
-    assertTrue(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
+    assertFalse(selectedNames(coordinator.selectTools(round, registered)).contains("read_file"));
   }
 
   @Test
@@ -2657,8 +2876,8 @@ public final class CodeAgentPresetTest {
         readOnlyGeneration, "syntax_check", ToolResult.success(map("passed", true)));
     Set<String> readOnlyQualityTools =
         selectedNames(readOnlyVerify.selectTools(round, registered));
-    assertFalse(readOnlyQualityTools.contains("search_replace"));
-    assertTrue(readOnlyQualityTools.contains(CodeAgentToolNames.QUALITY_REVIEW));
+    assertEquals(Collections.singleton("search_replace"), readOnlyQualityTools);
+    assertEquals("search_replace", readOnlyVerify.requiredToolName(round));
   }
 
   @Test

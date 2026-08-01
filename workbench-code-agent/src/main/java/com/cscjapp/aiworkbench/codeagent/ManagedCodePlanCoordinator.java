@@ -8,7 +8,7 @@ import java.util.*;
 
 /** Run-scoped managed plan shared by Code Agent tools and completion validation. */
 final class ManagedCodePlanCoordinator
-    implements ToolPolicy, AgentRunLifecycle, MultipleToolCallPolicy {
+    implements ToolPolicy, AgentRunLifecycle, MultipleToolCallPolicy, NamedToolChoicePolicy {
   private static final int MAX_STATE_CHARS = 800;
   private final CodePlanningMode mode;
   private final CodeValidationContract contract;
@@ -38,6 +38,10 @@ final class ManagedCodePlanCoordinator
   private boolean verificationFailureHasTestRoot;
   private String recoverableEditPath = "";
   private boolean recoveryReadReady;
+  private boolean recoverableEditHasCandidate;
+  private String directWritePath = "";
+  private String directWriteRevision = "";
+  private String directWriteTool = "";
   private boolean interactionRequired;
   private List<String> requiredInteractionCheckIds = new ArrayList<>();
   private List<String> browserScenarioIds = new ArrayList<>();
@@ -102,6 +106,8 @@ final class ManagedCodePlanCoordinator
     verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
+    recoverableEditHasCandidate = false;
+    clearDirectWrite();
     lightweightSmokeRepairCount = 0;
     clearInteractionContract();
   }
@@ -131,6 +137,8 @@ final class ManagedCodePlanCoordinator
     verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
+    recoverableEditHasCandidate = false;
+    clearDirectWrite();
     lightweightSmokeRepairCount = 0;
     clearInteractionContract();
   }
@@ -138,6 +146,12 @@ final class ManagedCodePlanCoordinator
   @Override
   public synchronized ToolSelection selectTools(
       AgentRoundContext context, List<ToolSpec> registeredTools) {
+    String requiredWrite = requiredWriteToolForCurrentState();
+    if (!requiredWrite.isEmpty()) {
+      return ToolSelection.onlyNames(
+          registeredTools, Collections.singletonList(requiredWrite));
+    }
+
     LinkedHashSet<String> allowed = new LinkedHashSet<>();
     allowed.add(CodeAgentToolNames.FINALIZE_TASK);
     // Reads are non-destructive. Keep the two model-facing read tools available in every
@@ -252,23 +266,65 @@ final class ManagedCodePlanCoordinator
       return ToolSelection.onlyNames(registeredTools, allowed);
     }
 
-    if (hasReadyReadCoverage()) addRoles(allowed, CodeToolRole.CREATE, CodeToolRole.EDIT);
-    else allowed.add("list_dir");
     return ToolSelection.onlyNames(registeredTools, allowed);
   }
 
   @Override
   public synchronized boolean allowMultipleToolCalls(AgentRoundContext context) {
+    return false;
+  }
+
+  @Override
+  public synchronized String requiredToolName(AgentRoundContext context) {
+    return requiredWriteToolForCurrentState();
+  }
+
+  private String requiredWriteToolForCurrentState() {
+    String direct = activeDirectWriteTool();
+    if (!direct.isEmpty()) return direct;
+    if (!recoverableEditPath.isEmpty()) {
+      return recoverableEditHasCandidate && role("search_replace") == CodeToolRole.EDIT
+          ? "search_replace" : "";
+    }
+    if (!hasPlan()) return "";
     PlanStep current = currentStep();
     if (current == null
         || !"implement".equals(current.phase)
-        || implementationWriteSatisfied(current)) return false;
-    int pendingWrites = 0;
-    for (String ref : current.fileRefs) {
+        || implementationWriteSatisfied(current)
+        || (requiresReadCoverage(current) && !hasReadyReadCoverage())) return "";
+    return nextPendingImplementationTool(current);
+  }
+
+  private String nextPendingImplementationTool(PlanStep step) {
+    for (String ref : step.fileRefs) {
       PlanFile file = file(ref);
-      if (file != null && !hasWriteFor(file) && ++pendingWrites > 1) return true;
+      if (file == null || hasWriteFor(file)) continue;
+      String tool = implementationTool(file);
+      return roles.containsKey(tool) ? tool : "";
     }
-    return false;
+    for (String raw : step.requiredTools) {
+      String tool = canonicalToolName(raw);
+      CodeToolRole candidate = role(tool);
+      if (candidate == CodeToolRole.CREATE || candidate == CodeToolRole.EDIT) return tool;
+    }
+    return role("search_replace") == CodeToolRole.EDIT ? "search_replace" : "";
+  }
+
+  private String implementationTool(PlanFile file) {
+    if (plannedFileExists(file)) return "search_replace";
+    return "create".equals(file.action) ? "create_file" : "search_replace";
+  }
+
+  private boolean plannedFileExists(PlanFile file) {
+    if (file == null) return false;
+    try {
+      File target = workspace == null
+          ? new File(file.canonicalPath)
+          : workspace.resolveSafely(file.displayPath);
+      return target.exists() && target.isFile();
+    } catch (Exception ignored) {
+      return false;
+    }
   }
 
   @Override
@@ -279,6 +335,7 @@ final class ManagedCodePlanCoordinator
     if (CodeAgentToolNames.FINALIZE_TASK.equals(toolName)) {
       return "completed".equals(text(invocation.arguments().get("status")));
     }
+    if (!activeDirectWriteTool().isEmpty() && directWriteTool.equals(toolName)) return false;
     return mode == CodePlanningMode.FORCE
         && !hasPlan()
         && (role == CodeToolRole.CREATE || role == CodeToolRole.EDIT);
@@ -391,6 +448,7 @@ final class ManagedCodePlanCoordinator
   }
 
   synchronized Map<String, Object> acceptPlan(Map<String, ?> arguments) {
+    clearDirectWrite();
     Map<String, Object> next = normalizer.normalize(arguments);
     if (normalizedPlan != null && text(next.get("replan_reason")).isEmpty()) {
       next.put("replan_reason", "基于当前任务的新证据调整剩余步骤");
@@ -418,10 +476,7 @@ final class ManagedCodePlanCoordinator
     result.put("recommended_next_action", nextManagedAction());
     PlanStep current = currentStep();
     if (current != null && "implement".equals(current.phase)) {
-      result.put(
-          "implementation_instruction",
-          "计划已固定，当前进入写入批次。不要重新设计、预演或在 reasoning 中检查源码；"
-              + "直接生成当前批次工具参数，源码只生成一次。完成写入后执行真实验证。");
+      result.put("implementation_instruction", implementationInstruction());
     }
     stateChanged = false;
     return result;
@@ -443,6 +498,9 @@ final class ManagedCodePlanCoordinator
     if (!CodeAgentToolNames.PLAN_TASK.equals(toolName) && !nonEvidenceQualityAttempt) {
       record(toolName, arguments == null ? ToolArguments.empty() : arguments, effective);
     }
+    boolean directWriteActivated = activateDirectWriteIfReady(toolName, arguments, effective);
+    settleDirectWriteAfterWrite(toolName, effective);
+    boolean directWritePending = !activeDirectWriteTool().isEmpty();
     int boundedReadCount = boundedReadCount(toolName, arguments, effective);
     boolean recommendReadPlan = boundedReadCount >= 2;
     boolean goalDrivenReadPlan = isGoalDrivenReadPlan(toolName, effective);
@@ -454,6 +512,8 @@ final class ManagedCodePlanCoordinator
     boolean recoverableRetry = hasPlan() && recoverableSearchReplaceFailure(toolName, effective);
     if (!goalDrivenReadPlan
         && !recommendReadPlan
+        && !directWriteActivated
+        && !directWritePending
         && ((!stateChanged && !contractResult && !recoverableRetry) || !hasPlan())) return effective;
     Map<String, Object> data = new LinkedHashMap<>(effective.data());
     if (goalDrivenReadPlan) decorateReadPlanProgress(arguments, data);
@@ -479,6 +539,11 @@ final class ManagedCodePlanCoordinator
       data.put("recommended_next_action", recommendedNextAction());
     } else if (text(data.get("recommended_next_action")).isEmpty()) {
       data.put("recommended_next_action", recommendedNextAction());
+    }
+    String currentWrite = requiredWriteToolForCurrentState();
+    if (!currentWrite.isEmpty()) {
+      data.put("recommended_next_action", currentWrite);
+      data.put("implementation_instruction", implementationInstruction());
     }
     stateChanged = false;
     if (effective.isSuccess()) return ToolResult.success(data);
@@ -626,6 +691,85 @@ final class ManagedCodePlanCoordinator
   private static String appendMessage(String current, String addition) {
     if (current == null || current.trim().isEmpty()) return addition;
     return current.trim() + "\n" + addition;
+  }
+
+  private boolean activateDirectWriteIfReady(
+      String toolName, ToolArguments arguments, ToolResult result) {
+    if (hasPlan() || result == null || !result.isSuccess()) return false;
+    boolean ready;
+    if ("read_plan".equals(toolName)) {
+      ready = validReadPlan(result.data());
+    } else if ("read_file".equals(toolName)) {
+      String mode = text(result.data().get("mode"));
+      ready = result.data().containsKey("content")
+          && !"summary".equals(mode)
+          && (Boolean.TRUE.equals(result.data().get("full_file"))
+              || "full_file".equals(mode)
+              || Boolean.TRUE.equals(result.data().get("complete")));
+    } else {
+      return false;
+    }
+    if (!ready || role("search_replace") != CodeToolRole.EDIT) return false;
+    String path = canonicalEvidenceFile(text(firstValue(
+        result.data(), "resolved_path", "path")));
+    if (path.isEmpty() && arguments != null) {
+      path = canonicalEvidenceFile(text(arguments.get("path")));
+    }
+    String sourceRevision = text(result.data().get("revision"));
+    String currentRevision = currentSourceRevision(path);
+    if (path.isEmpty()
+        || sourceRevision.isEmpty()
+        || currentRevision.isEmpty()
+        || !sourceRevision.equalsIgnoreCase(currentRevision)) return false;
+    directWritePath = path;
+    directWriteRevision = sourceRevision;
+    directWriteTool = "search_replace";
+    recoverableEditPath = "";
+    recoveryReadReady = false;
+    recoverableEditHasCandidate = false;
+    return true;
+  }
+
+  private void settleDirectWriteAfterWrite(String toolName, ToolResult result) {
+    if (directWriteTool.isEmpty() || !directWriteTool.equals(toolName)) return;
+    // A successful or mutating write advances the revision and clears the state in
+    // advanceRevision(). A non-mutating failure may retry only when it returned an exact,
+    // copyable candidate; otherwise the next round must collect fresh targeted evidence.
+    if (result != null
+        && recoverableSearchReplaceFailure(toolName, result)
+        && hasCopyableEditCandidate(result.data())) return;
+    readCoverageByPath.remove(directWritePath);
+    clearDirectWrite();
+  }
+
+  private String activeDirectWriteTool() {
+    if (directWriteTool.isEmpty()) return "";
+    if (hasPlan()
+        || directWritePath.isEmpty()
+        || directWriteRevision.isEmpty()
+        || role(directWriteTool) != CodeToolRole.EDIT) {
+      clearDirectWrite();
+      return "";
+    }
+    String currentRevision = currentSourceRevision(directWritePath);
+    if (currentRevision.isEmpty()
+        || !directWriteRevision.equalsIgnoreCase(currentRevision)) {
+      clearDirectWrite();
+      return "";
+    }
+    return directWriteTool;
+  }
+
+  private void clearDirectWrite() {
+    directWritePath = "";
+    directWriteRevision = "";
+    directWriteTool = "";
+  }
+
+  private static String implementationInstruction() {
+    return "当前进入写入参数生成轮。工具和目标已经确定；不要分析、预演、复述或检查源码，"
+        + "直接生成当前唯一写工具的参数。一个响应只生成一个代码写入调用；"
+        + "写入后依据真实工具结果验证。";
   }
 
   /** Kept package-compatible for tests and integrations compiled against the V2 internals. */
@@ -901,6 +1045,7 @@ final class ManagedCodePlanCoordinator
         if (recoverableSearchReplaceFailure(toolName, result)) {
           recoverableEditPath = write.path;
           recoveryReadReady = false;
+          recoverableEditHasCandidate = hasCopyableEditCandidate(result.data());
         }
         return;
       }
@@ -913,6 +1058,7 @@ final class ManagedCodePlanCoordinator
     if (repairsLightweightSmoke) lightweightSmokeRepairCount++;
     recoverableEditPath = "";
     recoveryReadReady = false;
+    recoverableEditHasCandidate = false;
     verificationFailureTool = "";
     verificationFailureKind = "";
     verificationFailureHasProductRoot = false;
@@ -943,6 +1089,8 @@ final class ManagedCodePlanCoordinator
     verificationFailureHasTestRoot = false;
     recoverableEditPath = "";
     recoveryReadReady = false;
+    recoverableEditHasCandidate = false;
+    clearDirectWrite();
     clearBrowserInteractionEvidence();
   }
 
@@ -1381,8 +1529,8 @@ final class ManagedCodePlanCoordinator
     if ("discover".equals(current.phase)) return "read_file";
     if ("implement".equals(current.phase)) {
       if (requiresReadCoverage(current) && !hasReadyReadCoverage()) return "read_file";
-      if (!current.requiredTools.isEmpty()) return canonicalToolName(current.requiredTools.get(0));
-      return "search_replace";
+      String pending = nextPendingImplementationTool(current);
+      return pending.isEmpty() ? "search_replace" : pending;
     }
     if (!current.requiredTools.isEmpty()) return canonicalToolName(current.requiredTools.get(0));
     return CodeAgentToolNames.PLAN_TASK;
@@ -1475,6 +1623,33 @@ final class ManagedCodePlanCoordinator
         || detail.contains("precheck_failed")
         || detail.contains("batch conflict")
         || detail.contains("batch_conflict");
+  }
+
+  private static boolean hasCopyableEditCandidate(Map<String, Object> data) {
+    return hasCopyableEditCandidateValue(data, 0);
+  }
+
+  private static boolean hasCopyableEditCandidateValue(Object value, int depth) {
+    if (value == null || depth > 5) return false;
+    if (value instanceof Map) {
+      for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+        String key = text(entry.getKey());
+        Object candidate = entry.getValue();
+        if (("preferred_retry_old".equals(key)
+                || "candidate_windows".equals(key)
+                || "copyable_old_candidates".equals(key)
+                || "exact_old_candidates".equals(key))
+            && !emptyValue(candidate)) return true;
+        if (hasCopyableEditCandidateValue(candidate, depth + 1)) return true;
+      }
+      return false;
+    }
+    if (value instanceof Iterable) {
+      for (Object item : (Iterable<?>) value) {
+        if (hasCopyableEditCandidateValue(item, depth + 1)) return true;
+      }
+    }
+    return false;
   }
 
   private static boolean boundedRecoveryRead(ToolArguments arguments) {

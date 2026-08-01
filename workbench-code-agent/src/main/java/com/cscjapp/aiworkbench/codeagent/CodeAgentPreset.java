@@ -167,7 +167,9 @@ public final class CodeAgentPreset {
     return "\nreasoning_content 只用于确定下一步工具及调用顺序，不是源码草稿区。"
         + "禁止在 reasoning 中生成、引用、复述、检查或修改源码、伪代码、diff、工具 JSON，"
         + "以及 old/new/content/replacements 等工具参数。"
-        + "证据和计划满足后立即调用工具；源码只能生成一次并直接写入工具参数。"
+        + "证据和计划满足后立即调用工具；一个模型响应只生成一个代码写入调用，源码只能生成一次并直接写入工具参数。"
+        + "当本轮已通过 named tool_choice 指定写工具时，reasoning 最多只写一句抽象目标，"
+        + "禁止代码围栏、源码、伪代码、diff 和 old/new/content/replacements 草稿，直接输出指定工具参数。"
         + "写入前不进行代码级自检；写入后使用真实验证工具检查，并且只根据真实失败修复。";
   }
 
@@ -194,25 +196,26 @@ public final class CodeAgentPreset {
         + (hasQualityReview
             ? "\nrecommended_next_action=quality_review 时，直接依据当前 syntax/browser 证据提交 passed、blocking_gaps、minimal_version_risk；不要读取源码、replan 或传入 path。"
             : "")
-        + "\n同一文件中已经确定的修改优先合并到一次 search_replace.replacements[]；受输出大小或独立锚点限制时，允许在验证前连续执行多次 search_replace。"
+        + "\n一次 search_replace 默认只处理一个连贯结构或直接根因；只有短小、紧密关联、低风险且锚点明确的修改才合并到同一次 replacements[]。"
+        + "禁止为了减少轮次同时重构不相关布局、断点和视觉区域。"
         + (hasQualityReview
             ? "\n只有测试根因时优先修正测试，禁止修改产品迎合错误断言。任何新写入都会使旧 syntax_check、browser_test 和 quality_review 证据失效，必须基于最新 revision 重新验证。"
             : "\n任何新写入都会使旧验证证据失效，必须基于最新 revision 重新验证。");
   }
 
   private static String editEvidenceInstruction(boolean convergent) {
-    String searchReplaceContract = " search_replace.replacements[].old 默认推荐使用当前 revision 中 2～6 行的精确短窗口；整体替换连续函数或语义区段时可以使用更大窗口，但每项都必须来自当前 revision 并唯一命中；重复文本必须分别增加上下文。预检已返回 candidate_windows/preferred_retry_old 时，直接修正整批 replacements，不为同一缺口重新读取。";
+    String searchReplaceContract = " search_replace.replacements[].old 默认推荐使用当前 revision 中 2～6 行的精确短窗口；整体替换连续函数或语义区段时可以使用更大窗口，但每项都必须来自当前 revision 并唯一命中；重复文本必须分别增加上下文。预检已返回 candidate_windows/preferred_retry_old 时，直接修正当前连贯目标的 replacements，不为同一缺口重新读取。";
     if (!convergent) {
-      return "\n修改已有文件前先读取真实内容；同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]，old 必须逐字来自最新读取证据。" + searchReplaceContract;
+      return "\n修改已有文件前先读取真实内容；一次 search_replace 默认只处理一个连贯结构或直接根因，old 必须逐字来自最新读取证据。" + searchReplaceContract;
     }
-    return "\n同一文件多个已确定修改点优先合并到一次 search_replace.replacements[]；old 必须是当前 revision 中逐字准确的真实源码锚点。" + searchReplaceContract;
+    return "\n一次 search_replace 默认只处理一个连贯结构或直接根因；old 必须是当前 revision 中逐字准确的真实源码锚点。" + searchReplaceContract;
   }
 
   private static String readPlanningInstruction(boolean available, boolean convergent) {
     if (!convergent) {
       if (!available) return "";
       return "\n首次接触当前 revision 的普通源码文件时，优先只传 path 使用 read_file 完整读取；已知具体跨区域问题或验证失败证据时，可使用 read_plan.evidence_requirements 一次定位 DOM/CSS/函数/调用链。读取工具是非破坏性的，由你根据上下文自行选择。"
-          + "\nread_plan 的 signals 只填写真实源码定位词；已知主体结构时，把主体符号和待确认事实写在同一 requirement。ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入合并 search_replace；未就绪时先查看 evidence_frontier 与 plan_progress，只有 has_new_information=true 且存在 next_read_plan_delta 时才继续 read_plan，禁止原样重发等价计划或猜测 old。";
+          + "\nread_plan 的 signals 只填写真实源码定位词；已知主体结构时，把主体符号和待确认事实写在同一 requirement。ready_for_edit=true 时可使用 edit_anchor_pack 的真实源码进入当前连贯目标的 search_replace；未就绪时先查看 evidence_frontier 与 plan_progress，只有 has_new_information=true 且存在 next_read_plan_delta 时才继续 read_plan，禁止原样重发等价计划或猜测 old。";
     }
     String multiRegion = available
         ? "\n3. 涉及两个以上不连续区域、调用链、状态流或 DOM/CSS/JS 联动且缺少锚点时，只调用一次 read_plan.evidence_requirements 收集全部证据。"
